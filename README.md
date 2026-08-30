@@ -15,8 +15,9 @@ This step only prepares the reference workspace. It does **not** implement the A
 ## Layout
 
 ```text
-ai-audio-reference/
+/at-ai-story-studio
 ├── references/   # local upstream clones; ignored by the parent repository
 ├── docs/         # future research notes and architecture analysis
 └── README.md
 ```
+
