@@ -36,7 +36,7 @@ import {
   renderConfigSchema,
 } from '@studio/shared';
 import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
-import type { StoryEngine } from './story-engine.js';
+import { renderChapterGenerationPrompt, type StoryEngine } from './story-engine.js';
 
 export type StudioContext = {
   database: DatabaseHandle;
@@ -198,7 +198,8 @@ export class StudioService {
       `story-chapter:${planItemId}`,
       'GENERATE_CHAPTER',
       planItemId,
-      fingerprint({ operation: 'CHAPTER', projectId, planId: item.planId, planItem: item.item }),
+      renderChapterGenerationPrompt(this.story, this.chapters, projectId, item.item)
+        .inputFingerprint,
     );
     return { executionId, jobId: this.workflow.createJob('GENERATE_CHAPTER', planItemId, stepId) };
   }

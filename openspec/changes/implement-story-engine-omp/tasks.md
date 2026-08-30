@@ -60,7 +60,7 @@
 - [x] 8.2 Add database/workflow tests for revision lineage, current-pointer promotion, scoped invalidation, manual-edit conflict, independent summary retry, cancellation, lease recovery, and restart recovery; verify completed expensive units are not regenerated.
 - [x] 8.3 Add protocol/OMP-host integration tests for model-unavailable, tool restriction, redaction, timeout, cancellation, malformed response, provider failure, host exit, session disposal, and bounded diagnostics; verify no secret crosses persistence or logs.
 - [x] 8.4 Add an end-to-end fake-agent smoke path for idea settings -> blueprint -> plans -> chapter 1/2/3 -> manual edit -> explicit TTS, and verify no automatic media workflow appears after Story generation.
-- [ ] 8.5 Run the real OMP-backed three-chapter smoke path with supported authentication/model configuration, including worker restart between chapters and explicit TTS for one generated chapter; verify the observed result and record safe diagnostics.
+- [x] 8.5 Run the real OMP-backed three-chapter smoke path with supported authentication/model configuration, including worker restart between chapters and explicit TTS for one generated chapter; verify the observed result and record safe diagnostics.
 - [x] 8.6 Exercise context sizing for 50, 100, and 200 planned chapters and verify bounded context construction, compact summaries/threads, no full-history prompt, and no vector/embedding dependency.
 
 ## 9. Documentation and Release Gate

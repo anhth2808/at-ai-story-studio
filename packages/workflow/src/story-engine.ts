@@ -41,6 +41,53 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Story generation failed';
 }
 
+export function buildChapterGenerationContext(
+  story: StoryRepository,
+  chaptersRepository: ChapterRepository,
+  projectId: Id,
+  planItem: ChapterPlanItem,
+  instructions: string[] = [],
+): BoundedGenerationContext {
+  const blueprint = story.getBlueprint(projectId)?.blueprint ?? null;
+  const chapters = chaptersRepository.list(projectId);
+  const summaries = story.getSummaries(projectId).flatMap((summary) => {
+    const chapter = chapters.find((item) => item.id === summary.chapterId);
+    return chapter && chapter.number < planItem.chapterNumber
+      ? [{ chapterNumber: chapter.number, revision: summary.revision, summary: summary.summary }]
+      : [];
+  });
+  const summarizedChapterNumbers = new Set(summaries.map((summary) => summary.chapterNumber));
+  const missingContext = chapters
+    .filter(
+      (chapter) =>
+        chapter.number < planItem.chapterNumber && !summarizedChapterNumbers.has(chapter.number),
+    )
+    .map((chapter) => `summary:chapter-${chapter.number}`);
+  const openThreads = story.getThreads(projectId).filter((thread) => thread.status === 'OPEN');
+  return compileGenerationContext({
+    blueprint,
+    selectedCharacterIds: planItem.characterIds,
+    planItem,
+    priorSummaries: summaries,
+    missingContext,
+    openThreads,
+    relevantFacts: blueprint?.continuityConstraints ?? [],
+    instructions,
+    budget: story.getSettings(projectId)?.generation.contextBudget ?? 5_000,
+  });
+}
+
+export function renderChapterGenerationPrompt(
+  story: StoryRepository,
+  chaptersRepository: ChapterRepository,
+  projectId: Id,
+  planItem: ChapterPlanItem,
+): StoryPrompt {
+  return renderChapterPrompt(
+    buildChapterGenerationContext(story, chaptersRepository, projectId, planItem),
+    planItem,
+  );
+}
 export class StoryEngine {
   readonly story: StoryRepository;
   readonly chapters: ChapterRepository;
@@ -249,35 +296,13 @@ export class StoryEngine {
     planItem: ChapterPlanItem,
     instructions: string[] = [],
   ): BoundedGenerationContext {
-    const blueprint = this.story.getBlueprint(projectId)?.blueprint ?? null;
-    const chapters = this.chapters.list(projectId);
-    const summaries = this.story.getSummaries(projectId).flatMap((summary) => {
-      const chapter = chapters.find((item) => item.id === summary.chapterId);
-      return chapter && chapter.number < planItem.chapterNumber
-        ? [{ chapterNumber: chapter.number, revision: summary.revision, summary: summary.summary }]
-        : [];
-    });
-    const summarizedChapterNumbers = new Set(summaries.map((summary) => summary.chapterNumber));
-    const missingContext = chapters
-      .filter(
-        (chapter) =>
-          chapter.number < planItem.chapterNumber && !summarizedChapterNumbers.has(chapter.number),
-      )
-      .map((chapter) => `summary:chapter-${chapter.number}`);
-    const openThreads = this.story
-      .getThreads(projectId)
-      .filter((thread) => thread.status === 'OPEN');
-    return compileGenerationContext({
-      blueprint,
-      selectedCharacterIds: planItem.characterIds,
+    return buildChapterGenerationContext(
+      this.story,
+      this.chapters,
+      projectId,
       planItem,
-      priorSummaries: summaries,
-      missingContext,
-      openThreads,
-      relevantFacts: blueprint?.continuityConstraints ?? [],
       instructions,
-      budget: this.story.getSettings(projectId)?.generation.contextBudget ?? 5_000,
-    });
+    );
   }
 
   private validateChapterEnvelope(

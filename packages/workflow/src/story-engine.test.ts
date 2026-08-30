@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { createDatabase, migrateDatabase } from '@studio/database';
 import { ProcessRunner } from '@studio/media';
 import type { AiAgent, AiAgentRequest, AiAgentResult } from './omp-agent.js';
-import { StoryEngine } from './story-engine.js';
+import { StoryEngine, renderChapterGenerationPrompt } from './story-engine.js';
 import { StudioService } from './index.js';
 
 const settings = {
@@ -174,6 +174,26 @@ describe('Story Engine', () => {
     expect(database.sqlite.prepare('SELECT COUNT(*) as count FROM jobs').get()).toMatchObject({
       count: tts.jobIds.length,
     });
+    database.sqlite.close();
+  });
+
+  it('stores the exact bounded chapter prompt fingerprint for the worker guard', async () => {
+    const { database, engine, service } = await setup();
+    engine.saveSettings('project', settings);
+    await engine.generateBlueprint('project');
+    await engine.generatePlans('project');
+    const scheduled = service.scheduleStoryChapter('project', 'chapter-1');
+    const row = database.sqlite
+      .prepare('SELECT input_fingerprint as inputFingerprint FROM workflow_steps WHERE execution_id=?')
+      .get(scheduled.executionId) as { inputFingerprint: string };
+    expect(row.inputFingerprint).toBe(
+      renderChapterGenerationPrompt(
+        engine.story,
+        engine.chapters,
+        'project',
+        planItem,
+      ).inputFingerprint,
+    );
     database.sqlite.close();
   });
 

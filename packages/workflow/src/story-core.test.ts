@@ -46,6 +46,7 @@ describe('Story Core prompt contracts', () => {
     expect(first.inputFingerprint).toBe(second.inputFingerprint);
     expect(first.promptVersion).toBe('story-blueprint-v1');
     expect(first.systemPrompt).toContain('JSON object only');
+    expect(first.systemPrompt).toContain('premise string');
     expect(first.userPrompt).toContain('[TRUSTED_INSTRUCTIONS]');
     expect(first.userPrompt).toContain('[UNTRUSTED_STORY_DATA]');
     expect(renderChapterPlansPrompt(settings, blueprint).inputFingerprint).not.toBe(

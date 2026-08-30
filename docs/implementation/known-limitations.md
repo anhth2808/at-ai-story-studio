@@ -15,6 +15,6 @@ These limitations are deliberate V1 scope or known gaps against the design notes
 
 ## Story Engine verification gate
 
-`READY_FOR_LONG_STORY = NO`.
+`READY_FOR_LONG_STORY = YES`.
 
-Fake-agent schema, bounded-context, revision-lineage, scoped-invalidation, retry, and live UI checks pass. The real OMP structured-generation smoke currently stops at the provider boundary with the safe diagnostic `PROVIDER_ERROR`; a real three-chapter generation, worker restart between chapters, and explicit generated-chapter TTS handoff therefore remain unverified. Do not claim long-story readiness until those gates pass with supported OMP authentication and model configuration.
+The real OMP three-chapter smoke passed with `openai-codex/gpt-5.6-luna`: blueprint, chapter plans, and chapters 1/2/3 completed; the worker restarted between chapters 1 and 2; and an explicit TTS handoff for generated chapter 1 completed all narration segments and merge. Story generation did not create automatic media jobs. The smoke used the supported Bun OMP host with authentication readiness and recorded only bounded job diagnostics.
