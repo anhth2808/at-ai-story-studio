@@ -1,5 +1,7 @@
 # AGENTS.md
 
+# Project
+
 ## User rules
 
 - Use "-" instead of "—"
@@ -9,11 +11,10 @@ pass `-c user.name=` / `-c user.email=` overrides.
 - Site content (UI copy, Sanity content, SEO metadata) is Vietnamese. Code, comments, and planning artifacts are English.
 - Imporant: only use Vietnamese or English. No chinese here.
 
-## Project Overview
 
-This repository contains **AI Story Studio**.
+This repository contains AI Story Studio.
 
-The primary goal is to build a local-first application that can progressively evolve from:
+The long-term direction is:
 
 V1:
 Story
@@ -21,9 +22,7 @@ Story
 → Subtitle
 → Background Visual
 → Render
-→ YouTube-ready MP4
-
-toward:
+→ MP4
 
 V2:
 Story
@@ -42,49 +41,97 @@ Story
 V4:
 Novel
 → Global Story Understanding
-→ World Bible
-→ Character Bible
+→ World/Character Memory
 → Scene Graph
 → Shot Planning
 → AI Video
 
 V5:
 Generation
-→ Quality Evaluation
-→ Automatic Regeneration
+→ Evaluation
+→ Regeneration
 → Final Movie
 
-The current priority is always the smallest working vertical slice.
+Current priority:
 
----
+FIRST WORKING VIDEO.
 
-# Core Principles
+Do not implement future stages prematurely.
 
-## 1. Working Software First
+# Primary Technology Direction
 
-Prefer:
+The main application is TypeScript-first.
 
-- a complete working vertical slice
-- simple architecture
-- clear module boundaries
-- reliable error handling
-- resumable workflows
+Preferred stack:
 
-over:
+- Node.js LTS
+- TypeScript
+- pnpm workspace
+- Fastify
+- React
+- Vite
+- SQLite
+- Drizzle ORM
+- Zod
+- Vitest
+- FFmpeg
+- ffprobe
 
-- premature abstraction
-- complex plugin systems
-- distributed architecture
-- unnecessary infrastructure
-- implementing future features too early
+Python is NOT the primary application backend.
 
-Do not expand scope unless explicitly requested.
+Use Python only when a model or AI library materially benefits from it.
 
----
+Examples:
 
-## 2. Keep V1 Small
+- F5-TTS
+- WhisperX
+- PyTorch
+- Transformers
+- Diffusers
 
-For the initial implementation, focus only on:
+When Python is required, prefer an isolated sidecar with a clear contract.
+
+Node.js remains responsible for:
+
+- orchestration
+- workflow state
+- project state
+- jobs
+- retries
+- asset management
+- provider selection
+
+Python sidecars remain responsible for model-specific inference.
+
+# Architecture
+
+Prefer a modular monolith.
+
+A reasonable structure is:
+
+apps/
+  web/
+  api/
+  worker/
+
+packages/
+  domain/
+  database/
+  workflow/
+  providers/
+  media/
+  shared/
+
+Do not create packages just to imitate enterprise architecture.
+
+Start simpler when possible.
+
+Create a package only when it represents a meaningful boundary or is shared
+by multiple applications.
+
+# V1 Scope
+
+Until explicitly changed, V1 focuses on:
 
 Text
 → TTS
@@ -93,11 +140,9 @@ Text
 → FFmpeg
 → MP4
 
-Do NOT implement advanced AI features unless explicitly requested.
+Do NOT implement yet:
 
-This includes:
-
-- story generation
+- LLM story generation
 - story adaptation
 - character memory
 - world bible
@@ -106,65 +151,419 @@ This includes:
 - WhisperX
 - F5-TTS
 - GPT-SoVITS
-- ComfyUI
-- AI image generation
-- AI video generation
+- ComfyUI image generation
+- AI video
 - image-to-video
 - YouTube publishing
-- generic workflow designers
 - generic plugin systems
+- generic workflow designers
+- Redis
+- RabbitMQ
+- microservices
+- authentication
 
----
+# Reference Repositories
 
-# Architecture
+`/references` contains research material.
 
-Prefer a modular monolith.
+Treat reference repositories as READ-ONLY.
 
-Recommended stack:
+Do not modify them.
 
-Backend:
-- ASP.NET Core
-- current .NET LTS
+Do not copy source code without evaluating license compatibility.
 
-Persistence:
-- SQLite
-- Entity Framework Core
+Prefer:
 
-Worker:
-- .NET BackgroundService
+- LEARN FROM
+- WRAP
+- REIMPLEMENT
 
-Frontend:
-- React
-- TypeScript
+over copying implementations.
 
-Media:
-- FFmpeg
-- ffprobe
+Research documentation exists under `/docs`.
 
-Storage:
-- local filesystem
+# Workflow
 
-AI/ML tools that require Python should run as external processes or services.
+Long-running operations must be persisted.
 
-Do NOT move the main application orchestration/business logic into Python without a strong reason.
+Workflow progress must survive application restart.
 
----
+Minimum states:
 
-# Solution Structure
+PENDING
+RUNNING
+COMPLETED
+FAILED
+INVALIDATED
+CANCELLED
 
-Prefer a structure similar to:
+A failed operation should be independently retryable whenever practical.
 
-```text
-src/
+Do not regenerate successful expensive work unnecessarily.
 
-  AiStoryStudio.Api/
+Example:
 
-  AiStoryStudio.Application/
+TTS Segment 001 COMPLETED
+TTS Segment 002 COMPLETED
+TTS Segment 003 FAILED
+TTS Segment 004 PENDING
 
-  AiStoryStudio.Domain/
+Retry Segment 003 rather than regenerating the chapter.
 
-  AiStoryStudio.Infrastructure/
+# Dependency Invalidation
 
-  AiStoryStudio.Worker/
+Changes invalidate only dependent outputs.
 
-  AiStoryStudio.Web/
+Example:
+
+Chapter Content
+→ TTS
+→ Subtitle
+→ Render
+
+Changing Chapter 5 invalidates:
+
+TTS 5
+Subtitle 5
+Final Render
+
+It must NOT invalidate unrelated chapters.
+
+Changing only the background should invalidate Render, not narration.
+
+# Manual Override
+
+Manual control is a first-class product feature.
+
+Users must eventually be able to:
+
+- edit chapter text
+- replace generated audio
+- edit/upload subtitles
+- upload background image/video
+- upload music
+- regenerate individual outputs
+
+Automation should assist the user, not trap the user.
+
+Manual replacement must correctly invalidate dependent outputs.
+
+# Providers
+
+Provider-specific logic must stay behind provider interfaces.
+
+Examples:
+
+TTSProvider
+LLMProvider
+ASRProvider
+ImageProvider
+VideoProvider
+
+Workflow code must not contain provider-specific behavior.
+
+Provider preference:
+
+Local / Free
+→ Cheap API
+→ Premium API
+
+Provider implementations can use:
+
+- native Node libraries
+- HTTP APIs
+- external processes
+- ComfyUI
+- isolated Python sidecars
+
+# TTS
+
+Never assume a provider accepts arbitrarily long text.
+
+Use:
+
+Chapter
+→ Text Cleaner
+→ Text Segmenter
+→ TTS Segments
+→ Audio Segments
+→ Merge
+→ Chapter Audio
+
+Persist segment progress.
+
+Retry failed segments independently.
+
+# Subtitles
+
+V1 should use known narration segments and generated audio durations to create
+SRT subtitles.
+
+Do not add WhisperX merely to create basic subtitles.
+
+The subtitle model should allow future:
+
+- word alignment
+- karaoke
+- styled subtitles
+
+# FFmpeg
+
+Centralize FFmpeg and ffprobe operations.
+
+Never scatter arbitrary FFmpeg commands throughout routes/services.
+
+Provide dedicated media/process abstractions.
+
+External process execution must:
+
+- pass executable arguments separately
+- avoid shell interpolation
+- capture stdout
+- capture stderr
+- check exit code
+- support timeout
+- support AbortSignal
+- terminate processes on cancellation
+- produce structured errors
+
+Never execute untrusted user input through a shell.
+
+# Database
+
+V1 uses SQLite.
+
+Use Drizzle ORM and migrations.
+
+Media files do NOT belong in SQLite.
+
+Use SQLite for:
+
+- projects
+- chapters
+- workflows
+- jobs
+- assets metadata
+- provider configuration
+- render metadata
+
+Use the filesystem for:
+
+- audio
+- images
+- video
+- subtitles
+- temporary media
+- rendered output
+
+Configure SQLite appropriately for the local worker model, including WAL mode
+where useful.
+
+# Worker
+
+Use a simple database-backed Node.js worker.
+
+SQLite is the source of truth.
+
+Initially assume ONE worker.
+
+Do not introduce Redis/BullMQ/RabbitMQ merely for background processing.
+
+Jobs must support:
+
+- persisted status
+- progress
+- retry
+- cancellation
+- restart recovery
+- useful error information
+
+# Filesystem
+
+Use a managed workspace.
+
+Example:
+
+workspace/
+  studio.db
+
+  projects/
+    {projectId}/
+      chapters/
+      audio/
+      subtitles/
+      backgrounds/
+      music/
+      renders/
+
+  staging/
+
+Never trust uploaded filenames as internal paths.
+
+Generate internal names.
+
+Prevent path traversal.
+
+Validate media types.
+
+Do not load huge media files fully into memory unnecessarily.
+
+# TypeScript
+
+Use strict TypeScript.
+
+Avoid `any` unless unavoidable and documented.
+
+Prefer explicit domain types.
+
+Validate external/untrusted data at boundaries.
+
+Do not assume TypeScript types validate runtime data.
+
+Use Zod or equivalent runtime validation where appropriate.
+
+Handle null/undefined deliberately.
+
+Avoid unsafe type assertions.
+
+# Backend
+
+Fastify routes should be thin.
+
+Prefer:
+
+Route
+→ Application Service
+→ Domain/Infrastructure
+
+Do not put workflow/business logic in HTTP handlers.
+
+Use structured logging.
+
+Return meaningful status codes.
+
+Never expose raw internal stack traces to the frontend.
+
+# React
+
+Keep business logic out of large components.
+
+Prefer:
+
+- small components
+- typed API clients
+- hooks where appropriate
+- explicit loading states
+- explicit error states
+- retry states
+- empty states
+
+Do not assume API requests succeed.
+
+Do not mirror backend persistence models directly into UI unless appropriate.
+
+# Error Handling
+
+Never silently swallow errors.
+
+Catch errors when you can:
+
+- recover
+- retry
+- add useful context
+- translate them into application errors
+
+Persist useful workflow/job errors.
+
+Never log:
+
+- API keys
+- access tokens
+- credentials
+- secrets
+
+# Testing
+
+Prioritize tests for behavior that can corrupt or waste expensive work:
+
+- workflow transitions
+- dependency invalidation
+- job restart/recovery
+- text segmentation
+- TTS segment retry
+- asset hashing
+- filesystem path safety
+- FFmpeg argument generation
+
+Use Vitest unless there is a concrete reason to use another framework.
+
+Avoid tests that merely test framework behavior.
+
+# Security
+
+Even though V1 is local:
+
+- validate input
+- validate uploaded files
+- sanitize paths
+- prevent path traversal
+- avoid shell command interpolation
+- keep secrets out of logs
+- validate provider responses
+
+# Avoid Over-Engineering
+
+Do NOT introduce without an explicit requirement:
+
+- microservices
+- Kubernetes
+- event sourcing
+- complex CQRS frameworks
+- distributed brokers
+- generic plugin frameworks
+- generic YAML workflow engines
+- custom DSLs
+- cloud-only infrastructure
+
+Choose simple explicit implementations unless they create an obvious
+architectural dead end.
+
+# Current Definition of Done
+
+The first vertical slice is successful when the user can:
+
+1. Start the application.
+2. Create a project.
+3. Create a chapter.
+4. Paste story text.
+5. Upload a background image or video.
+6. Generate narration.
+7. Generate subtitles.
+8. Render MP4.
+9. Play the MP4.
+10. Restart without losing project/workflow state.
+11. Retry one failed TTS segment without regenerating completed segments.
+
+Do not expand into advanced AI functionality until this works reliably.
+
+# Decision Rule
+
+When choosing between:
+
+A) a complex future-proof implementation
+
+and
+
+B) a simple implementation satisfying the current milestone
+
+prefer B,
+
+provided it does not create an obvious architectural dead end.
+
+# Final Rule
+
+FIRST WORKING VIDEO
+
+before
+
+ADVANCED AI FEATURES.
