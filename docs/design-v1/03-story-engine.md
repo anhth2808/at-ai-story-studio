@@ -4,6 +4,24 @@
 
 The Story Engine transforms user intent into reviewable structured story state and then into chapter revisions. It owns prompts/templates as versioned resources later, but not provider selection, retries, queueing, or media.
 
+## AI execution boundary
+
+The Story Engine depends on a thin application-owned `AiAgent` contract. Its primary implementation is `OmpAgent`, which delegates LLM and agent execution to OMP SDK:
+
+```text
+Story feature
+  -> AiAgent
+    -> OmpAgent
+      -> OMP SDK
+        -> configured model/provider
+```
+
+Story features own deterministic input compilation, feature instructions, Zod output schemas, and acceptance rules. They do not import OMP SDK session, model, event, tool, authentication, or error types. `OmpAgent` owns SDK configuration, session lifecycle, model selection, deadline and cancellation translation, safe observability, and error normalization.
+
+The persisted worker remains authoritative for attempt state, retries, dependencies, invalidation, input fingerprints, assets, and result commits. OMP session history is not project or workflow state. Each state-changing structured result is validated with the feature's Zod schema before it enters the application or domain layer; invalid, incomplete, or truncated output fails the attempt.
+
+These intelligent story capabilities remain later work. They do not expand the current FIRST WORKING VIDEO milestone. OMP does not replace TTS, ASR/WhisperX, FFmpeg/ffprobe, ComfyUI, image/video APIs, filesystem, database, or job execution.
+
 ## Generate Story mode
 
 1. Normalize idea, language, genre, chapter target, and writing instructions.
@@ -39,7 +57,7 @@ Chapter generation consumes `SourceStoryAnalysis` + accepted adaptation blueprin
 
 ## Bounded chapter context
 
-`GenerateChapter(27)` calls a deterministic context compiler before the LLM provider:
+`GenerateChapter(27)` calls a deterministic context compiler before invoking `AiAgent`:
 
 ```text
 fixed generation policy
@@ -50,7 +68,7 @@ fixed generation policy
 + older summary only when referenced by plan/event
 + active/unresolved important events
 + user writing instructions
-+ output schema/constraints
++ feature-owned output schema/constraints
 ```
 
 ### Selection algorithm
@@ -68,12 +86,13 @@ No embeddings/vector database is required. Selection is relational and explainab
 
 ## Post-generation processing
 
-- Validate structural output and non-empty body.
+- Require the OMP-backed AI boundary to return a terminal result and validate all state-changing structured output with the feature-owned Zod schema.
+- Treat invalid JSON, schema mismatch, missing terminal output, truncation, content-policy refusal, deadline expiry, or cancellation as normalized failed attempts rather than accepted partial state.
 - Apply only mechanical text cleaning after the chapter is accepted; do not let cleaning change meaning.
 - Generate a concise factual summary: starting state, key actions, revelations, ending state.
 - Ask for event transition proposals keyed by known event IDs. Reject unknown IDs; user or deterministic rules accept state changes.
 - Extract continuity warnings separately; warnings do not mutate facts.
-- Store provider/model, prompt-template version, context hash, finish reason, usage/cost data when available.
+- Store the effective OMP/model/provider configuration identity, prompt-template version, context hash, finish reason, usage/cost data when available, and safe trace metadata.
 
 ## Regeneration and edits
 

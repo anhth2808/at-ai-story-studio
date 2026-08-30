@@ -4,7 +4,7 @@
 
 | Pattern | Best reference | Evidence | What to retain | Limitation |
 |---|---|---|---|---|
-| Provider/adapter registry | MoneyPrinterTurbo + NarratoAI | `MoneyPrinterTurbo/app/models/llm_provider.py:7-34,187-424`; `NarratoAI/app/services/llm/manager.py:28-38,92-225` | Capability metadata, explicit registration, cached instances | Provider identity/config is mixed with UI and global process state |
+| AI execution boundary | OMP SDK + lessons from MoneyPrinterTurbo/NarratoAI | OMP SDK; reference managers at the application/provider seam | Thin `AiAgent` contract, structured results, explicit configuration, scoped attempts | OMP defaults require restriction; reference provider identity/config is mixed with UI and global state |
 | Pipeline decomposition | pyvideotrans | `videotrans/task/trans_create.py:25-53`; stage mixins | Small named stages and explicit contracts | Hard-coded mutable mixin graph |
 | Workflow engine/resume | story-claw + ShortGPT | `story-claw/runner/solo.ts:63-103,125-277`; `ShortGPT/shortGPT/engine/abstract_content_engine.py:60-75` | Stage records, artifact gates, skip/retry semantics | Files/JSON are not transactional or multi-user safe |
 | Database-backed jobs | MoneyPrinter | `Backend/models.py:20-79`; `worker.py:35-76` | Job/event/status/cancel/attempt fields | Current worker does not implement retries/resume despite attempt columns |
@@ -17,9 +17,9 @@
 | Parallel processing | story-claw | global semaphores `render.ts:796-819`; scene `Promise.all` in `solo.ts:217-229` | Global, not per-scene, semaphores; dependency events | Failures are mostly logged/raised without centralized retry queue |
 | Timeline/render | story-claw + NarratoAI | `render.ts:1724-1798`; `generate_video.py:1045-1751` | Probe real durations, normalize media, progress callbacks | Timeline is implicit in files/options rather than a durable IR |
 
-## Provider / Adapter pattern
+## AI execution and specialized provider patterns
 
-MoneyPrinterTurbo's frozen `LLMProviderSpec` describes endpoint, key, model, extra fields, and adapter ID. NarratoAI separates `VisionModelProvider` and `TextModelProvider`, uses explicit registration, and caches instances. The better future pattern combines both: a typed provider manifest with capabilities (`streaming`, `word_timestamps`, `image_references`, `local`, `gpu_class`), a factory, and scoped instance cache. Do not copy numeric provider IDs from pyvideotrans; those IDs are UI/config constants.
+MoneyPrinterTurbo's `LLMProviderSpec` and NarratoAI's provider managers demonstrate why application features need a stable seam, explicit configuration, scoped instances, and normalized results. AI Story Studio should learn from those boundaries but not reproduce their LLM provider registries. Intelligent features call a thin `AiAgent`; `OmpAgent` delegates provider/model execution to OMP SDK. TTS, ASR, image, video, translation, ComfyUI, and FFmpeg retain specialized contracts with capability metadata such as `word_timestamps`, `image_references`, `local`, and `gpu_class`. Do not copy numeric provider IDs from pyvideotrans; those IDs are UI/config constants.
 
 ## Pipeline and workflow engine
 
@@ -43,4 +43,4 @@ ShortGPT JSON editing steps and story-claw ComfyUI workflow templates demonstrat
 
 ## Bottom line
 
-Best overall architecture seed: story-claw's staged story workflow + pyvideotrans's stage queue/resource thinking + MoneyPrinter's job API/database + NarratoAI's provider manager/cache + whisperX's timing contract. Reimplement the seams as one durable, typed system.
+Best overall architecture seed: story-claw's staged story workflow + pyvideotrans's stage queue/resource thinking + MoneyPrinter's job API/database + OMP SDK behind a thin `AiAgent` boundary + NarratoAI's cached analysis lessons + whisperX's timing contract. Reimplement the application seams as one durable, typed system without rebuilding OMP's LLM provider layer.

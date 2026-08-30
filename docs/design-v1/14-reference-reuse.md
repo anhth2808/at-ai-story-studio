@@ -60,8 +60,8 @@ Research: [`docs/projects/MoneyPrinter.md`](../projects/MoneyPrinter.md).
 
 Research: [`docs/projects/NarratoAI.md`](../projects/NarratoAI.md).
 
-- **LEARN FROM:** explicit LLM manager/provider façade, cached/batched analysis artifacts, progress callbacks, subtitle/audio composition, and robust FFmpeg fallbacks.
-- **REIMPLEMENT:** normalized provider contracts, persisted progress, and neutral timeline; remove Streamlit/global task coupling.
+- **LEARN FROM:** separation between application features and LLM execution, cached/batched analysis artifacts, progress callbacks, subtitle/audio composition, and robust FFmpeg fallbacks.
+- **REIMPLEMENT:** the thin `AiAgent` boundary backed primarily by OMP SDK, specialized media provider contracts, persisted progress, and neutral timeline; do not copy the reference's provider façade or Streamlit/global task coupling.
 - **OPTIONAL:** future imported-video understanding/documentary workflow and SFX/BGM policies.
 - **DO NOT USE:** Streamlit/Jianying-specific UI/export as core product behavior.
 

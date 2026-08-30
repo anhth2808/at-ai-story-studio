@@ -83,8 +83,8 @@ For 100 chapters use virtualized/paginated list and batch selection; do not load
 ### Settings
 
 - workspace path/storage and cleanup;
-- provider configurations grouped LLM/TTS/ASR/Image/Video/Translation;
-- locality/cost badge, secret setup, health/version/capabilities, test button;
+- OMP model/provider execution configurations for intelligent features, separate from TTS/ASR/Image/Video/Translation provider configurations;
+- locality/cost badge, effective model/provider, secret setup, health/version/capabilities, and test action;
 - defaults by language/project type;
 - FFmpeg path/version/encoders;
 - worker concurrency/resource lanes and logs.

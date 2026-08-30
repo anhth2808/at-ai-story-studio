@@ -4,16 +4,16 @@ The recommended integration boundary is an adapter around a stable studio contra
 
 | Component | Existing implementation | Generic enough? | Dependencies | Decision |
 |---|---|---|---|---|
-| `LLMProvider` | MoneyPrinterTurbo `app/models/llm_provider.py:7-34,187-424` + `app/services/llm.py`; NarratoAI `app/services/llm/manager.py:15-225`; story-claw `agent.ts:28-177` | Registry ideas yes; code is app/config coupled | SDKs, endpoint config, retries, structured output | **Wrap/reimplement contract**; borrow capability registry and response normalization |
-| `VisionProvider` | NarratoAI `frame_analysis_service.py:97-179`; `llm/unified_service.py` | Yes at batch-image analysis boundary | OpenAI-compatible/TwelveLabs adapters, image files | **Wrap** with batch, cache, token/cost metadata |
+| `AiAgent` / `OmpAgent` | OMP SDK plus execution lessons from MoneyPrinterTurbo, NarratoAI, and story-claw | Thin application contract yes; reference registries are app/config coupled | OMP SDK, feature schemas, deadlines, observability | **Use OMP SDK behind one thin adapter**; do not reimplement model/provider families |
+| `VisionProvider` | NarratoAI `frame_analysis_service.py:97-179`; `llm/unified_service.py` | Specialized batch-image boundary yes | Vision/image APIs, image files | **Wrap as specialized media analysis when needed**; use OMP for agentic vision tasks it supports |
 | `TTSProvider` | edge-tts `Communicate`; pyvideotrans `tts/__init__.py:212-233`; MoneyPrinterTurbo `voice.py:455-553`; ShortGPT `VoiceModule` | Interface concept yes; registries are UI-specific | Provider SDK/API, audio tools, timing | **Reimplement typed interface; wrap providers** |
 | `VoiceCloneProvider` | F5 `infer/utils_infer.py:298-458`; GPT-SoVITS `TTS.py:421-475,997-1085`; pyvideotrans clone paths | Model-specific, not universal | GPU, checkpoints, reference audio/text | **Wrap** behind profile/reference contract; never assume every TTS supports clone |
 | `ASRProvider` | whisperX `asr.py:315-442`, `transcribe.py:124-238`; pyvideotrans recognition registry | Yes | Torch/CTranslate2, VAD, HF models/tokens | **Directly integrate whisperX library under BSD; wrap other providers** |
 | `AlignmentProvider` | whisperX `alignment.py:80-424` | Yes for segment→word timing | Language alignment models | **Directly integrate/wrap** |
 | `DiarizationProvider` | whisperX `diarize.py`; pyvideotrans diarization stage | Yes as optional stage | pyannote/HF token, GPU | **Wrap** and make speaker uncertainty explicit |
 | `TranslationProvider` | pyvideotrans `translator/__init__.py`, `_runner.py`; NarratoAI `subtitle_translator.py` | Registry idea yes | Many cloud/local engines | **Reimplement adapter layer** with batch/quality/cost metadata |
-| `ScenePlanner` | story-claw `runner/pipeline.ts:518-793` | Structured workflow yes; prompt logic domain-specific | Agent runtime, filesystem, LLM | **Reimplement** around typed scene graph and validation |
-| `ShotPlanner` | story-claw `runner/pipeline.ts:810-1024` | JSONL group/panel contract yes | LLM, resource roster, SFX catalog | **Reimplement/wrap concept**; add deterministic schema validators |
+| `ScenePlanner` | story-claw `runner/pipeline.ts:518-793` | Structured workflow yes; prompt logic domain-specific | OMP SDK through `AiAgent`, filesystem | **Reimplement** around typed scene graph and Zod validation |
+| `ShotPlanner` | story-claw `runner/pipeline.ts:810-1024` | JSONL group/panel contract yes | OMP SDK through `AiAgent`, resource roster, SFX catalog | **Reimplement concept**; add deterministic schema validators |
 | `ImageProvider` | story-claw `runner/render.ts:612-678`; helpers in `utils/` | Yes | GPT/Gemini APIs, reference files | **Wrap** with reference images, safety retry, seed/model metadata |
 | `VideoProvider` | story-claw `render.ts:687-794` ComfyUI; MoneyPrinterTurbo `material.py:699-989,1362-1472` | Yes at submit/poll/download boundary | ComfyUI or cloud APIs, model workflows | **Wrap** with asynchronous job contract and duration limits |
 | `AssetManager` | story-claw `utils/paths.ts`, `render.ts:338-591`; MoneyPrinterTurbo materials/cache | Concepts yes | Filesystem, metadata formats | **Reimplement** content-addressed assets plus reference lineage |
@@ -32,7 +32,7 @@ MoneyPrinterTurbo, NarratoAI, MoneyPrinter, ShortGPT, F5-TTS, GPT-SoVITS, and st
 ## Recommended studio contracts
 
 ```text
-LLMProvider.generate(request) -> StructuredResponse + usage + raw_artifact
+AiAgent.execute(request, zod_schema) -> ValidatedFeatureResult + safe execution metadata
 TTSProvider.synthesize(text, voice_profile) -> AudioArtifact + timing_events
 ASRProvider.transcribe(audio) -> segments + words + speakers?
 ImageProvider.generate(prompt, references, constraints) -> ImageArtifact
@@ -42,4 +42,4 @@ TimelineEngine.build(scenes, audio, cues, assets) -> TimelineIR
 RenderEngine.render(TimelineIR) -> RenderArtifact + probe
 ```
 
-Every result should carry provider/model/version, input hashes, seed/parameters, duration, cost estimate, warnings, and cache key. That metadata is missing or inconsistent in the references and is required for reproducibility and regeneration.
+Every AI and specialized-provider result should carry the effective model/provider/version or execution-configuration identity, input hashes, seed/parameters when applicable, duration, cost estimate, warnings, and cache key. That metadata is missing or inconsistent in the references and is required for reproducibility and regeneration. OMP SDK types and raw provider responses do not cross into domain state.

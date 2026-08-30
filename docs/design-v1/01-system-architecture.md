@@ -2,13 +2,14 @@
 
 ## Architectural style
 
-A TypeScript-first modular monolith in one pnpm workspace with three application run modes:
+A TypeScript-first modular monolith in one pnpm workspace with three primary application run modes:
 
 - **Web application:** React + TypeScript built by Vite.
 - **API application:** Fastify composition root exposing thin HTTP routes.
 - **Worker application:** a separately runnable Node.js process using the same application, workflow, database, provider, and media modules as the API.
+- **OMP agent host:** an optional isolated Bun process, added only when an intelligent feature enters scope, that runs `OmpAgent` and OMP SDK without owning durable application state.
 
-V1 may start all three with one development command, but the API and worker remain separate processes. This is not a microservice split: there is one repository, one SQLite database, one managed filesystem authority, one local deployment, and direct TypeScript module contracts. Keeping the worker separate prevents long FFmpeg or future model work from blocking API lifecycle and lets it restart independently.
+V1 may start the three primary applications with one development command, but the API and worker remain separate processes. The optional OMP host is an integration runtime, not a service boundary. There is one repository, one SQLite database, one managed filesystem authority, one local deployment, and direct TypeScript contracts. Keeping the worker separate prevents long FFmpeg or future model work from blocking API lifecycle and lets it restart independently.
 
 ```mermaid
 flowchart TB
@@ -18,7 +19,10 @@ flowchart TB
   FLOW --> APP
   APP --> STORY[Story module]
   APP --> ASSET[Asset module]
-  FLOW --> PROV[Provider abstractions]
+  STORY --> AI[Thin AiAgent contract]
+  AI --> OMPHOST[OmpAgent in isolated Bun host]
+  OMPHOST --> OMPSDK[OMP SDK]
+  FLOW --> PROV[Specialized provider abstractions]
   FLOW --> MEDIA[Media abstractions]
   STORY --> DB[(SQLite via Drizzle)]
   FLOW --> DB
@@ -40,17 +44,18 @@ apps/
   web/                         React + Vite browser application
   api/                         Fastify HTTP composition root
   worker/                      persisted workflow worker entry point
+  omp-agent/                   optional Bun-hosted OMP SDK adapter
 
 packages/
   domain/                      domain rules and provider-neutral value types
   database/                    Drizzle schema, migrations, repositories
   workflow/                    workflow state machine and execution services
-  providers/                   provider contracts and concrete adapters
+  providers/                   specialized provider contracts plus thin AiAgent/OmpAgent boundary
   media/                       process runner, FFmpeg/ffprobe integration
   shared/                      stable boundary schemas and DTO types only
 ```
 
-This is a target shape, not a requirement to create six packages immediately. `domain`, `database`, and `workflow` have clear ownership. `providers` and `media` isolate volatile external dependencies. `shared` exists only when both browser and server consume stable Zod DTO schemas, enums, identifiers, workflow statuses, or provider identifiers. Merge packages that remain thin or create circular dependencies; do not preserve package count for architectural purity.
+This is a target shape, not a requirement to create every package or the optional OMP host immediately. `domain`, `database`, and `workflow` have clear ownership. `providers` and `media` isolate volatile external dependencies. `shared` exists only when both browser and server consume stable Zod DTO schemas, enums, identifiers, workflow statuses, specialized provider identifiers, or safe OMP execution-configuration identifiers. Merge packages that remain thin or create circular dependencies; do not preserve package count for architectural purity.
 
 Allowed dependency direction:
 
@@ -58,7 +63,8 @@ Allowed dependency direction:
 apps/web -> shared
 apps/api -> application/domain + database + workflow + providers + media + shared
 apps/worker -> application/domain + database + workflow + providers + media
-workflow -> domain + provider/media ports
+apps/omp-agent -> providers/OmpAgent + OMP SDK
+workflow -> domain + AiAgent and specialized provider/media ports
 database/providers/media -> domain or workflow-owned ports
 domain -> no infrastructure or transport package
 ```
@@ -68,9 +74,10 @@ domain -> no infrastructure or transport package
 | Module | Owns | Does not own |
 |---|---|---|
 | Projects | project metadata and current configuration revisions | files, job execution |
-| Story | blueprints, characters, events, plans, chapters, context compiler | provider SDKs, media |
-| Workflow | definitions, executions, steps, dependencies, attempts, invalidation | story semantics, provider-specific retry |
-| Providers | normalized TypeScript contracts, registrations, capability/health metadata, config resolution | workflow scheduling |
+| Story | blueprints, characters, events, plans, chapters, context compiler, feature-owned Zod AI output schemas | OMP SDK types, provider SDKs, media |
+| Workflow | definitions, executions, steps, dependencies, attempts, invalidation | story semantics, OMP/provider-specific retry internals |
+| AI execution | thin `AiAgent` contract, `OmpAgent` translation, restricted OMP lifecycle and observability | workflow state, retries, project persistence, specialized media |
+| Providers | normalized specialized TypeScript contracts, registrations, capability/health metadata, config resolution | LLM provider implementations, workflow scheduling |
 | Assets | immutable asset records, paths, hashes, lineage, current-role pointers, reconciliation | creative generation |
 | Audio | cleaning, segment/chunk manifests, merge plans | specific TTS protocols |
 | Subtitles | cue model, segment timing, SRT serialization | ASR model internals |
@@ -79,7 +86,7 @@ domain -> no infrastructure or transport package
 | Database | Drizzle schema, migrations, transactions, query implementations | domain policy |
 | Process execution | shell-free child process lifecycle, output capture, timeout, cancellation | workflow decisions, raw user commands |
 
-Modules reference IDs and application contracts. Domain types do not reference Drizzle row types, Fastify request objects, HTTP DTOs, Python classes, or FFmpeg arguments.
+Modules reference IDs and application contracts. Domain types do not reference OMP SDK types, Drizzle row types, Fastify request objects, HTTP DTOs, Python classes, or FFmpeg arguments.
 
 ## HTTP boundary
 
@@ -169,21 +176,21 @@ Domain and workflow code request typed media/provider operations. Only media or 
 
 - UTC timestamps; monotonic progress inside one attempt.
 - Optimistic concurrency on user-editable records.
-- Structured logs with project/execution/step/attempt/provider correlation IDs and secret redaction.
-- `AbortSignal` propagates through application, provider, HTTP, and process boundaries.
+- Structured logs with project/execution/step/attempt, specialized provider, and safe effective OMP model/provider correlation IDs plus secret/content redaction.
+- `AbortSignal` propagates through application, OMP, specialized provider, HTTP, and process boundaries.
 - Input fingerprint at every generated step.
-- Provider/config snapshots retained on attempts and assets.
+- Specialized provider/config and OMP execution-configuration snapshots retained on attempts and assets.
 - Content written before a database reference; incomplete files never become current.
 
 ## Evolution seams
 
-`VisualPlan` grows from one background to scenes; scenes gain generated images; timeline clips gain motion/video assets. `GenerationContext` gains world/character memory retrieval. Provider contracts gain image/video implementations. These are module additions and new workflow step types, not service extractions.
+`VisualPlan` grows from one background to scenes; scenes gain generated images; timeline clips gain motion/video assets. `GenerationContext` gains world/character memory retrieval. OMP-backed intelligent operations and specialized image/video provider contracts add new workflow step types without service extraction.
 
-ComfyUI normally remains a separately managed service accessed through its API. Python may be introduced later as a versioned AI sidecar for model ecosystems such as F5-TTS, WhisperX, PyTorch, Transformers, or Diffusers. Node.js continues to own project state, workflow, retries, asset tracking, and orchestration.
+ComfyUI normally remains a separately managed service accessed through its API. Python may be introduced later as a versioned AI sidecar for model ecosystems such as F5-TTS, WhisperX, PyTorch, Transformers, or Diffusers. The current Bun-only OMP SDK runs in the optional isolated `OmpAgent` host. Node.js continues to own project state, workflow, retries, asset tracking, and orchestration.
 
-## Decision: one workspace, three applications
+## Decision: one workspace, three primary applications, optional OMP host
 
-- **Alternatives:** all work in API requests; one Node.js process for API and worker; separate microservices and broker; Python-first backend.
-- **Why:** one TypeScript toolchain maximizes practical language, type, validation, and tooling reuse while independent API and worker processes isolate long jobs without creating service boundaries.
-- **Trade-offs:** package boundaries need discipline; API and worker coordinate through SQLite; Node.js process-tree handling requires platform-specific verification.
-- **Future impact:** a remote worker transport or isolated provider sidecar can replace an adapter later without rewriting story, workflow, or media contracts.
+- **Alternatives:** all work in API requests; one Node.js process for API and worker; separate microservices and broker; Python-first backend; direct OMP SDK imports in Node.js feature code.
+- **Why:** one TypeScript toolchain maximizes practical language, type, validation, and tooling reuse while independent API and worker processes isolate long jobs. The optional Bun host satisfies the current OMP SDK runtime without giving it a service-owned database or workflow.
+- **Trade-offs:** package boundaries need discipline; API and worker coordinate through SQLite; the OMP integration adds a supervised runtime when intelligent features begin; process-tree handling requires platform-specific verification.
+- **Future impact:** OMP can move in-process if it officially supports the approved runtime, and remote worker transport or specialized provider sidecars can replace adapters later, without rewriting story, workflow, or media contracts.

@@ -76,7 +76,7 @@ A single user can create a project, generate a new story or adapt a story they a
 | **M3 — Narration vertical slice** | Text cleaning, caption segments, TTS chunk manifest, first Edge TTS adapter, independent chunk retry, FFmpeg audio merge. | A long chapter becomes playable chapter audio; one failed chunk retries alone. |
 | **M4 — Subtitles** | SRT from known text segments and measured audio durations; subtitle preview/download. | Captions cover the chapter audio with valid monotonic timestamps. |
 | **M5 — Video render** | Timeline builder, uploaded video/image loop, narration/music mix, subtitle burn, FFmpeg progress, ffprobe validation. | A manually authored chapter produces a YouTube-compatible MP4. |
-| **M6 — Story generation** | Ollama first, then OpenAI-compatible LLM adapter; generate/analyze blueprint, characters, plans, chapters, summaries/events. | Chapter 27 can be generated from bounded recorded context. |
+| **M6 - Story generation** | Add the thin `AiAgent` -> `OmpAgent` -> OMP SDK boundary, then generate/analyze blueprint, characters, plans, chapters, summaries, and events through configured OMP models/providers with Zod-validated outputs. | Chapter 27 can be generated from bounded recorded context. |
 | **M7 — Full automation** | Pipeline command from idea/import through every chapter, audio, subtitles, timeline, and final MP4; overview/retry UI. | A new project reaches validated MP4 without manual media assembly and can recover from restart/failure. |
 
 This order proves the risky media and persistence path with manual text before adding nondeterministic LLM behavior. Image generation, voice cloning, ASR alignment, and publishing remain post-V1 options.
