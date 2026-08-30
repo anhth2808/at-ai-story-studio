@@ -4,11 +4,13 @@ import {
   chapterGenerationEnvelopeSchema,
   chapterPlanSchema,
   chapterPlanItemSchema,
+  storyEventSchema,
   chapterSummarySchema,
   generationMetadataSchema,
   storyBlueprintSchema,
   storySettingsSchema,
   storyThreadSchema,
+  threadTransitionSchema,
   type ChapterGenerationEnvelope,
   type ChapterPlanItem,
   type GenerationMetadata,
@@ -16,6 +18,8 @@ import {
   type StoryBlueprintDto,
   type StoryPlanDto,
   type StorySettingsDto,
+  type StoryEvent,
+  type ThreadTransition,
   type StorySummaryDto,
   type StoryThread,
 } from '@studio/shared';
@@ -281,7 +285,7 @@ export class StoryRepository {
   getSummary(chapterId: Id): StorySummaryDto | null {
     const row = this.database.sqlite
       .prepare(
-        'SELECT id,chapter_id as chapterId,chapter_revision as chapterRevision,revision,payload,warnings,metadata,created_at as createdAt FROM story_summary_revisions WHERE chapter_id=? AND is_current=1',
+        'SELECT id,chapter_id as chapterId,chapter_revision as chapterRevision,revision,payload,events,thread_transitions as threadTransitions,warnings,metadata,created_at as createdAt FROM story_summary_revisions WHERE chapter_id=? AND is_current=1',
       )
       .get(chapterId) as
       | {
@@ -290,6 +294,8 @@ export class StoryRepository {
           chapterRevision: number;
           revision: number;
           payload: string;
+          events: string;
+          threadTransitions: string;
           warnings: string;
           metadata: string | null;
           createdAt: string;
@@ -305,6 +311,8 @@ export class StoryRepository {
       chapterRevision: row.chapterRevision,
       revision: row.revision,
       summary: chapterSummarySchema.parse(parseJson(row.payload)),
+      events: storyEventSchema.array().parse(parseJson(row.events)),
+      threadTransitions: threadTransitionSchema.array().parse(parseJson(row.threadTransitions)),
       threads: this.getThreads(chapter?.projectId),
       warnings: JSON.parse(row.warnings) as string[],
       metadata: row.metadata ? safeMetadata(parseJson(row.metadata) as GenerationMetadata) : null,
@@ -330,8 +338,14 @@ export class StoryRepository {
     metadata: GenerationMetadata | null,
     inputFingerprint: string,
     threads: StoryThread[] = [],
+    eventsInput: unknown[] = [],
+    threadTransitionsInput: unknown[] = [],
   ): StorySummaryDto {
     const summary = chapterSummarySchema.parse(summaryInput);
+    const events = eventsInput.map((event) => storyEventSchema.parse(event)) as StoryEvent[];
+    const threadTransitions = threadTransitionsInput.map((transition) =>
+      threadTransitionSchema.parse(transition),
+    ) as ThreadTransition[];
     const current = this.database.sqlite
       .prepare(
         'SELECT COALESCE(MAX(revision),0) as revision FROM story_summary_revisions WHERE chapter_id=?',
@@ -342,7 +356,7 @@ export class StoryRepository {
     this.database.sqlite.transaction(() => {
       this.database.sqlite
         .prepare(
-          'INSERT INTO story_summary_revisions(id,chapter_id,chapter_revision,revision,payload,warnings,metadata,input_fingerprint,status,is_current,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO story_summary_revisions(id,chapter_id,chapter_revision,revision,payload,events,thread_transitions,warnings,metadata,input_fingerprint,status,is_current,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           id,
@@ -350,6 +364,8 @@ export class StoryRepository {
           chapterRevision,
           current.revision + 1,
           json(summary),
+          json(events),
+          json(threadTransitions),
           json(warnings.slice(0, 50)),
           metadata ? json(metadata) : null,
           inputFingerprint,
@@ -409,13 +425,13 @@ export class StoryRepository {
       )
       .get(threadId) as { revision: number };
     this.database.sqlite
+      .prepare('UPDATE story_thread_revisions SET is_current=0 WHERE thread_id=?')
+      .run(threadId);
+    this.database.sqlite
       .prepare(
         'INSERT INTO story_thread_revisions(id,thread_id,revision,source_chapter_id,payload,is_current,created_at) VALUES(?,?,?,?,?,1,?)',
       )
       .run(randomUUID(), threadId, current.revision + 1, chapterId, json(thread), stamp);
-    this.database.sqlite
-      .prepare('UPDATE story_thread_revisions SET is_current=0 WHERE thread_id=? AND revision<?')
-      .run(threadId, current.revision + 1);
   }
 
   createGenerationRecord(
@@ -474,10 +490,10 @@ export class StoryRepository {
       throw new AppError('PREREQUISITE_MISSING', 'Current chapter plan item is required', 409);
     const existing = this.database.sqlite
       .prepare(
-        'SELECT id,revision,story_origin as origin FROM chapters WHERE project_id=? AND story_plan_item_id=? ORDER BY revision DESC LIMIT 1',
+        'SELECT id,number,revision,story_origin as origin FROM chapters WHERE project_id=? AND story_plan_item_id=? ORDER BY revision DESC LIMIT 1',
       )
       .get(input.projectId, input.planItemId) as
-      { id: Id; revision: number; origin: string } | undefined;
+      { id: Id; number: number; revision: number; origin: string } | undefined;
     if (existing?.origin === 'MANUAL')
       throw new AppError(
         'MANUAL_EDIT_CONFLICT',
@@ -496,9 +512,11 @@ export class StoryRepository {
       )
         throw new AppError('STALE_INPUT', 'Story generation input changed before commit', 409);
       let chapterId: Id;
+      let chapterNumber: number;
       let chapterRevision: number;
       if (existing) {
         chapterId = existing.id;
+        chapterNumber = existing.number;
         chapterRevision = existing.revision + 1;
         this.database.sqlite
           .prepare(
@@ -518,6 +536,7 @@ export class StoryRepository {
         const max = this.database.sqlite
           .prepare('SELECT COALESCE(MAX(number),0)+1 as next FROM chapters WHERE project_id=?')
           .get(input.projectId) as { next: number };
+        chapterNumber = max.next;
         this.database.sqlite
           .prepare(
             "INSERT INTO chapters(id,project_id,number,title,content,revision,story_origin,story_plan_item_id,story_generation_id,created_at,updated_at) VALUES(?,?,?,?,?,?,'GENERATED',?,?,?,?)",
@@ -543,7 +562,7 @@ export class StoryRepository {
       const summaryId = randomUUID();
       this.database.sqlite
         .prepare(
-          'INSERT INTO story_summary_revisions(id,chapter_id,chapter_revision,revision,payload,warnings,metadata,input_fingerprint,status,is_current,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO story_summary_revisions(id,chapter_id,chapter_revision,revision,payload,events,thread_transitions,warnings,metadata,input_fingerprint,status,is_current,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           summaryId,
@@ -551,6 +570,8 @@ export class StoryRepository {
           chapterRevision,
           current.revision + 1,
           json(envelope.summary),
+          json(envelope.events),
+          json(envelope.threadTransitions),
           json(envelope.continuityWarnings.slice(0, 50)),
           json(metadata),
           input.inputFingerprint,
@@ -566,21 +587,57 @@ export class StoryRepository {
       this.database.sqlite
         .prepare('UPDATE story_summary_revisions SET is_current=1 WHERE id=?')
         .run(summaryId);
+      const existingThreads = new Map(
+        this.getThreads(input.projectId).map((thread) => [thread.id, thread]),
+      );
+      for (const transition of envelope.threadTransitions) {
+        const existingThread = existingThreads.get(transition.threadId);
+        this.upsertThread(
+          existingThread
+            ? {
+                ...existingThread,
+                status: transition.status,
+                resolvedChapter:
+                  transition.status === 'RESOLVED' ? chapterNumber : existingThread.resolvedChapter,
+              }
+            : {
+                id: transition.threadId,
+                description: transition.note,
+                status: transition.status,
+                characterIds: envelope.characterStateChanges
+                  .filter((change) => change.characterId)
+                  .map((change) => change.characterId),
+                introducedChapter: chapterNumber,
+                resolvedChapter: transition.status === 'RESOLVED' ? chapterNumber : null,
+              },
+          chapterId,
+          stamp,
+        );
+      }
       return { chapterId, chapterRevision };
     })();
     return result;
   }
 
-  private invalidateWorkflowRows(entityIds: Id[], types: string[], error: string): number {
+  private invalidateWorkflowRows(
+    entityIds: Id[],
+    types: string[],
+    error: string,
+    excludeStepId?: Id,
+    excludeStepIds: Id[] = [],
+  ): number {
     if (!entityIds.length || !types.length) return 0;
     const entities = entityIds.map(() => '?').join(',');
     const placeholders = types.map(() => '?').join(',');
     const stamp = now();
-    const steps = this.database.sqlite
-      .prepare(
-        `SELECT id,current_attempt_id FROM workflow_steps WHERE entity_id IN (${entities}) AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
-      )
-      .all(...entityIds, ...types) as Array<{ id: Id; current_attempt_id: Id | null }>;
+    const excluded = new Set([excludeStepId, ...excludeStepIds]);
+    const steps = (
+      this.database.sqlite
+        .prepare(
+          `SELECT id,current_attempt_id FROM workflow_steps WHERE entity_id IN (${entities}) AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+        )
+        .all(...entityIds, ...types) as Array<{ id: Id; current_attempt_id: Id | null }>
+    ).filter((step) => !excluded.has(step.id));
     for (const step of steps) {
       this.database.sqlite
         .prepare(
@@ -607,6 +664,9 @@ export class StoryRepository {
     kind: 'SETTINGS' | 'BLUEPRINT' | 'PLAN' | 'PLAN_ITEM' | 'CHAPTER' | 'SUMMARY';
     chapterId?: Id;
     stableId?: string;
+    excludeStepId?: Id;
+    excludeStepIds?: Id[];
+    preserveCurrentSummary?: boolean;
   }): number {
     const storyTypes = {
       blueprint: ['GENERATE_STORY_BLUEPRINT'],
@@ -614,26 +674,33 @@ export class StoryRepository {
       chapter: ['GENERATE_CHAPTER'],
       summary: ['GENERATE_CHAPTER_SUMMARY'],
     };
+    const globalStoryChange =
+      scope.kind === 'SETTINGS' || scope.kind === 'BLUEPRINT' || scope.kind === 'PLAN';
     const chapterRows = this.database.sqlite
       .prepare(
         scope.kind === 'PLAN_ITEM'
           ? 'SELECT id FROM chapters WHERE project_id=? AND story_plan_item_id=?'
-          : 'SELECT id FROM chapters WHERE project_id=?',
+          : globalStoryChange
+            ? "SELECT id FROM chapters WHERE project_id=? AND story_origin='GENERATED' AND story_plan_item_id IS NOT NULL"
+            : 'SELECT id FROM chapters WHERE project_id=?',
       )
       .all(
         ...(scope.kind === 'PLAN_ITEM'
           ? [scope.projectId, scope.stableId ?? '']
           : [scope.projectId]),
-      ) as Array<{
-      id: Id;
-    }>;
+      ) as Array<{ id: Id }>;
     const chapterIds = scope.chapterId
       ? chapterRows.some((row) => row.id === scope.chapterId)
         ? [scope.chapterId]
         : []
       : chapterRows.map((row) => row.id);
     const chapterStoryTypes = [...storyTypes.chapter, ...storyTypes.summary];
-    const invalidateMedia = scope.kind === 'PLAN_ITEM' || scope.kind === 'CHAPTER';
+    const invalidateMedia =
+      scope.kind === 'SETTINGS' ||
+      scope.kind === 'BLUEPRINT' ||
+      scope.kind === 'PLAN' ||
+      scope.kind === 'PLAN_ITEM' ||
+      scope.kind === 'CHAPTER';
     const error = `Story ${scope.kind.toLowerCase()} changed`;
     return this.database.sqlite.transaction(() => {
       let invalidated = 0;
@@ -642,22 +709,53 @@ export class StoryRepository {
           [scope.projectId],
           [...storyTypes.blueprint, ...storyTypes.plan],
           error,
+          scope.excludeStepId,
+          scope.excludeStepIds,
         );
+        this.database.sqlite
+          .prepare('UPDATE story_blueprint_revisions SET is_current=0 WHERE project_id=?')
+          .run(scope.projectId);
+        this.database.sqlite
+          .prepare('UPDATE story_plan_revisions SET is_current=0 WHERE project_id=?')
+          .run(scope.projectId);
       }
       if (scope.kind === 'BLUEPRINT') {
-        invalidated += this.invalidateWorkflowRows([scope.projectId], [...storyTypes.plan], error);
+        invalidated += this.invalidateWorkflowRows(
+          [scope.projectId],
+          storyTypes.plan,
+          error,
+          scope.excludeStepId,
+          scope.excludeStepIds,
+        );
+        this.database.sqlite
+          .prepare('UPDATE story_plan_revisions SET is_current=0 WHERE project_id=?')
+          .run(scope.projectId);
       }
       if (scope.kind === 'PLAN') {
-        invalidated += this.invalidateWorkflowRows([scope.projectId], storyTypes.plan, error);
+        invalidated += this.invalidateWorkflowRows(
+          [scope.projectId],
+          storyTypes.plan,
+          error,
+          scope.excludeStepId,
+          scope.excludeStepIds,
+        );
       }
-      if (scope.kind === 'PLAN_ITEM' || scope.kind === 'CHAPTER') {
-        invalidated += this.invalidateWorkflowRows(chapterIds, chapterStoryTypes, error);
+      if (globalStoryChange || scope.kind === 'PLAN_ITEM' || scope.kind === 'CHAPTER') {
+        invalidated += this.invalidateWorkflowRows(
+          chapterIds,
+          chapterStoryTypes,
+          error,
+          scope.excludeStepId,
+          scope.excludeStepIds,
+        );
         for (const chapterId of chapterIds) {
-          this.database.sqlite
-            .prepare(
-              "UPDATE story_summary_revisions SET is_current=0,status='STALE' WHERE chapter_id=?",
-            )
-            .run(chapterId);
+          if (!scope.preserveCurrentSummary) {
+            this.database.sqlite
+              .prepare(
+                "UPDATE story_summary_revisions SET is_current=0,status='STALE' WHERE chapter_id=?",
+              )
+              .run(chapterId);
+          }
           if (invalidateMedia) {
             this.database.sqlite
               .prepare(
@@ -678,7 +776,13 @@ export class StoryRepository {
           }
         }
         if (invalidateMedia) {
-          invalidated += this.invalidateWorkflowRows([scope.projectId], ['RENDER'], error);
+          invalidated += this.invalidateWorkflowRows(
+            [scope.projectId],
+            ['RENDER'],
+            error,
+            scope.excludeStepId,
+            scope.excludeStepIds,
+          );
           this.database.sqlite
             .prepare(
               "UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role='project:render'",
@@ -687,7 +791,13 @@ export class StoryRepository {
         }
       }
       if (scope.kind === 'SUMMARY' && scope.chapterId) {
-        invalidated += this.invalidateWorkflowRows([scope.chapterId], storyTypes.summary, error);
+        invalidated += this.invalidateWorkflowRows(
+          [scope.chapterId],
+          storyTypes.summary,
+          error,
+          scope.excludeStepId,
+          scope.excludeStepIds,
+        );
         this.database.sqlite
           .prepare(
             "UPDATE story_summary_revisions SET is_current=0,status='STALE' WHERE chapter_id=?",

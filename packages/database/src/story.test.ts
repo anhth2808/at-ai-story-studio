@@ -205,4 +205,127 @@ describe('story repository', () => {
     ).toMatchObject({ isCurrent: 0 });
     database.sqlite.close();
   });
+
+  it.each(['SETTINGS', 'BLUEPRINT', 'PLAN'] as const)(
+    'invalidates generated descendants for a %s change without touching manual chapters',
+    async (kind) => {
+      const database = await setup();
+      const chapters = new ChapterRepository(database);
+      const story = new StoryRepository(database);
+      const workflow = new WorkflowRepository(database);
+      const savedSettings = story.saveSettings('project', settings);
+      const savedBlueprint = story.saveBlueprint(
+        'project',
+        story.getSettingsRevision('project', savedSettings.revision)!.id,
+        blueprint,
+        null,
+        story.fingerprint(blueprint),
+      );
+      story.savePlan(
+        'project',
+        story.getBlueprintRevision('project', savedBlueprint.revision)!.id,
+        plan,
+        null,
+        story.fingerprint(plan),
+      );
+      const generationId = story.createGenerationRecord(
+        'project',
+        'CHAPTER',
+        'chapter-1',
+        null,
+        'fingerprint',
+        {},
+        'COMPLETED',
+      );
+      const generated = chapters.createGenerated(
+        'project',
+        { title: 'Generated', content: 'Generated content' },
+        'chapter-1',
+        generationId,
+      );
+      const manual = chapters.create('project', { title: 'Manual', content: 'Manual content' });
+      story.saveSummary(
+        generated.id,
+        generated.revision,
+        {
+          recap: 'Generated recap',
+          keyFacts: [],
+          characterStateChanges: [],
+          newInformation: [],
+          openThreadIds: [],
+          resolvedThreadIds: [],
+        },
+        [],
+        null,
+        'summary-fingerprint',
+      );
+      const executionId = workflow.createExecution('project', 'STORY');
+      const blueprintStep = workflow.createStep(
+        executionId,
+        'blueprint',
+        'GENERATE_STORY_BLUEPRINT',
+        'project',
+        'blueprint',
+      );
+      const planStep = workflow.createStep(
+        executionId,
+        'plan',
+        'GENERATE_CHAPTER_PLANS',
+        'project',
+        'plan',
+      );
+      const generatedChapterStep = workflow.createStep(
+        executionId,
+        'generated-chapter',
+        'GENERATE_CHAPTER',
+        generated.id,
+        'chapter',
+      );
+      const manualChapterStep = workflow.createStep(
+        executionId,
+        'manual-chapter',
+        'GENERATE_CHAPTER',
+        manual.id,
+        'manual',
+      );
+      const summaryStep = workflow.createStep(
+        executionId,
+        'summary',
+        'GENERATE_CHAPTER_SUMMARY',
+        generated.id,
+        'summary',
+      );
+      const renderStep = workflow.createStep(executionId, 'render', 'RENDER', 'project', 'render');
+      for (const stepId of [
+        blueprintStep,
+        planStep,
+        generatedChapterStep,
+        manualChapterStep,
+        summaryStep,
+        renderStep,
+      ])
+        workflow.markCompleted(stepId);
+
+      story.invalidateScope({ projectId: 'project', kind });
+
+      expect(workflow.getStep(generatedChapterStep)?.status).toBe('INVALIDATED');
+      expect(workflow.getStep(summaryStep)?.status).toBe('INVALIDATED');
+      expect(workflow.getStep(renderStep)?.status).toBe('INVALIDATED');
+      expect(workflow.getStep(manualChapterStep)?.status).toBe('COMPLETED');
+      expect(story.getSummary(generated.id)).toBeNull();
+      expect(
+        database.sqlite
+          .prepare(
+            'SELECT is_current as isCurrent FROM story_blueprint_revisions WHERE project_id=?',
+          )
+          .get('project'),
+      ).toMatchObject({ isCurrent: kind === 'SETTINGS' ? 0 : 1 });
+      expect(
+        database.sqlite
+          .prepare('SELECT is_current as isCurrent FROM story_plan_revisions WHERE project_id=?')
+          .get('project'),
+      ).toMatchObject({ isCurrent: kind === 'SETTINGS' || kind === 'BLUEPRINT' ? 0 : 1 });
+      database.sqlite.close();
+    },
+  );
 });

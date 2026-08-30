@@ -1,17 +1,22 @@
 import {
   StoryRepository,
   ChapterRepository,
+  WorkflowRepository,
   type ClaimedStep,
   type DatabaseHandle,
 } from '@studio/database';
 import {
   AppError,
   chapterGenerationEnvelopeSchema,
+  type ChapterGenerationEnvelope,
+  chapterPlanItemSchema,
   generationMetadataSchema,
   parseStoryOperationOutput,
   storySettingsSchema,
-  type ChapterGenerationEnvelope,
+  storyBlueprintSchema,
   type ChapterPlanItem,
+  type ChapterDto,
+  type StoryBlueprintDto,
   type ChapterSummary,
   type GenerationMetadata,
   type GenerationOperation,
@@ -86,15 +91,63 @@ export function renderChapterGenerationPrompt(
   return renderChapterPrompt(
     buildChapterGenerationContext(story, chaptersRepository, projectId, planItem),
     planItem,
+    story.getSettings(projectId)?.generation.model ?? null,
+  );
+}
+
+export function buildSummaryGenerationInput(
+  story: StoryRepository,
+  chaptersRepository: ChapterRepository,
+  chapterId: Id,
+): { chapter: ChapterDto; context: BoundedGenerationContext; model: string | null } {
+  const chapter = chaptersRepository.get(chapterId);
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const blueprint = story.getBlueprint(chapter.projectId)?.blueprint ?? null;
+  const planItem = chapter.storyPlanItemId
+    ? (story.getPlanItem(chapter.projectId, chapter.storyPlanItemId)?.item ?? null)
+    : null;
+  const context = compileGenerationContext({
+    blueprint,
+    selectedCharacterIds: planItem?.characterIds ?? [],
+    planItem,
+    priorSummaries: [],
+    openThreads: story.getThreads(chapter.projectId).filter((thread) => thread.status === 'OPEN'),
+    relevantFacts: blueprint?.continuityConstraints ?? [],
+    instructions: ['Summarize only the supplied chapter content.'],
+    budget: story.getSettings(chapter.projectId)?.generation.contextBudget ?? 5_000,
+  });
+  return {
+    chapter,
+    context,
+    model: story.getSettings(chapter.projectId)?.generation.model ?? null,
+  };
+}
+
+export function renderSummaryGenerationPrompt(
+  story: StoryRepository,
+  chaptersRepository: ChapterRepository,
+  chapterId: Id,
+): StoryPrompt {
+  const { chapter, context, model } = buildSummaryGenerationInput(
+    story,
+    chaptersRepository,
+    chapterId,
+  );
+  return renderSummaryPrompt(
+    context,
+    { title: chapter.title, content: chapter.content, revision: chapter.revision },
+    model,
   );
 }
 export class StoryEngine {
   readonly story: StoryRepository;
   readonly chapters: ChapterRepository;
+  readonly workflow: WorkflowRepository;
 
   constructor(private readonly context: StoryEngineContext) {
     this.story = new StoryRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
+    this.workflow = new WorkflowRepository(context.database);
   }
 
   saveSettings(projectId: Id, input: unknown): StorySettingsDto {
@@ -114,6 +167,64 @@ export class StoryEngine {
 
   getPlan(projectId: Id): StoryPlanDto | null {
     return this.story.getPlan(projectId);
+  }
+
+  updateBlueprint(projectId: Id, input: unknown): StoryBlueprintDto {
+    const settings = this.story.getSettings(projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const settingsRevision = this.story.getSettingsRevision(projectId, settings.revision);
+    if (!settingsRevision)
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings revision is missing', 409);
+    const blueprint = storyBlueprintSchema.parse(input);
+    const saved = this.story.saveBlueprint(
+      projectId,
+      settingsRevision.id,
+      blueprint,
+      null,
+      this.story.fingerprint({
+        operation: 'MANUAL_BLUEPRINT',
+        settingsRevision: settings.revision,
+        blueprint,
+      }),
+    );
+    this.story.invalidateScope({ projectId, kind: 'BLUEPRINT' });
+    return saved;
+  }
+
+  updatePlanItem(projectId: Id, planItemId: string, input: unknown): StoryPlanDto {
+    const current = this.story.getPlan(projectId);
+    const blueprint = this.story.getBlueprint(projectId);
+    const item = chapterPlanItemSchema.parse(input);
+    if (!current || !blueprint)
+      throw new AppError(
+        'PREREQUISITE_MISSING',
+        'Current blueprint and chapter plan are required',
+        409,
+      );
+    if (item.id !== planItemId)
+      throw new AppError('INVALID_PLAN', 'Plan item identifier cannot change', 400);
+    const blueprintRevision = this.story.getBlueprintRevision(projectId, blueprint.revision);
+    if (!blueprintRevision)
+      throw new AppError('PREREQUISITE_MISSING', 'Blueprint revision is missing', 409);
+    const plan = {
+      items: current.plan.items.map((candidate) =>
+        candidate.id === planItemId ? item : candidate,
+      ),
+    };
+    const saved = this.story.savePlan(
+      projectId,
+      blueprintRevision.id,
+      plan,
+      null,
+      this.story.fingerprint({
+        operation: 'MANUAL_PLAN_ITEM',
+        planRevision: current.revision,
+        planItemId,
+        item,
+      }),
+    );
+    this.story.invalidateScope({ projectId, kind: 'PLAN_ITEM', stableId: planItemId });
+    return saved;
   }
 
   private initialMetadata(
@@ -229,7 +340,7 @@ export class StoryEngine {
     const settings = this.story.getSettings(projectId);
     if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
     const prompt = renderBlueprintPrompt(settings);
-    return (await this.run(
+    const result = (await this.run(
       projectId,
       projectId,
       prompt,
@@ -239,6 +350,15 @@ export class StoryEngine {
       workflowStepId,
       async (result, metadata) => {
         const blueprint = parseStoryOperationOutput('BLUEPRINT', result.text) as StoryBlueprint;
+        if (workflowStepId)
+          this.workflow.assertRunningStepFingerprint(workflowStepId, prompt.inputFingerprint);
+        const currentSettings = this.story.getSettings(projectId);
+        if (currentSettings?.revision !== settings.revision)
+          throw new AppError(
+            'STALE_INPUT',
+            'Story settings changed during blueprint generation',
+            409,
+          );
         const settingsRevision = this.story.getSettingsRevision(projectId, settings.revision);
         if (!settingsRevision)
           throw new AppError('PREREQUISITE_MISSING', 'Story settings revision is missing', 409);
@@ -252,6 +372,13 @@ export class StoryEngine {
         return blueprint;
       },
     )) as StoryBlueprint;
+    this.story.invalidateScope({
+      projectId,
+      kind: 'BLUEPRINT',
+      excludeStepId: workflowStepId ?? undefined,
+      excludeStepIds: workflowStepId ? this.workflow.dependentStepIds(workflowStepId) : [],
+    });
+    return result;
   }
 
   async generatePlans(
@@ -265,7 +392,7 @@ export class StoryEngine {
     if (!settings || !blueprint)
       throw new AppError('PREREQUISITE_MISSING', 'Story settings and blueprint are required', 409);
     const prompt = renderChapterPlansPrompt(settings, blueprint.blueprint);
-    return (await this.run(
+    const result = (await this.run(
       projectId,
       projectId,
       prompt,
@@ -277,6 +404,12 @@ export class StoryEngine {
         const plan = parseStoryOperationOutput('CHAPTER_PLANS', result.text) as {
           items: ChapterPlanItem[];
         };
+        if (workflowStepId)
+          this.workflow.assertRunningStepFingerprint(workflowStepId, prompt.inputFingerprint);
+        if (this.story.getSettings(projectId)?.revision !== settings.revision)
+          throw new AppError('STALE_INPUT', 'Story settings changed during plan generation', 409);
+        if (this.story.getBlueprint(projectId)?.revision !== blueprint.revision)
+          throw new AppError('STALE_INPUT', 'Story blueprint changed during plan generation', 409);
         const blueprintRevision = this.story.getBlueprintRevision(projectId, blueprint.revision);
         if (!blueprintRevision)
           throw new AppError('PREREQUISITE_MISSING', 'Blueprint revision is missing', 409);
@@ -289,6 +422,12 @@ export class StoryEngine {
         );
       },
     )) as StoryPlanDto;
+    this.story.invalidateScope({
+      projectId,
+      kind: 'PLAN',
+      excludeStepId: workflowStepId ?? undefined,
+    });
+    return result;
   }
 
   private chapterContext(
@@ -360,8 +499,12 @@ export class StoryEngine {
         409,
       );
     const context = this.chapterContext(projectId, planItem);
-    const prompt = renderChapterPrompt(context, planItem);
-    return (await this.run(
+    const prompt = renderChapterPrompt(
+      context,
+      planItem,
+      this.story.getSettings(projectId)?.generation.model ?? null,
+    );
+    const result = (await this.run(
       projectId,
       planItemId,
       prompt,
@@ -384,6 +527,14 @@ export class StoryEngine {
         });
       },
     )) as { chapterId: Id; chapterRevision: number };
+    this.story.invalidateScope({
+      projectId,
+      kind: 'CHAPTER',
+      chapterId: result.chapterId,
+      excludeStepId: workflowStepId ?? undefined,
+      preserveCurrentSummary: true,
+    });
+    return result;
   }
 
   async generateSummary(
@@ -392,29 +543,20 @@ export class StoryEngine {
     onProgress?: StoryEngineProgress,
     workflowStepId: Id | null = null,
   ): Promise<ChapterSummary> {
-    const chapter = this.chapters.get(chapterId);
-    if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
-    const blueprint = this.story.getBlueprint(chapter.projectId)?.blueprint ?? null;
-    const planItem = chapter.storyPlanItemId
-      ? (this.story.getPlanItem(chapter.projectId, chapter.storyPlanItemId)?.item ?? null)
-      : null;
-    const context = compileGenerationContext({
-      blueprint,
-      selectedCharacterIds: planItem?.characterIds ?? [],
-      planItem,
-      priorSummaries: [],
-      openThreads: this.story
-        .getThreads(chapter.projectId)
-        .filter((thread) => thread.status === 'OPEN'),
-      relevantFacts: blueprint?.continuityConstraints ?? [],
-      instructions: ['Summarize only the supplied chapter content.'],
-      budget: this.story.getSettings(chapter.projectId)?.generation.contextBudget ?? 5_000,
-    });
-    const prompt = renderSummaryPrompt(context, {
-      title: chapter.title,
-      content: chapter.content,
-      revision: chapter.revision,
-    });
+    const { chapter, context, model } = buildSummaryGenerationInput(
+      this.story,
+      this.chapters,
+      chapterId,
+    );
+    const prompt = renderSummaryPrompt(
+      context,
+      {
+        title: chapter.title,
+        content: chapter.content,
+        revision: chapter.revision,
+      },
+      model,
+    );
     return (await this.run(
       chapter.projectId,
       chapterId,
@@ -425,6 +567,10 @@ export class StoryEngine {
       workflowStepId,
       async (result, metadata) => {
         const summary = parseStoryOperationOutput('CHAPTER_SUMMARY', result.text) as ChapterSummary;
+        if (workflowStepId)
+          this.workflow.assertRunningStepFingerprint(workflowStepId, prompt.inputFingerprint);
+        if (this.chapters.get(chapterId)?.revision !== chapter.revision)
+          throw new AppError('STALE_INPUT', 'Chapter changed during summary generation', 409);
         this.story.saveSummary(
           chapterId,
           chapter.revision,
@@ -448,6 +594,18 @@ export class StoryEngine {
       return;
     }
     if (step.type === 'GENERATE_CHAPTER_PLANS') {
+      const settings = this.story.getSettings(step.entity_id);
+      const blueprint = this.story.getBlueprint(step.entity_id);
+      if (!settings || !blueprint)
+        throw new AppError(
+          'PREREQUISITE_MISSING',
+          'Story settings and blueprint are required',
+          409,
+        );
+      this.workflow.updateRunningStepFingerprint(
+        step,
+        renderChapterPlansPrompt(settings, blueprint.blueprint).inputFingerprint,
+      );
       await this.generatePlans(step.entity_id, signal, onProgress, step.id);
       return;
     }

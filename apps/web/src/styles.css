@@ -481,6 +481,18 @@ aside {
   border-radius: 9px;
   background: #11131a;
 }
+.plan-row > form {
+  flex: 1;
+}
+
+.summary-details {
+  color: #b9c5d7;
+  font-size: 12px;
+}
+.summary-details ul {
+  margin: 5px 0 0 18px;
+  color: #9aa6b8;
+}
 .plan-row p,
 .plan-row small,
 .summary-row p {

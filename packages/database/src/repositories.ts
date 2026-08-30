@@ -263,6 +263,32 @@ export class WorkflowRepository {
       );
     return id;
   }
+  updateRunningStepFingerprint(step: ClaimedStep, fingerprint: string): void {
+    const result = this.database.sqlite
+      .prepare(
+        "UPDATE workflow_steps SET input_fingerprint=?,updated_at=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND lease_owner=?",
+      )
+      .run(fingerprint, now(), step.id, step.attemptId, step.lease_owner);
+    if (result.changes !== 1)
+      throw new AppError('STALE_INPUT', 'Story workflow step is no longer current', 409);
+  }
+  assertRunningStepFingerprint(stepId: Id, fingerprint: string): void {
+    const current = this.database.sqlite
+      .prepare(
+        "SELECT 1 FROM workflow_steps WHERE id=? AND status='RUNNING' AND input_fingerprint=?",
+      )
+      .get(stepId, fingerprint);
+    if (!current)
+      throw new AppError('STALE_INPUT', 'Story workflow step input is no longer current', 409);
+  }
+  dependentStepIds(stepId: Id): Id[] {
+    const rows = this.database.sqlite
+      .prepare(
+        'SELECT step_id as stepId FROM workflow_step_dependencies WHERE depends_on_step_id=?',
+      )
+      .all(stepId) as Array<{ stepId: Id }>;
+    return rows.map((row) => row.stepId);
+  }
   dependency(stepId: Id, dependsOnStepId: Id): void {
     if (stepId === dependsOnStepId)
       throw new AppError('WORKFLOW_CYCLE', 'A step cannot depend on itself');

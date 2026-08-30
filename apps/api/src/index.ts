@@ -17,15 +17,17 @@ import {
 import {
   AppError,
   chapterInputSchema,
+  chapterPlanItemSchema,
   idSchema,
   projectInputSchema,
   projectUpdateSchema,
   reorderSchema,
   renderConfigSchema,
-  subtitleReplacementSchema,
+  storyBlueprintSchema,
   storyGenerationRequestSchema,
   storySettingsSchema,
   storyStableIdSchema,
+  subtitleReplacementSchema,
 } from '@studio/shared';
 import type { OmpReadiness } from '@studio/shared';
 import { StudioService, createOmpAgent, createStoryEngine, parseSrt } from '@studio/workflow';
@@ -127,6 +129,21 @@ app.get('/api/projects/:projectId/story/blueprint', async (request) => {
 app.get('/api/projects/:projectId/story/plan', async (request) => {
   const params = request.params as { projectId: string };
   return storyEngine.getPlan(idSchema.parse(params.projectId));
+});
+app.put('/api/projects/:projectId/story/blueprint', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.updateBlueprint(
+    idSchema.parse(params.projectId),
+    storyBlueprintSchema.parse(request.body),
+  );
+});
+app.put('/api/projects/:projectId/story/plan/items/:planItemId', async (request) => {
+  const params = request.params as { projectId: string; planItemId: string };
+  return storyEngine.updatePlanItem(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.planItemId),
+    chapterPlanItemSchema.parse(request.body),
+  );
 });
 app.get('/api/projects/:projectId/story/summaries', async (request) => {
   const params = request.params as { projectId: string };

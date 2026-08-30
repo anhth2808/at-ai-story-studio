@@ -6,7 +6,12 @@ import {
   type StorySettings,
 } from '@studio/shared';
 import { compileGenerationContext } from './story-context.js';
-import { renderBlueprintPrompt, renderChapterPlansPrompt } from './story-prompts.js';
+import {
+  renderBlueprintPrompt,
+  renderChapterPlansPrompt,
+  renderChapterPrompt,
+  renderSummaryPrompt,
+} from './story-prompts.js';
 
 const settings: StorySettings = {
   mode: 'IDEA_TO_STORY',
@@ -51,6 +56,32 @@ describe('Story Core prompt contracts', () => {
     expect(first.userPrompt).toContain('[UNTRUSTED_STORY_DATA]');
     expect(renderChapterPlansPrompt(settings, blueprint).inputFingerprint).not.toBe(
       first.inputFingerprint,
+    );
+  });
+
+  it('changes chapter and summary fingerprints when the configured model changes', () => {
+    const context = compileGenerationContext({ blueprint, budget: 5_000 });
+    const item = {
+      id: 'chapter-1',
+      chapterNumber: 1,
+      title: 'The Door',
+      purpose: 'Introduce the promise.',
+      summary: 'A courier receives a letter.',
+      setting: 'old city gate',
+      characterIds: [],
+      conflict: 'The recipient has vanished.',
+      turningPoints: [],
+      resolution: 'The courier accepts the route.',
+      emotionalArc: 'doubt to resolve',
+      estimatedWordCount: 800,
+      threadIds: [],
+    };
+    expect(renderChapterPrompt(context, item, 'model-a').inputFingerprint).not.toBe(
+      renderChapterPrompt(context, item, 'model-b').inputFingerprint,
+    );
+    const chapter = { title: 'The Door', content: 'A courier receives a letter.', revision: 1 };
+    expect(renderSummaryPrompt(context, chapter, 'model-a').inputFingerprint).not.toBe(
+      renderSummaryPrompt(context, chapter, 'model-b').inputFingerprint,
     );
   });
   it('orders selected characters and open threads by stable id', () => {

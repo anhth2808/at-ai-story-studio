@@ -6,6 +6,7 @@ import { createDatabase, migrateDatabase } from '@studio/database';
 import { ProcessRunner } from '@studio/media';
 import type { AiAgent, AiAgentRequest, AiAgentResult } from './omp-agent.js';
 import { StoryEngine, renderChapterGenerationPrompt } from './story-engine.js';
+import { renderChapterPlansPrompt } from './story-prompts.js';
 import { StudioService } from './index.js';
 
 const settings = {
@@ -63,7 +64,7 @@ const planItem = {
   resolution: 'Mai accepts the route.',
   emotionalArc: 'doubt to resolve',
   estimatedWordCount: 800,
-  threadIds: [],
+  threadIds: ['thread-main'],
 };
 const plan = {
   items: [
@@ -89,12 +90,16 @@ class FakeAgent implements AiAgent {
           keyFacts: ['Mai has the letter.'],
           characterStateChanges: [{ characterId: 'mai', change: 'accepts the route' }],
           newInformation: ['The seal bears Mai’s name.'],
-          openThreadIds: [],
+          openThreadIds: ['thread-main'],
           resolvedThreadIds: [],
         },
-        events: [],
+        events: [
+          { description: 'Mai accepts the letter.', importance: 'MEDIUM', characterIds: ['mai'] },
+        ],
         characterStateChanges: [{ characterId: 'mai', change: 'accepts the route' }],
-        threadTransitions: [],
+        threadTransitions: [
+          { threadId: 'thread-main', status: 'OPEN', note: 'The route remains open.' },
+        ],
         usedCharacterIds: ['mai'],
         introducedCharacterIds: [],
         unresolvedThreadIds: [],
@@ -159,6 +164,10 @@ describe('Story Engine', () => {
         (chapter) => engine.story.getSummary(chapter.id)?.chapterRevision === chapter.revision,
       ),
     ).toBe(true);
+    const firstSummary = engine.story.getSummary(chapters[0]!.id)!;
+    expect(firstSummary.events[0]?.description).toBe('Mai accepts the letter.');
+    expect(firstSummary.threadTransitions[0]?.threadId).toBe('thread-main');
+    expect(firstSummary.threads.some((thread) => thread.id === 'thread-main')).toBe(true);
     expect(agent.calls.map((call) => call.operation)).toEqual([
       'BLUEPRINT',
       'CHAPTER_PLANS',
@@ -184,16 +193,71 @@ describe('Story Engine', () => {
     await engine.generatePlans('project');
     const scheduled = service.scheduleStoryChapter('project', 'chapter-1');
     const row = database.sqlite
-      .prepare('SELECT input_fingerprint as inputFingerprint FROM workflow_steps WHERE execution_id=?')
+      .prepare(
+        'SELECT input_fingerprint as inputFingerprint FROM workflow_steps WHERE execution_id=?',
+      )
       .get(scheduled.executionId) as { inputFingerprint: string };
     expect(row.inputFingerprint).toBe(
-      renderChapterGenerationPrompt(
-        engine.story,
-        engine.chapters,
-        'project',
-        planItem,
-      ).inputFingerprint,
+      renderChapterGenerationPrompt(engine.story, engine.chapters, 'project', planItem)
+        .inputFingerprint,
     );
+    database.sqlite.close();
+  });
+
+  it('refreshes deferred plan fingerprints after staged blueprint execution', async () => {
+    const { database, agent, engine, service } = await setup();
+    engine.saveSettings('project', settings);
+    const scheduled = service.scheduleStoryStages('project');
+    expect(scheduled.jobIds).toHaveLength(2);
+    const blueprintStep = service.workflow.claim('worker')!;
+    expect(blueprintStep.type).toBe('GENERATE_STORY_BLUEPRINT');
+    await engine.executeStep(blueprintStep);
+    service.workflow.complete(blueprintStep);
+    const planStep = service.workflow.claim('worker')!;
+    expect(planStep.type).toBe('GENERATE_CHAPTER_PLANS');
+    await engine.executeStep(planStep);
+    expect(planStep.input_fingerprint).not.toBe('');
+    expect(
+      database.sqlite
+        .prepare('SELECT input_fingerprint as inputFingerprint FROM workflow_steps WHERE id=?')
+        .get(planStep.id),
+    ).toMatchObject({
+      inputFingerprint: renderChapterPlansPrompt(
+        engine.story.getSettings('project')!,
+        engine.story.getBlueprint('project')!.blueprint,
+      ).inputFingerprint,
+    });
+    service.workflow.complete(planStep);
+    expect(engine.story.getPlan('project')?.revision).toBe(1);
+    expect(agent.calls.map((call) => call.operation)).toEqual(['BLUEPRINT', 'CHAPTER_PLANS']);
+    database.sqlite.close();
+  });
+
+  it('creates manual blueprint and plan revisions without mutating prior state', async () => {
+    const { database, engine } = await setup();
+    engine.saveSettings('project', settings);
+    await engine.generateBlueprint('project');
+    await engine.generatePlans('project');
+    const editedPlan = engine.updatePlanItem('project', 'chapter-1', {
+      ...planItem,
+      title: 'Manually adjusted chapter',
+    });
+    expect(editedPlan.revision).toBe(2);
+    expect(editedPlan.plan.items[0]?.title).toBe('Manually adjusted chapter');
+    expect(engine.story.getPlan('project')?.metadata).toBeNull();
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) as count FROM story_plan_revisions WHERE revision=1')
+        .get(),
+    ).toMatchObject({ count: 1 });
+    const editedBlueprint = engine.updateBlueprint('project', {
+      ...blueprint,
+      premise: 'A manually revised promise.',
+    });
+    expect(editedBlueprint.revision).toBe(2);
+    expect(editedBlueprint.metadata).toBeNull();
+    expect(engine.story.getBlueprintRevision('project', 1)).not.toBeNull();
+    expect(engine.story.getPlan('project')).toBeNull();
     database.sqlite.close();
   });
 

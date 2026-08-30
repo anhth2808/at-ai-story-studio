@@ -3,11 +3,13 @@ import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type {
   ChapterDto,
+  ChapterPlanItem,
   Health,
   JobDto,
   ProjectDto,
   RenderConfig,
   StatusSummary,
+  StoryBlueprint,
   StorySettings,
   StorySettingsDto,
   StorySnapshotDto,
@@ -76,6 +78,16 @@ const storyApi = {
   generate: (path: string, body: Record<string, unknown> = {}) =>
     api<StoryJobScheduleDto>(path, { method: 'POST', body: JSON.stringify(body) }),
   retryJob: (jobId: string) => api(`/api/jobs/${jobId}/retry`, { method: 'POST' }),
+  updateBlueprint: (projectId: string, blueprint: StoryBlueprint) =>
+    api(`/api/projects/${projectId}/story/blueprint`, {
+      method: 'PUT',
+      body: JSON.stringify(blueprint),
+    }),
+  updatePlanItem: (projectId: string, item: ChapterPlanItem) =>
+    api(`/api/projects/${projectId}/story/plan/items/${item.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(item),
+    }),
   cancelJob: (jobId: string) => api(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
@@ -636,9 +648,19 @@ function StoryWorkspace({
   onError: (message: string) => void;
 }) {
   const [draft, setDraft] = useState<StorySettings>(story?.settings ?? defaultStorySettings);
+  const [blueprintEditing, setBlueprintEditing] = useState(false);
+  const [blueprintDraft, setBlueprintDraft] = useState<StoryBlueprint | null>(
+    story?.blueprint?.blueprint ?? null,
+  );
+  const [planDraft, setPlanDraft] = useState<ChapterPlanItem | null>(null);
   useEffect(() => {
     setDraft(story?.settings ?? defaultStorySettings);
   }, [story?.settings?.revision]);
+  useEffect(() => {
+    setBlueprintDraft(story?.blueprint?.blueprint ?? null);
+    setBlueprintEditing(false);
+    setPlanDraft(null);
+  }, [story?.blueprint?.revision, story?.plan?.revision]);
   const setField = <K extends keyof StorySettings>(key: K, value: StorySettings[K]): void => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
@@ -658,6 +680,54 @@ function StoryWorkspace({
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể tạo nội dung Story');
     }
+  };
+  const saveBlueprint = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!blueprintDraft) return;
+    try {
+      await storyApi.updateBlueprint(projectId, blueprintDraft);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu blueprint');
+    }
+  };
+  const savePlanItem = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!planDraft) return;
+    try {
+      await storyApi.updatePlanItem(projectId, planDraft);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu dàn ý chương');
+    }
+  };
+  const setBlueprintField = <K extends keyof StoryBlueprint>(
+    key: K,
+    value: StoryBlueprint[K],
+  ): void => {
+    setBlueprintDraft((current) => (current ? { ...current, [key]: value } : current));
+  };
+  const setCharacterField = (
+    characterId: string,
+    key: 'name' | 'role' | 'personality',
+    value: string,
+  ): void => {
+    setBlueprintDraft((current) =>
+      current
+        ? {
+            ...current,
+            characters: current.characters.map((character) =>
+              character.id === characterId ? { ...character, [key]: value } : character,
+            ),
+          }
+        : current,
+    );
+  };
+  const setPlanField = <K extends keyof ChapterPlanItem>(
+    key: K,
+    value: ChapterPlanItem[K],
+  ): void => {
+    setPlanDraft((current) => (current ? { ...current, [key]: value } : current));
   };
   if (!story) {
     return (
@@ -932,43 +1002,117 @@ function StoryWorkspace({
               <h4>Blueprint · revision {story.blueprint.revision}</h4>
               <p>{story.blueprint.blueprint.premise}</p>
             </div>
-            {story.blueprint.metadata && (
-              <small className="provenance">
-                Model: {story.blueprint.metadata.model ?? 'unknown'} ·{' '}
-                {story.blueprint.metadata.promptVersion}
-              </small>
-            )}
-          </div>
-          <p className="muted">{story.blueprint.blueprint.plotDirection}</p>
-          <div className="chip-row">
-            {story.blueprint.blueprint.themes.map((theme) => (
-              <span className="chip" key={theme}>
-                {theme}
-              </span>
-            ))}
-          </div>
-          <div className="character-grid">
-            {story.blueprint.blueprint.characters.map((character) => (
-              <article className="character-card" key={character.id}>
-                <strong>{character.name}</strong>
-                <span>{character.role}</span>
-                <small>
-                  {character.ageRange} · {character.appearance}
+            <div className="actions">
+              {story.blueprint.metadata && (
+                <small className="provenance">
+                  Model: {story.blueprint.metadata.model ?? 'unknown'} ·{' '}
+                  {story.blueprint.metadata.promptVersion}
                 </small>
-                <p>Muốn: {character.wants}</p>
-                <p>Sợ: {character.fears}</p>
-                <div className="chip-row">
-                  {character.traits.map((trait) => (
-                    <span className="chip" key={trait}>
-                      {trait}
-                    </span>
-                  ))}
-                </div>
-                <p>{character.personality}</p>
-                <small>Arc: {character.arc}</small>
-              </article>
-            ))}
+              )}
+              <button
+                className="secondary"
+                type="button"
+                onClick={() => {
+                  setBlueprintDraft(story.blueprint!.blueprint);
+                  setBlueprintEditing(true);
+                }}
+              >
+                Sửa blueprint
+              </button>
+            </div>
           </div>
+          {blueprintEditing && blueprintDraft ? (
+            <form className="story-settings" onSubmit={(event) => void saveBlueprint(event)}>
+              <label className="field field-wide">
+                <span>Tiền đề</span>
+                <textarea
+                  required
+                  value={blueprintDraft.premise}
+                  onChange={(event) => setBlueprintField('premise', event.target.value)}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>Hướng cốt truyện</span>
+                <textarea
+                  required
+                  value={blueprintDraft.plotDirection}
+                  onChange={(event) => setBlueprintField('plotDirection', event.target.value)}
+                />
+              </label>
+              <div className="character-grid">
+                {blueprintDraft.characters.map((character) => (
+                  <label className="character-card" key={character.id}>
+                    <strong>{character.name}</strong>
+                    <span>ID ổn định: {character.id}</span>
+                    <input
+                      aria-label={`Tên ${character.id}`}
+                      value={character.name}
+                      onChange={(event) =>
+                        setCharacterField(character.id, 'name', event.target.value)
+                      }
+                    />
+                    <input
+                      aria-label={`Vai trò ${character.id}`}
+                      value={character.role}
+                      onChange={(event) =>
+                        setCharacterField(character.id, 'role', event.target.value)
+                      }
+                    />
+                    <textarea
+                      aria-label={`Tính cách ${character.id}`}
+                      value={character.personality}
+                      onChange={(event) =>
+                        setCharacterField(character.id, 'personality', event.target.value)
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="actions">
+                <button type="submit">Lưu revision blueprint</button>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => setBlueprintEditing(false)}
+                >
+                  Hủy
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <p className="muted">{story.blueprint.blueprint.plotDirection}</p>
+              <div className="chip-row">
+                {story.blueprint.blueprint.themes.map((theme) => (
+                  <span className="chip" key={theme}>
+                    {theme}
+                  </span>
+                ))}
+              </div>
+              <div className="character-grid">
+                {story.blueprint.blueprint.characters.map((character) => (
+                  <article className="character-card" key={character.id}>
+                    <strong>{character.name}</strong>
+                    <span>{character.role}</span>
+                    <small>
+                      {character.ageRange} · {character.appearance}
+                    </small>
+                    <p>Muốn: {character.wants}</p>
+                    <p>Sợ: {character.fears}</p>
+                    <div className="chip-row">
+                      {character.traits.map((trait) => (
+                        <span className="chip" key={trait}>
+                          {trait}
+                        </span>
+                      ))}
+                    </div>
+                    <p>{character.personality}</p>
+                    <small>Arc: {character.arc}</small>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
         </section>
       )}
       {story?.plan && (
@@ -987,26 +1131,124 @@ function StoryWorkspace({
                 job?.status ?? (existingChapter?.origin === 'MANUAL' ? 'MANUAL_EDIT' : 'READY');
               return (
                 <div className="plan-row" key={item.id}>
-                  <div>
-                    <strong>
-                      {item.chapterNumber}. {item.title}
-                    </strong>
-                    <p>{item.summary}</p>
-                    <small>
-                      {item.estimatedWordCount} từ · {item.emotionalArc} · {state}
-                    </small>
-                  </div>
-                  <button
-                    className="secondary"
-                    disabled={job?.status === 'PENDING' || job?.status === 'RUNNING'}
-                    onClick={() => void generatePlanItem(item.id)}
-                  >
-                    {job?.status === 'FAILED'
-                      ? 'Thử lại'
-                      : existingChapter?.origin === 'MANUAL'
-                        ? 'Xác nhận tạo lại'
-                        : 'Tạo chương'}
-                  </button>
+                  {planDraft?.id === item.id ? (
+                    <form className="story-settings" onSubmit={(event) => void savePlanItem(event)}>
+                      <strong>
+                        Chỉnh sửa chương {item.chapterNumber} · ID {item.id}
+                      </strong>
+                      <label className="field">
+                        <span>Tiêu đề</span>
+                        <input
+                          required
+                          value={planDraft.title}
+                          onChange={(event) => setPlanField('title', event.target.value)}
+                        />
+                      </label>
+                      <label className="field field-wide">
+                        <span>Tóm tắt</span>
+                        <textarea
+                          required
+                          value={planDraft.summary}
+                          onChange={(event) => setPlanField('summary', event.target.value)}
+                        />
+                      </label>
+                      <label className="field field-wide">
+                        <span>Mục đích chương</span>
+                        <textarea
+                          required
+                          value={planDraft.purpose}
+                          onChange={(event) => setPlanField('purpose', event.target.value)}
+                        />
+                      </label>
+                      <label className="field field-wide">
+                        <span>Bối cảnh</span>
+                        <textarea
+                          required
+                          value={planDraft.setting}
+                          onChange={(event) => setPlanField('setting', event.target.value)}
+                        />
+                      </label>
+                      <label className="field field-wide">
+                        <span>Xung đột</span>
+                        <textarea
+                          required
+                          value={planDraft.conflict}
+                          onChange={(event) => setPlanField('conflict', event.target.value)}
+                        />
+                      </label>
+                      <label className="field field-wide">
+                        <span>Hướng giải quyết</span>
+                        <textarea
+                          required
+                          value={planDraft.resolution}
+                          onChange={(event) => setPlanField('resolution', event.target.value)}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Nhịp cảm xúc</span>
+                        <input
+                          required
+                          value={planDraft.emotionalArc}
+                          onChange={(event) => setPlanField('emotionalArc', event.target.value)}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Số từ dự kiến</span>
+                        <input
+                          required
+                          min={100}
+                          max={50_000}
+                          type="number"
+                          value={planDraft.estimatedWordCount}
+                          onChange={(event) =>
+                            setPlanField('estimatedWordCount', Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <div className="actions">
+                        <button type="submit">Lưu revision dàn ý</button>
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => setPlanDraft(null)}
+                        >
+                          Hủy
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div>
+                        <strong>
+                          {item.chapterNumber}. {item.title}
+                        </strong>
+                        <p>{item.summary}</p>
+                        <small>
+                          {item.estimatedWordCount} từ · {item.emotionalArc} · {state}
+                        </small>
+                      </div>
+                      <div className="actions">
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => setPlanDraft(item)}
+                        >
+                          Sửa dàn ý
+                        </button>
+                        <button
+                          className="secondary"
+                          disabled={job?.status === 'PENDING' || job?.status === 'RUNNING'}
+                          onClick={() => void generatePlanItem(item.id)}
+                        >
+                          {job?.status === 'FAILED'
+                            ? 'Thử lại'
+                            : existingChapter?.origin === 'MANUAL'
+                              ? 'Xác nhận tạo lại'
+                              : 'Tạo chương'}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -1027,6 +1269,30 @@ function StoryWorkspace({
                 </strong>
                 <p>{item.summary.recap}</p>
               </div>
+              {item.events.length > 0 && (
+                <div className="summary-details">
+                  <strong>Sự kiện:</strong>
+                  <ul>
+                    {item.events.map((event) => (
+                      <li key={`${event.description}-${event.importance}`}>
+                        {event.description} · {event.importance}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {item.threadTransitions.length > 0 && (
+                <div className="summary-details">
+                  <strong>Chuyển trạng thái tuyến truyện:</strong>
+                  <ul>
+                    {item.threadTransitions.map((transition) => (
+                      <li key={`${transition.threadId}-${transition.status}`}>
+                        {transition.threadId}: {transition.status} · {transition.note}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {item.warnings.length > 0 && (
                 <div className="warning-list">
                   {item.warnings.map((warning) => (

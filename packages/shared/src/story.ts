@@ -128,6 +128,7 @@ export const storyEventSchema = z
     characterIds: z.array(storyStableIdSchema).max(100),
   })
   .strict();
+export type StoryEvent = z.infer<typeof storyEventSchema>;
 export const threadTransitionSchema = z
   .object({
     threadId: storyStableIdSchema,
@@ -135,6 +136,7 @@ export const threadTransitionSchema = z
     note: boundedString(2_000),
   })
   .strict();
+export type ThreadTransition = z.infer<typeof threadTransitionSchema>;
 
 export const chapterSummarySchema = z
   .object({
@@ -345,6 +347,8 @@ export type StorySummaryDto = {
   chapterRevision: number;
   revision: number;
   summary: ChapterSummary;
+  events: StoryEvent[];
+  threadTransitions: ThreadTransition[];
   threads: StoryThread[];
   warnings: string[];
   metadata: GenerationMetadata | null;

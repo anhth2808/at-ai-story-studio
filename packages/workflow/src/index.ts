@@ -36,7 +36,12 @@ import {
   renderConfigSchema,
 } from '@studio/shared';
 import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
-import { renderChapterGenerationPrompt, type StoryEngine } from './story-engine.js';
+import {
+  renderChapterGenerationPrompt,
+  renderSummaryGenerationPrompt,
+  type StoryEngine,
+} from './story-engine.js';
+import { renderBlueprintPrompt, renderChapterPlansPrompt } from './story-prompts.js';
 
 export type StudioContext = {
   database: DatabaseHandle;
@@ -126,15 +131,15 @@ export class StudioService {
   }
   scheduleStoryBlueprint(projectId: Id): { executionId: Id; jobId: Id } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
-    if (!this.story.getSettings(projectId))
-      throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const settings = this.story.getSettings(projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
     const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
     const stepId = this.workflow.createStep(
       executionId,
       `story-blueprint:${projectId}`,
       'GENERATE_STORY_BLUEPRINT',
       projectId,
-      fingerprint({ operation: 'BLUEPRINT', settings: this.story.getSettings(projectId) }),
+      renderBlueprintPrompt(settings).inputFingerprint,
     );
     return {
       executionId,
@@ -144,14 +149,16 @@ export class StudioService {
   scheduleStoryPlans(projectId: Id): { executionId: Id; jobId: Id } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     const blueprint = this.story.getBlueprint(projectId);
-    if (!blueprint) throw new AppError('PREREQUISITE_MISSING', 'Story blueprint is required', 409);
+    const settings = this.story.getSettings(projectId);
+    if (!settings || !blueprint)
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings and blueprint are required', 409);
     const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
     const stepId = this.workflow.createStep(
       executionId,
       `story-plans:${projectId}:${blueprint.revision}`,
       'GENERATE_CHAPTER_PLANS',
       projectId,
-      fingerprint({ operation: 'CHAPTER_PLANS', blueprint }),
+      renderChapterPlansPrompt(settings, blueprint.blueprint).inputFingerprint,
     );
     return {
       executionId,
@@ -160,22 +167,22 @@ export class StudioService {
   }
   scheduleStoryStages(projectId: Id): { executionId: Id; jobIds: Id[] } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
-    if (!this.story.getSettings(projectId))
-      throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const settings = this.story.getSettings(projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
     const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
     const blueprintStep = this.workflow.createStep(
       executionId,
       `story-blueprint:${projectId}`,
       'GENERATE_STORY_BLUEPRINT',
       projectId,
-      fingerprint({ operation: 'BLUEPRINT', settings: this.story.getSettings(projectId) }),
+      renderBlueprintPrompt(settings).inputFingerprint,
     );
     const planStep = this.workflow.createStep(
       executionId,
       `story-plans:${projectId}`,
       'GENERATE_CHAPTER_PLANS',
       projectId,
-      fingerprint({ operation: 'CHAPTER_PLANS', settings: this.story.getSettings(projectId) }),
+      fingerprint({ operation: 'CHAPTER_PLANS_DEFERRED', settingsRevision: settings.revision }),
     );
     this.workflow.dependency(planStep, blueprintStep);
     return {
@@ -212,12 +219,7 @@ export class StudioService {
       `story-summary:${chapterId}:${chapter.revision}`,
       'GENERATE_CHAPTER_SUMMARY',
       chapterId,
-      fingerprint({
-        operation: 'CHAPTER_SUMMARY',
-        chapterId,
-        revision: chapter.revision,
-        content: chapter.content,
-      }),
+      renderSummaryGenerationPrompt(this.story, this.chapters, chapterId).inputFingerprint,
     );
     return {
       executionId,

@@ -89,19 +89,33 @@ export function renderChapterPlansPrompt(
 export function renderChapterPrompt(
   context: BoundedGenerationContext,
   planItem: ChapterPlanItem,
+  model: string | null = null,
 ): StoryPrompt {
-  return render('CHAPTER', 'story-chapter-v1', 'chapter-generation-v1', { context, planItem }, [
-    ['generation-context', context],
-    ['plan-item', planItem],
-  ]);
+  return render(
+    'CHAPTER',
+    'story-chapter-v1',
+    'chapter-generation-v1',
+    { context, planItem, model },
+    [
+      ['generation-context', context],
+      ['plan-item', planItem],
+    ],
+  );
 }
 
 export function renderSummaryPrompt(
   context: BoundedGenerationContext,
   chapter: { title: string; content: string; revision: number },
+  model: string | null = null,
 ): StoryPrompt {
-  return render('CHAPTER_SUMMARY', 'story-summary-v1', 'chapter-summary-v1', { context, chapter }, [
-    ['generation-context', context],
-    ['chapter', chapter],
-  ]);
+  return render(
+    'CHAPTER_SUMMARY',
+    'story-summary-v1',
+    'chapter-summary-v1',
+    { context, chapter, model },
+    [
+      ['generation-context', context],
+      ['chapter', chapter],
+    ],
+  );
 }
