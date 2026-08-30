@@ -47,4 +47,31 @@ describe('workflow repository', () => {
     expect(repo.getStep(stepId)?.status).toBe('PENDING');
     database.sqlite.close();
   });
+  it('keeps recovered work safe from the stale worker', async () => {
+    const database = await setup();
+    const repo = new WorkflowRepository(database);
+    const execution = repo.createExecution('project', 'TEST');
+    const completedId = repo.createStep(execution, 'completed', 'TEST', 'entity', 'one');
+    const recoveredId = repo.createStep(execution, 'recovered', 'TEST', 'entity', 'two');
+    const completedJobId = repo.createJob('TEST', 'entity', completedId);
+    const recoveredJobId = repo.createJob('TEST', 'entity', recoveredId);
+    const first = repo.claim('worker-a')!;
+    repo.complete(first);
+    const stale = repo.claim('worker-a', 1)!;
+    database.sqlite
+      .prepare('UPDATE workflow_steps SET lease_expires_at=? WHERE id=?')
+      .run(new Date(Date.now() - 1000).toISOString(), recoveredId);
+    repo.recoverExpired();
+    repo.complete(stale);
+    const recovered = repo.claim('worker-b')!;
+    expect(recovered.id).toBe(recoveredId);
+    repo.complete(recovered);
+    expect(repo.getStep(completedId)?.status).toBe('COMPLETED');
+    expect(repo.getStep(completedId)?.attempts).toBe(1);
+    expect(repo.getStep(recoveredId)?.status).toBe('COMPLETED');
+    expect(repo.getJob(completedJobId)?.status).toBe('COMPLETED');
+    expect(repo.getStep(recoveredId)?.attempts).toBe(2);
+    expect(repo.getJob(recoveredJobId)?.status).toBe('COMPLETED');
+    database.sqlite.close();
+  });
 });

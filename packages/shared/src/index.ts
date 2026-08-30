@@ -38,7 +38,7 @@ export type ProjectInput = z.infer<typeof projectInputSchema>;
 export const projectUpdateSchema = projectInputSchema.partial();
 export const chapterInputSchema = z.object({
   title: z.string().trim().min(1).max(200),
-  content: z.string().min(1).max(2_000_000),
+  content: z.string().max(2_000_000),
   expectedRevision: z.number().int().positive().optional(),
 });
 export type ChapterInput = z.infer<typeof chapterInputSchema>;

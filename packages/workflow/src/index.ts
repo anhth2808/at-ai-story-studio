@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   AssetRepository,
@@ -36,7 +36,6 @@ export type StudioContext = {
 };
 const fingerprint = (value: unknown): string =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const stamp = (): string => new Date().toISOString();
 
 export class StudioService {
   readonly projects: ProjectRepository;
@@ -74,8 +73,11 @@ export class StudioService {
     return this.chapters.create(projectId, input);
   }
   updateChapter(id: Id, input: ChapterInput): ReturnType<ChapterRepository['update']> {
+    const current = this.chapters.get(id);
+    if (!current) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const contentChanged = input.content !== current.content;
     const chapter = this.chapters.update(id, input);
-    if (input.content) this.invalidateChapterDescendants(chapter.projectId, chapter.id);
+    if (contentChanged) this.invalidateChapterDescendants(chapter.projectId, chapter.id);
     return chapter;
   }
   deleteChapter(id: Id): void {
@@ -103,23 +105,25 @@ export class StudioService {
       `clean:${chapter.id}:${chapter.revision}`,
       'CLEAN_TEXT',
       chapter.id,
-      fingerprint({ chapterId, revision: chapter.revision, content: chapter.content }),
+      fingerprint({ chapterId, content: chapter.content }),
     );
+    this.workflow.markCompleted(cleanId);
     const segments = segmentText(cleanNarrationText(chapter.content).text);
     const jobIds: Id[] = [];
     let prior = cleanId;
     for (const segment of segments) {
+      const segmentFingerprint = fingerprint({ chapterId, segment: segment.textHash });
       const stepId = this.workflow.createStep(
         executionId,
         `tts:${chapter.id}:${segment.index}:${segment.textHash}`,
         'TTS_SEGMENT',
         chapter.id,
-        fingerprint({ chapterId, revision: chapter.revision, segment: segment.textHash }),
+        segmentFingerprint,
       );
       this.workflow.dependency(stepId, prior);
       const existing = this.context.database.sqlite
         .prepare(
-          'SELECT t.id,t.status,t.text_hash as textHash,t.audio_asset_id as audioAssetId FROM tts_segments t LEFT JOIN assets a ON a.id=t.audio_asset_id WHERE t.chapter_id=? AND t.segment_index=?',
+          "SELECT t.id,t.status,t.text_hash as textHash,t.audio_asset_id as audioAssetId FROM tts_segments t LEFT JOIN assets a ON a.id=t.audio_asset_id AND a.status='READY' AND a.is_current=1 WHERE t.chapter_id=? AND t.segment_index=?",
         )
         .get(chapter.id, segment.index) as
         { id: Id; status: string; textHash: string; audioAssetId: Id | null } | undefined;
@@ -127,9 +131,9 @@ export class StudioService {
         this.workflow.markCompleted(stepId);
         this.context.database.sqlite
           .prepare(
-            "UPDATE tts_segments SET id=?,status='COMPLETED',error=NULL WHERE chapter_id=? AND segment_index=?",
+            "UPDATE tts_segments SET id=?,status='COMPLETED',fingerprint=?,error=NULL WHERE chapter_id=? AND segment_index=?",
           )
-          .run(stepId, chapter.id, segment.index);
+          .run(stepId, segmentFingerprint, chapter.id, segment.index);
       } else if (existing) {
         this.context.database.sqlite
           .prepare(
@@ -139,7 +143,7 @@ export class StudioService {
             stepId,
             segment.text,
             segment.textHash,
-            fingerprint({ chapterId, revision: chapter.revision, segment: segment.textHash }),
+            segmentFingerprint,
             chapter.id,
             segment.index,
           );
@@ -156,7 +160,7 @@ export class StudioService {
             segment.text,
             segment.textHash,
             'PENDING',
-            fingerprint({ chapterId, revision: chapter.revision, segment: segment.textHash }),
+            segmentFingerprint,
           );
         jobIds.push(this.workflow.createJob('TTS_SEGMENT', chapter.id, stepId));
       }
@@ -169,7 +173,6 @@ export class StudioService {
       chapter.id,
       fingerprint({
         chapterId,
-        revision: chapter.revision,
         segments: segments.map((segment) => segment.textHash),
       }),
     );
@@ -186,7 +189,7 @@ export class StudioService {
       `subtitle:${chapter.id}:${chapter.revision}`,
       'SUBTITLE',
       chapter.id,
-      fingerprint({ chapterId, revision: chapter.revision }),
+      fingerprint({ chapterId, content: chapter.content }),
     );
     return this.workflow.createJob('SUBTITLE', chapter.id, step);
   }
@@ -209,15 +212,17 @@ export class StudioService {
   private invalidateChapterDescendants(projectId: Id, chapterId: Id): void {
     for (const role of [`chapter:${chapterId}:audio`, `chapter:${chapterId}:subtitle`])
       this.assets.invalidateRole(projectId, role);
+    this.workflow.invalidateSteps(chapterId, [
+      'CLEAN_TEXT',
+      'TTS_SEGMENT',
+      'MERGE_AUDIO',
+      'SUBTITLE',
+    ]);
     this.invalidateRender(projectId);
   }
   private invalidateRender(projectId: Id): void {
     this.assets.invalidateRole(projectId, 'project:render');
-    this.context.database.sqlite
-      .prepare(
-        "UPDATE workflow_steps SET status='INVALIDATED',updated_at=? WHERE entity_id=? AND type='RENDER' AND status IN ('COMPLETED','FAILED')",
-      )
-      .run(stamp(), projectId);
+    this.workflow.invalidateSteps(projectId, ['RENDER']);
   }
 }
 
@@ -272,25 +277,38 @@ export class WorkerExecutor {
     }
     throw new Error(`Unknown workflow step: ${step.type}`);
   }
+  private stepIsCurrent(step: ClaimedStep): boolean {
+    const current = this.context.database.sqlite
+      .prepare(
+        "SELECT 1 FROM workflow_steps WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND lease_owner=? AND input_fingerprint=?",
+      )
+      .get(step.id, step.attemptId, this.workerId, step.input_fingerprint);
+    return Boolean(current);
+  }
   private async executeTts(step: ClaimedStep): Promise<void> {
+    const segment = this.context.database.sqlite
+      .prepare(
+        'SELECT chapter_id as chapterId,text,text_hash as textHash,status,fingerprint FROM tts_segments WHERE id=? AND chapter_id=?',
+      )
+      .get(step.id, step.entity_id) as
+      | { chapterId: Id; text: string; textHash: string; status: string; fingerprint: string }
+      | undefined;
+    if (!segment || segment.fingerprint !== step.input_fingerprint || segment.status !== 'PENDING')
+      throw new Error('TTS segment is stale or unavailable');
     const chapter = this.context.database.sqlite
-      .prepare('SELECT * FROM chapters WHERE id=?')
-      .get(step.entity_id) as { project_id: Id; content: string; id: Id } | undefined;
+      .prepare('SELECT project_id as projectId,id FROM chapters WHERE id=?')
+      .get(step.entity_id) as { projectId: Id; id: Id } | undefined;
     if (!chapter) throw new Error('Chapter not found');
-    const text = segmentText(cleanNarrationText(chapter.content).text).find(
-      (item) =>
-        fingerprint({ chapterId: chapter.id, revision: 1, segment: item.textHash }) ===
-          step.input_fingerprint || item.textHash === step.step_key.split(':').at(-1),
-    );
-    if (!text) throw new Error('TTS segment not found');
+    if (!this.stepIsCurrent(step)) throw new Error('TTS segment input is stale');
     const staging = join(this.context.workspace.staging, step.attemptId);
     await mkdir(staging, { recursive: true });
     const output = join(staging, `${step.id}.mp3`);
     await this.tts.synthesize(
-      text.text,
+      segment.text,
       process.env.EDGE_TTS_VOICE ?? 'vi-VN-HoaiMyNeural',
       output,
     );
+    if (!this.stepIsCurrent(step)) throw new Error('TTS segment input changed during synthesis');
     const probe = await this.context.media.probe(output);
     const format = probe['format'] as { duration?: string } | undefined;
     const durationMs = Math.round(Number(format?.duration ?? 0) * 1000);
@@ -298,32 +316,49 @@ export class WorkerExecutor {
     const digest = await sha256File(output);
     const destination = join(
       this.context.workspace.projects,
-      chapter.project_id,
+      chapter.projectId,
       'audio',
       'segments',
       `${chapter.id}-${step.id}.mp3`,
     );
     await promoteFile(output, destination);
     const assetId = randomUUID();
-    new AssetRepository(this.context.database).register({
-      id: assetId,
-      projectId: chapter.project_id,
-      type: 'TTS_SEGMENT_AUDIO',
-      role: `segment:${step.id}`,
-      path: relativeAssetPath(this.context.workspace.root, destination),
-      mediaType: 'audio/mpeg',
-      bytes: digest.bytes,
-      sha256: digest.hash,
-      sourceEntityId: chapter.id,
-      sourceStepId: step.id,
-      inputFingerprint: step.input_fingerprint,
-      metadata: { durationMs },
-    });
-    this.context.database.sqlite
+    const assets = new AssetRepository(this.context.database);
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: assetId,
+        projectId: chapter.projectId,
+        type: 'TTS_SEGMENT_AUDIO',
+        role: `segment:${step.id}`,
+        path: relativeAssetPath(this.context.workspace.root, destination),
+        mediaType: 'audio/mpeg',
+        bytes: digest.bytes,
+        sha256: digest.hash,
+        sourceEntityId: chapter.id,
+        sourceStepId: step.id,
+        inputFingerprint: step.input_fingerprint,
+        metadata: { durationMs },
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(destination, { force: true });
+      throw new Error('TTS segment input changed before promotion');
+    }
+    const result = this.context.database.sqlite
       .prepare(
-        "UPDATE tts_segments SET status='COMPLETED',audio_asset_id=?,duration_ms=?,error=NULL WHERE id=?",
+        "UPDATE tts_segments SET status='COMPLETED',audio_asset_id=?,duration_ms=?,error=NULL WHERE id=? AND fingerprint=?",
       )
-      .run(assetId, durationMs, step.id);
+      .run(assetId, durationMs, step.id, step.input_fingerprint);
+    if (result.changes !== 1) {
+      assets.invalidateRole(chapter.projectId, `segment:${step.id}`);
+      throw new Error('TTS segment record changed before completion');
+    }
   }
   private async executeMerge(step: ClaimedStep): Promise<void> {
     const chapter = this.context.database.sqlite
@@ -332,17 +367,41 @@ export class WorkerExecutor {
     if (!chapter) throw new Error('Chapter not found');
     const rows = this.context.database.sqlite
       .prepare(
-        "SELECT a.path FROM tts_segments t JOIN assets a ON a.id=t.audio_asset_id WHERE t.chapter_id=? AND t.status='COMPLETED' AND a.is_current=1 ORDER BY t.segment_index",
+        'SELECT t.status,t.text_hash as textHash,a.path,a.status as assetStatus,a.is_current as isCurrent FROM tts_segments t LEFT JOIN assets a ON a.id=t.audio_asset_id WHERE t.chapter_id=? ORDER BY t.segment_index',
       )
-      .all(chapter.id) as Array<{ path: string }>;
-    if (!rows.length) throw new Error('No completed TTS segments');
+      .all(chapter.id) as Array<{
+      status: string;
+      textHash: string;
+      path: string | null;
+      assetStatus: string | null;
+      isCurrent: number | null;
+    }>;
+    const expectedFingerprint = fingerprint({
+      chapterId: chapter.id,
+      segments: rows.map((row) => row.textHash),
+    });
+    if (
+      !rows.length ||
+      rows.some(
+        (row) =>
+          row.status !== 'COMPLETED' ||
+          !row.path ||
+          row.assetStatus !== 'READY' ||
+          row.isCurrent !== 1,
+      ) ||
+      expectedFingerprint !== step.input_fingerprint
+    )
+      throw new Error('TTS segments are incomplete or stale');
+    if (!this.stepIsCurrent(step)) throw new Error('Merge input is stale');
     const staging = join(this.context.workspace.staging, step.attemptId);
     await mkdir(staging, { recursive: true });
     const list = join(staging, 'concat.txt');
     await writeFile(
       list,
       rows
-        .map((row) => `file '${join(this.context.workspace.root, row.path).replaceAll('\\', '/')}'`)
+        .map(
+          (row) => `file '${join(this.context.workspace.root, row.path!).replaceAll('\\', '/')}'`,
+        )
         .join('\n'),
       'utf8',
     );
@@ -359,10 +418,12 @@ export class WorkerExecutor {
       'copy',
       output,
     ]);
+    if (!this.stepIsCurrent(step)) throw new Error('Merge input changed during execution');
     const probe = await this.context.media.probe(output);
     const durationMs = Math.round(
       Number((probe['format'] as { duration?: string })?.duration ?? 0) * 1000,
     );
+    if (!durationMs) throw new Error('Merged audio produced no duration');
     const digest = await sha256File(output);
     const destination = join(
       this.context.workspace.projects,
@@ -371,26 +432,44 @@ export class WorkerExecutor {
       `${chapter.id}-${step.id}.mp3`,
     );
     await promoteFile(output, destination);
-    new AssetRepository(this.context.database).register({
-      id: randomUUID(),
-      projectId: chapter.projectId,
-      type: 'CHAPTER_AUDIO',
-      role: `chapter:${chapter.id}:audio`,
-      path: relativeAssetPath(this.context.workspace.root, destination),
-      mediaType: 'audio/mpeg',
-      bytes: digest.bytes,
-      sha256: digest.hash,
-      sourceEntityId: chapter.id,
-      sourceStepId: step.id,
-      inputFingerprint: step.input_fingerprint,
-      metadata: { durationMs },
-    });
+    const assets = new AssetRepository(this.context.database);
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: randomUUID(),
+        projectId: chapter.projectId,
+        type: 'CHAPTER_AUDIO',
+        role: `chapter:${chapter.id}:audio`,
+        path: relativeAssetPath(this.context.workspace.root, destination),
+        mediaType: 'audio/mpeg',
+        bytes: digest.bytes,
+        sha256: digest.hash,
+        sourceEntityId: chapter.id,
+        sourceStepId: step.id,
+        inputFingerprint: step.input_fingerprint,
+        metadata: { durationMs },
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(destination, { force: true });
+      throw new Error('Merge input changed before promotion');
+    }
   }
   private async executeSubtitle(step: ClaimedStep): Promise<void> {
     const chapter = this.context.database.sqlite
-      .prepare('SELECT project_id as projectId,id FROM chapters WHERE id=?')
-      .get(step.entity_id) as { projectId: Id; id: Id } | undefined;
+      .prepare('SELECT project_id as projectId,id,content FROM chapters WHERE id=?')
+      .get(step.entity_id) as { projectId: Id; id: Id; content: string } | undefined;
     if (!chapter) throw new Error('Chapter not found');
+    if (
+      fingerprint({ chapterId: chapter.id, content: chapter.content }) !== step.input_fingerprint ||
+      !this.stepIsCurrent(step)
+    )
+      throw new Error('Subtitle input is stale');
     const segments = this.context.database.sqlite
       .prepare(
         "SELECT text,duration_ms as durationMs FROM tts_segments WHERE chapter_id=? AND status='COMPLETED' ORDER BY segment_index",
@@ -403,6 +482,7 @@ export class WorkerExecutor {
     await mkdir(staging, { recursive: true });
     const output = join(staging, 'chapter.srt');
     await writeFile(output, srt, 'utf8');
+    if (!this.stepIsCurrent(step)) throw new Error('Subtitle input changed during execution');
     const digest = await sha256File(output);
     const destination = join(
       this.context.workspace.projects,
@@ -411,19 +491,32 @@ export class WorkerExecutor {
       `${chapter.id}-${step.id}.srt`,
     );
     await promoteFile(output, destination);
-    new AssetRepository(this.context.database).register({
-      id: randomUUID(),
-      projectId: chapter.projectId,
-      type: 'SUBTITLE',
-      role: `chapter:${chapter.id}:subtitle`,
-      path: relativeAssetPath(this.context.workspace.root, destination),
-      mediaType: 'text/plain',
-      bytes: digest.bytes,
-      sha256: digest.hash,
-      sourceEntityId: chapter.id,
-      sourceStepId: step.id,
-      inputFingerprint: step.input_fingerprint,
-    });
+    const assets = new AssetRepository(this.context.database);
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: randomUUID(),
+        projectId: chapter.projectId,
+        type: 'SUBTITLE',
+        role: `chapter:${chapter.id}:subtitle`,
+        path: relativeAssetPath(this.context.workspace.root, destination),
+        mediaType: 'text/plain',
+        bytes: digest.bytes,
+        sha256: digest.hash,
+        sourceEntityId: chapter.id,
+        sourceStepId: step.id,
+        inputFingerprint: step.input_fingerprint,
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(destination, { force: true });
+      throw new Error('Subtitle input changed before promotion');
+    }
   }
   private async executeRender(step: ClaimedStep): Promise<void> {
     const projectId = step.entity_id;

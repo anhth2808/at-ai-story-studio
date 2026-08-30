@@ -9,6 +9,6 @@
 - The API currently loads a complete project/chapter DTO into simple views; pagination is not needed for the V1 local milestone.
 - IDs currently use cryptographically random UUIDs rather than UUIDv7.
 - The render manifest is represented by persisted fingerprints and asset lineage; a standalone immutable manifest file is not yet emitted.
-- Automated coverage is focused on text, path safety, hashing, and repository claim/recovery behavior. Full process cancellation, subtitle replacement, manifest, and multi-worker race fixtures remain future hardening work.
+- Automated coverage includes workflow claimability, failed-segment-only retry, stale-input protection, chapter invalidation, and worker restart recovery. Full process cancellation, subtitle replacement, standalone render manifests, and multi-worker race fixtures remain future hardening work.
 
 These limitations are deliberate V1 scope or known gaps against the design notes. The next milestone should harden the current first-working-video loop before adding advanced AI stages.
