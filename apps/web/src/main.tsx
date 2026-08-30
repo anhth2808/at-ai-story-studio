@@ -1,10 +1,19 @@
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { ChapterDto, Health, JobDto, ProjectDto } from '@studio/shared';
+import type {
+  ChapterDto,
+  Health,
+  JobDto,
+  ProjectDto,
+  RenderConfig,
+  StatusSummary,
+} from '@studio/shared';
 import './styles.css';
 const API_BASE = 'http://127.0.0.1:3001';
 type ProjectDetail = { project: ProjectDto; chapters: ChapterDto[] };
 type RenderAsset = { id: string; url: string; mediaType: string };
+type AudioAsset = { id: string; url: string; mediaType: string };
+type SubtitleAsset = { srt: string; url: string };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const isMultipart = init?.body instanceof FormData;
@@ -20,6 +29,17 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
 }
+
+async function apiText(path: string): Promise<string> {
+  const response = await fetch(`${API_BASE}${path}`);
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: { message?: string };
+    } | null;
+    throw new Error(body?.error?.message ?? `HTTP ${response.status}`);
+  }
+  return response.text();
+}
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
   const asset = await api<RenderAsset>(`/api/projects/${projectId}/render`).catch(() => null);
   return asset
@@ -33,9 +53,14 @@ function App() {
   const [selected, setSelected] = useState<ProjectDto | null>(null);
   const [chapters, setChapters] = useState<ChapterDto[]>([]);
   const [jobs, setJobs] = useState<JobDto[]>([]);
+  const [status, setStatus] = useState<StatusSummary | null>(null);
+  const [audio, setAudio] = useState<AudioAsset | null>(null);
+  const [subtitle, setSubtitle] = useState<SubtitleAsset | null>(null);
   const [render, setRender] = useState<RenderAsset | null>(null);
+  const [renderConfig, setRenderConfig] = useState<RenderConfig | null>(null);
   const [error, setError] = useState('');
   const [tab, setTab] = useState('Story');
+  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
 
   const refresh = async (): Promise<void> => {
     try {
@@ -49,11 +74,46 @@ function App() {
         const detail = await api<ProjectDetail>(`/api/projects/${selected.id}`);
         setSelected(detail.project);
         setChapters(detail.chapters);
+        const chapterId = activeChapterId ?? detail.chapters[0]?.id;
+        setActiveChapterId((current) => current ?? detail.chapters[0]?.id ?? null);
+        setStatus(
+          await api<StatusSummary>(
+            chapterId ? `/api/chapters/${chapterId}/status` : `/api/projects/${selected.id}/status`,
+          ),
+        );
         const currentJobs = await Promise.all(
           jobs.map((job) => api<JobDto>(`/api/jobs/${job.id}`).catch(() => job)),
         );
         setJobs(currentJobs);
         setRender(await loadRender(selected.id));
+        if (chapterId) {
+          const [nextAudio, nextSubtitle] = await Promise.all([
+            api<AudioAsset>(`/api/chapters/${chapterId}/audio`).catch(() => null),
+            apiText(`/api/chapters/${chapterId}/subtitles`).catch(() => null),
+          ]);
+          setAudio(
+            nextAudio
+              ? {
+                  ...nextAudio,
+                  url: nextAudio.url.startsWith('http')
+                    ? nextAudio.url
+                    : `${API_BASE}${nextAudio.url}`,
+                }
+              : null,
+          );
+          setSubtitle(
+            nextSubtitle
+              ? { srt: nextSubtitle, url: `/api/chapters/${chapterId}/subtitles` }
+              : null,
+          );
+        } else {
+          setAudio(null);
+          setSubtitle(null);
+        }
+        setRenderConfig(await api<RenderConfig>(`/api/projects/${selected.id}/render-config`));
+      } else {
+        setAudio(null);
+        setSubtitle(null);
       }
       setError('');
     } catch (cause) {
@@ -65,7 +125,7 @@ function App() {
     void refresh();
     const timer = setInterval(() => void refresh(), 2000);
     return () => clearInterval(timer);
-  }, [selected?.id, jobs.length]);
+  }, [selected?.id, jobs.length, activeChapterId]);
 
   const createProject = async (): Promise<void> => {
     const title = window.prompt('Tên dự án');
@@ -81,12 +141,36 @@ function App() {
     });
     await refresh();
   };
+  const editProject = async (): Promise<void> => {
+    if (!selected) return;
+    const title = window.prompt('Tên dự án', selected.title);
+    if (!title || title === selected.title) return;
+    await api(`/api/projects/${selected.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    });
+    await refresh();
+  };
+
+  const deleteProject = async (): Promise<void> => {
+    if (!selected || !window.confirm(`Xóa dự án "${selected.title}"?`)) return;
+    await api(`/api/projects/${selected.id}`, { method: 'DELETE' });
+    setSelected(null);
+    setChapters([]);
+    setJobs([]);
+    setStatus(null);
+    setRender(null);
+    setRenderConfig(null);
+    await refresh();
+  };
 
   const openProject = async (project: ProjectDto): Promise<void> => {
     const detail = await api<ProjectDetail>(`/api/projects/${project.id}`);
     setSelected(detail.project);
     setChapters(detail.chapters);
+    setActiveChapterId(detail.chapters[0]?.id ?? null);
     setJobs([]);
+    setStatus(await api<StatusSummary>(`/api/projects/${project.id}/status`));
     setRender(await loadRender(project.id));
   };
 
@@ -119,7 +203,7 @@ function App() {
   };
 
   const generateAudio = async (): Promise<void> => {
-    const chapter = chapters[0];
+    const chapter = chapters.find((item) => item.id === activeChapterId) ?? chapters[0];
     if (!chapter) return;
     const result = await api<{ jobIds: string[] }>(`/api/chapters/${chapter.id}/tts`, {
       method: 'POST',
@@ -128,12 +212,21 @@ function App() {
   };
 
   const generateSubtitles = async (): Promise<void> => {
-    const chapter = chapters[0];
+    const chapter = chapters.find((item) => item.id === activeChapterId) ?? chapters[0];
     if (!chapter) return;
     const result = await api<{ jobId: string }>(`/api/chapters/${chapter.id}/subtitles`, {
       method: 'POST',
     });
     await track([result.jobId]);
+  };
+
+  const saveSubtitle = async (): Promise<void> => {
+    if (!activeChapter || !subtitle) return;
+    await api(`/api/chapters/${activeChapter.id}/subtitles`, {
+      method: 'PUT',
+      body: JSON.stringify({ srt: subtitle.srt }),
+    });
+    await refresh();
   };
 
   const renderVideo = async (): Promise<void> => {
@@ -142,6 +235,16 @@ function App() {
       method: 'POST',
     });
     await track([result.jobId]);
+  };
+  const updateRenderConfig = async (patch: Partial<RenderConfig>): Promise<void> => {
+    if (!selected || !renderConfig) return;
+    const next = { ...renderConfig, ...patch };
+    await api(`/api/projects/${selected.id}/render-config`, {
+      method: 'PATCH',
+      body: JSON.stringify(next),
+    });
+    setRenderConfig(next);
+    await refresh();
   };
 
   const uploadAsset = async (file: File): Promise<void> => {
@@ -152,7 +255,7 @@ function App() {
     await refresh();
   };
 
-  const firstChapter = chapters[0];
+  const activeChapter = chapters.find((item) => item.id === activeChapterId) ?? chapters[0];
   return (
     <main>
       <header>
@@ -201,6 +304,14 @@ function App() {
                 <p className="eyebrow">PROJECT</p>
                 <h2>{selected.title}</h2>
               </div>
+              <div className="editor-actions">
+                <button className="secondary" onClick={() => void editProject()}>
+                  Đổi tên
+                </button>
+                <button className="danger" onClick={() => void deleteProject()}>
+                  Xóa
+                </button>
+              </div>
               <div className="tabs">
                 {['Story', 'Audio', 'Video', 'Render'].map((item) => (
                   <button
@@ -212,6 +323,14 @@ function App() {
                   </button>
                 ))}
               </div>
+              {status && (
+                <div className="status-grid" aria-label="Trạng thái dự án">
+                  <span>Narration: {status.narration}</span>
+                  <span>Phụ đề: {status.subtitles}</span>
+                  <span>Nền: {status.background}</span>
+                  <span>Render: {status.render}</span>
+                </div>
+              )}
             </div>
             {tab === 'Story' && (
               <>
@@ -247,6 +366,13 @@ function App() {
                       <span>
                         Chương {chapter.number} · revision {chapter.revision}
                       </span>
+                      <button
+                        className="secondary"
+                        onClick={() => setActiveChapterId(chapter.id)}
+                        aria-pressed={activeChapter?.id === chapter.id}
+                      >
+                        {activeChapter?.id === chapter.id ? 'Đang chọn' : 'Chọn chương'}
+                      </button>
                       <button onClick={() => void saveChapter(chapter)}>Lưu nội dung</button>
                     </div>
                   </article>
@@ -258,13 +384,34 @@ function App() {
                 <h3>Narration</h3>
                 <p className="muted">Tách văn bản, tạo TTS theo từng đoạn, sau đó ghép audio.</p>
                 <div className="actions">
-                  <button disabled={!firstChapter} onClick={() => void generateAudio()}>
+                  <button disabled={!activeChapter} onClick={() => void generateAudio()}>
                     Tạo narration
                   </button>
-                  <button disabled={!firstChapter} onClick={() => void generateSubtitles()}>
+                  <button disabled={!activeChapter} onClick={() => void generateSubtitles()}>
                     Tạo phụ đề SRT
                   </button>
                 </div>
+                {audio && <audio controls preload="metadata" src={audio.url} />}
+                <label className="field">
+                  <span>Phụ đề SRT hiện tại</span>
+                  <textarea
+                    value={subtitle?.srt ?? ''}
+                    placeholder="Tạo phụ đề hoặc dán SRT tại đây."
+                    onChange={(event) =>
+                      setSubtitle((current) => ({
+                        srt: event.target.value,
+                        url: current?.url ?? '',
+                      }))
+                    }
+                  />
+                </label>
+                <button
+                  className="secondary"
+                  disabled={!activeChapter || !subtitle?.srt.trim()}
+                  onClick={() => void saveSubtitle()}
+                >
+                  Lưu phụ đề
+                </button>
                 <JobList
                   jobs={jobs.filter(
                     (job) =>
@@ -272,6 +419,7 @@ function App() {
                       job.type === 'MERGE_AUDIO' ||
                       job.type === 'SUBTITLE',
                   )}
+                  onChanged={() => void refresh()}
                 />
               </div>
             )}
@@ -305,6 +453,20 @@ function App() {
                     />
                   </label>
                 </div>
+                <div className="actions">
+                  <span className="muted">Nền: {status?.background ?? 'PENDING'}</span>
+                  <span className="muted">Render: {status?.render ?? 'PENDING'}</span>
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void api(`/api/projects/${selected.id}/music`, { method: 'DELETE' }).then(
+                        refresh,
+                      )
+                    }
+                  >
+                    Xóa nhạc nền
+                  </button>
+                </div>
               </div>
             )}
             {tab === 'Render' && (
@@ -313,10 +475,61 @@ function App() {
                 <p className="muted">
                   Render dùng narration, background hiện tại, phụ đề nếu có và music nếu bật.
                 </p>
-                <button disabled={!firstChapter} onClick={() => void renderVideo()}>
+                {renderConfig && (
+                  <div className="actions render-config">
+                    <label>
+                      Khung hình
+                      <select
+                        value={`${renderConfig.width}x${renderConfig.height}`}
+                        onChange={(event) => {
+                          const portrait = event.target.value === '1080x1920';
+                          void updateRenderConfig(
+                            portrait
+                              ? { width: 1080, height: 1920 }
+                              : { width: 1920, height: 1080 },
+                          );
+                        }}
+                      >
+                        <option value="1920x1080">Ngang 16:9</option>
+                        <option value="1080x1920">Dọc 9:16</option>
+                      </select>
+                    </label>
+                    <label>
+                      FPS
+                      <select
+                        value={renderConfig.fps}
+                        onChange={(event) =>
+                          void updateRenderConfig({
+                            fps: Number(event.target.value) as RenderConfig['fps'],
+                          })
+                        }
+                      >
+                        {[24, 25, 30, 60].map((fps) => (
+                          <option key={fps} value={fps}>
+                            {fps}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={renderConfig.musicEnabled}
+                        onChange={(event) =>
+                          void updateRenderConfig({ musicEnabled: event.target.checked })
+                        }
+                      />
+                      Bật nhạc nền
+                    </label>
+                  </div>
+                )}
+                <button disabled={!activeChapter} onClick={() => void renderVideo()}>
                   Render video
                 </button>
-                <JobList jobs={jobs.filter((job) => job.type === 'RENDER')} />
+                <JobList
+                  jobs={jobs.filter((job) => job.type === 'RENDER')}
+                  onChanged={() => void refresh()}
+                />
                 {render && <video className="video" controls src={render.url} />}
               </div>
             )}
@@ -333,8 +546,12 @@ function App() {
   );
 }
 
-function JobList({ jobs }: { jobs: JobDto[] }) {
+function JobList({ jobs, onChanged }: { jobs: JobDto[]; onChanged?: () => void }) {
   if (!jobs.length) return <p className="muted">Chưa có job trong phiên này.</p>;
+  const changeJob = async (job: JobDto, action: 'retry' | 'cancel'): Promise<void> => {
+    await api(`/api/jobs/${job.id}/${action}`, { method: 'POST' });
+    onChanged?.();
+  };
   return (
     <div className="job-list">
       {jobs.map((job) => (
@@ -345,6 +562,16 @@ function JobList({ jobs }: { jobs: JobDto[] }) {
             {Math.round(job.progress * 100)}% · lần thử {job.attempts}
           </small>
           {job.error && <em>{job.error}</em>}
+          {job.status === 'FAILED' && (
+            <button className="secondary" onClick={() => void changeJob(job, 'retry')}>
+              Thử lại
+            </button>
+          )}
+          {(job.status === 'PENDING' || job.status === 'RUNNING') && (
+            <button className="secondary" onClick={() => void changeJob(job, 'cancel')}>
+              Hủy
+            </button>
+          )}
         </div>
       ))}
     </div>

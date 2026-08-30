@@ -1,11 +1,13 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { createDatabase } from '@studio/database';
+import { createDatabase, migrateDatabase } from '@studio/database';
 import {
   initializeWorkspace,
   ProcessRunner,
   FfmpegTools,
+  reconcileWorkspace,
+  validateMediaFile,
   safeWorkspacePath,
   sha256File,
   contentTypeFor,
@@ -19,12 +21,13 @@ import {
   projectUpdateSchema,
   reorderSchema,
   renderConfigSchema,
+  subtitleReplacementSchema,
   idSchema,
 } from '@studio/shared';
-import { StudioService } from '@studio/workflow';
+import { StudioService, parseSrt } from '@studio/workflow';
 import { WorkflowRepository } from '@studio/database';
-import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { createReadStream, createWriteStream, readFileSync, statSync } from 'node:fs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,16 +38,9 @@ const root =
   join(dirname(fileURLToPath(import.meta.url)), '../../../workspace');
 const dbFilename = process.env.STUDIO_DB_PATH ?? join(root, 'studio.db');
 const database = createDatabase(dbFilename);
-database.sqlite.exec(
-  readFileSync(
-    join(
-      dirname(fileURLToPath(import.meta.url)),
-      '../../../packages/database/migrations/0000_initial.sql',
-    ),
-    'utf8',
-  ),
-);
+migrateDatabase(database);
 const workspace = await initializeWorkspace(root);
+await reconcileWorkspace(workspace);
 const runner = new ProcessRunner();
 const media = new FfmpegTools(runner);
 const context = { database, workspace, media, runner };
@@ -80,7 +76,7 @@ app.get('/api/projects/:id/render', async (request) => {
   const projectId = idSchema.parse(params.id);
   const row = database.sqlite
     .prepare(
-      "SELECT id,type,path,media_type as mediaType,bytes,sha256 FROM assets WHERE project_id=? AND role='project:render' AND is_current=1",
+      "SELECT id,type,path,media_type as mediaType,bytes,sha256 FROM assets WHERE project_id=? AND role='project:render' AND is_current=1 AND status='READY'",
     )
     .get(projectId) as
     | { id: string; type: string; path: string; mediaType: string; bytes: number; sha256: string }
@@ -91,9 +87,17 @@ app.get('/api/projects/:id/render', async (request) => {
 
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof AppError)
+    return reply.code(error.statusCode).send({
+      error: {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+      },
+    });
+  if (error instanceof Error && error.name === 'ZodError')
     return reply
-      .code(error.statusCode)
-      .send({ error: { code: error.code, message: error.message } });
+      .code(400)
+      .send({ error: { code: 'VALIDATION_ERROR', message: 'Invalid request' } });
   app.log.error(error);
   return reply
     .code(500)
@@ -102,8 +106,21 @@ app.setErrorHandler((error, _request, reply) => {
 app.post('/api/projects/:projectId/assets', async (request, reply) => {
   const params = request.params as { projectId: string };
   const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
   const part = await request.file();
   if (!part) throw new AppError('INVALID_UPLOAD', 'File is required');
+  const extensionByMime: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav',
+    'audio/x-wav': '.wav',
+    'audio/mp4': '.m4a',
+  };
+  const extension = extensionByMime[part.mimetype];
   const kind = part.mimetype.startsWith('image/')
     ? 'BACKGROUND_IMAGE'
     : part.mimetype.startsWith('video/')
@@ -111,19 +128,24 @@ app.post('/api/projects/:projectId/assets', async (request, reply) => {
       : part.mimetype.startsWith('audio/')
         ? 'MUSIC'
         : null;
-  if (!kind)
-    throw new AppError('INVALID_UPLOAD', 'Only image, video, or audio uploads are supported');
+  if (!kind || !extension) throw new AppError('INVALID_UPLOAD', 'Unsupported media type');
   const assetId = randomUUID();
-  const target = join(
-    workspace.projects,
-    projectId,
-    kind === 'MUSIC' ? 'music' : 'backgrounds',
-    `${assetId}${part.filename.includes('.') ? part.filename.slice(part.filename.lastIndexOf('.')) : ''}`,
-  );
-  await mkdir(join(workspace.projects, projectId, kind === 'MUSIC' ? 'music' : 'backgrounds'), {
-    recursive: true,
-  });
-  await pipeline(part.file, createWriteStream(target));
+  const directory = join(workspace.projects, projectId, kind === 'MUSIC' ? 'music' : 'backgrounds');
+  const target = join(directory, `${assetId}${extension}`);
+  await mkdir(directory, { recursive: true });
+  let probe: Record<string, unknown>;
+  try {
+    await pipeline(part.file, createWriteStream(target));
+    probe =
+      (await validateMediaFile(
+        media,
+        target,
+        kind === 'MUSIC' ? 'audio' : kind === 'BACKGROUND_IMAGE' ? 'image' : 'video',
+      )) ?? {};
+  } catch {
+    await rm(target, { force: true });
+    throw new AppError('INVALID_UPLOAD', 'Uploaded media could not be decoded', 400);
+  }
   const digest = await sha256File(target);
   const role = kind === 'MUSIC' ? 'project:music' : 'project:background';
   service.assets.register({
@@ -135,10 +157,18 @@ app.post('/api/projects/:projectId/assets', async (request, reply) => {
     mediaType: contentTypeFor(target),
     bytes: digest.bytes,
     sha256: digest.hash,
-    metadata: { displayName: part.filename },
+    metadata: { displayName: part.filename, probe },
   });
   service.invalidateRenderForAsset(projectId);
   return reply.code(201).send({ id: assetId, type: kind });
+});
+app.delete('/api/projects/:id/music', async (request, reply) => {
+  const params = request.params as { id: string };
+  const projectId = idSchema.parse(params.id);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  service.assets.invalidateRole(projectId, 'project:music');
+  service.invalidateRenderForAsset(projectId);
+  return reply.code(204).send();
 });
 app.get('/api/projects', async () => service.listProjects());
 app.post('/api/projects', async (request, reply) => {
@@ -162,6 +192,16 @@ app.delete('/api/projects/:id', async (request, reply) => {
   const params = request.params as { id: string };
   service.deleteProject(idSchema.parse(params.id));
   return reply.code(204).send();
+});
+app.get('/api/projects/:projectId/status', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.getStatus(idSchema.parse(params.projectId));
+});
+app.get('/api/chapters/:id/status', async (request) => {
+  const params = request.params as { id: string };
+  const chapter = service.getChapter(idSchema.parse(params.id));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  return service.getStatus(chapter.projectId, chapter.id);
 });
 app.get('/api/projects/:projectId/chapters', async (request) => {
   const params = request.params as { projectId: string };
@@ -200,6 +240,85 @@ app.post('/api/chapters/:id/subtitles', async (request, reply) => {
   const params = request.params as { id: string };
   return reply.code(202).send({ jobId: service.scheduleSubtitle(idSchema.parse(params.id)) });
 });
+app.get('/api/chapters/:id/audio', async (request) => {
+  const params = request.params as { id: string };
+  const chapter = service.getChapter(idSchema.parse(params.id));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const row = database.sqlite
+    .prepare(
+      "SELECT id,media_type as mediaType FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY'",
+    )
+    .get(chapter.projectId, `chapter:${chapter.id}:audio`) as
+    { id: string; mediaType: string } | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Chapter audio not found', 404);
+  return { id: row.id, mediaType: row.mediaType, url: `/api/assets/${row.id}` };
+});
+app.get('/api/chapters/:id/subtitles', async (request, reply) => {
+  const params = request.params as { id: string };
+  const chapter = service.getChapter(idSchema.parse(params.id));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const row = database.sqlite
+    .prepare(
+      "SELECT id,path,media_type as mediaType FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY'",
+    )
+    .get(chapter.projectId, `chapter:${chapter.id}:subtitle`) as
+    { id: string; path: string; mediaType: string } | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Subtitle not found', 404);
+  return reply
+    .type(row.mediaType)
+    .send(readFileSync(safeWorkspacePath(workspace.root, row.path), 'utf8'));
+});
+app.put('/api/chapters/:id/subtitles', async (request, reply) => {
+  const params = request.params as { id: string };
+  const chapter = service.getChapter(idSchema.parse(params.id));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const body = subtitleReplacementSchema.parse(request.body);
+  let cues;
+  try {
+    cues = parseSrt(body.srt);
+  } catch (error) {
+    throw new AppError('INVALID_SRT', error instanceof Error ? error.message : 'Invalid SRT');
+  }
+  if (!cues.length) throw new AppError('INVALID_SRT', 'At least one subtitle cue is required');
+  const audio = database.sqlite
+    .prepare(
+      "SELECT metadata FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY'",
+    )
+    .get(chapter.projectId, `chapter:${chapter.id}:audio`) as { metadata: string } | undefined;
+  if (audio) {
+    const metadata: unknown = JSON.parse(audio.metadata);
+    const durationMs =
+      metadata && typeof metadata === 'object' && 'durationMs' in metadata
+        ? Number(metadata.durationMs)
+        : 0;
+    if (durationMs && cues[cues.length - 1]!.endMs > durationMs)
+      throw new AppError('INVALID_SRT', 'Subtitle cue exceeds chapter audio duration');
+  }
+  const assetId = randomUUID();
+  const directory = join(workspace.projects, chapter.projectId, 'subtitles');
+  const target = join(directory, `${assetId}.srt`);
+  await mkdir(directory, { recursive: true });
+  await writeFile(target, body.srt, 'utf8');
+  const digest = await sha256File(target);
+  service.assets.register({
+    id: assetId,
+    projectId: chapter.projectId,
+    type: 'SUBTITLE',
+    role: `chapter:${chapter.id}:subtitle`,
+    path: relativeAssetPath(workspace.root, target),
+    mediaType: 'text/plain; charset=utf-8',
+    bytes: digest.bytes,
+    sha256: digest.hash,
+    sourceEntityId: chapter.id,
+    metadata: { source: 'manual' },
+  });
+  service.invalidateRenderForAsset(chapter.projectId);
+  return reply.code(201).send({ id: assetId, url: `/api/assets/${assetId}` });
+});
+app.get('/api/projects/:id/render-config', async (request) => {
+  const params = request.params as { id: string };
+  return service.getRenderConfig(idSchema.parse(params.id));
+});
 app.patch('/api/projects/:id/render-config', async (request, reply) => {
   const params = request.params as { id: string };
   service.setRenderConfig(idSchema.parse(params.id), renderConfigSchema.parse(request.body));
@@ -228,15 +347,51 @@ app.post('/api/jobs/:id/retry', async (request, reply) => {
   new WorkflowRepository(database).retryStep(row.stepId);
   return reply.code(202).send({ jobId: params.id });
 });
+app.post('/api/jobs/:id/cancel', async (request, reply) => {
+  const params = request.params as { id: string };
+  const jobId = idSchema.parse(params.id);
+  const row = database.sqlite
+    .prepare('SELECT step_id as stepId FROM jobs WHERE id=?')
+    .get(jobId) as { stepId: string } | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Job not found', 404);
+  new WorkflowRepository(database).requestCancel(row.stepId);
+  return reply.code(202).send({ jobId });
+});
 app.get('/api/assets/:id', async (request, reply) => {
   const params = request.params as { id: string };
   const row = database.sqlite
-    .prepare('SELECT path,media_type as mediaType,bytes FROM assets WHERE id=?')
+    .prepare(
+      "SELECT path,media_type as mediaType,bytes,status FROM assets WHERE id=? AND status='READY'",
+    )
     .get(idSchema.parse(params.id)) as
-    { path: string; mediaType: string; bytes: number } | undefined;
+    { path: string; mediaType: string; bytes: number; status: string } | undefined;
   if (!row) throw new AppError('NOT_FOUND', 'Asset not found', 404);
   const filename = safeWorkspacePath(workspace.root, row.path);
-  return reply.type(row.mediaType).send(createReadStream(filename));
+  let size: number;
+  try {
+    size = statSync(filename).size;
+  } catch {
+    throw new AppError('ASSET_MISSING', 'Asset file is unavailable', 404);
+  }
+  const range = request.headers.range;
+  if (!range)
+    return reply
+      .type(row.mediaType)
+      .header('Content-Length', size)
+      .send(createReadStream(filename));
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) throw new AppError('INVALID_RANGE', 'Invalid byte range', 416);
+  const start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2] || 0));
+  const end = match[2] ? Number(match[2]) : size - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= size)
+    throw new AppError('INVALID_RANGE', 'Byte range is not satisfiable', 416);
+  return reply
+    .code(206)
+    .type(row.mediaType)
+    .header('Content-Range', `bytes ${start}-${end}/${size}`)
+    .header('Accept-Ranges', 'bytes')
+    .header('Content-Length', end - start + 1)
+    .send(createReadStream(filename, { start, end }));
 });
 
 await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });

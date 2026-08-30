@@ -23,13 +23,14 @@ export function cleanNarrationText(input: string): CleanText {
     }
     text += character;
   }
-  text = text
+  const compact = text
     .split('\n')
     .map((line) => line.trim().replace(/[ \t]+/g, ' '))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return { text, warnings };
+  if (compact !== text) warnings.push('Normalized whitespace');
+  return { text: compact, warnings: [...new Set(warnings)] };
 }
 
 export function segmentText(input: string, maxCharacters = 450): TextSegment[] {
@@ -65,7 +66,6 @@ export function segmentText(input: string, maxCharacters = 450): TextSegment[] {
     textHash: createHash('sha256').update(text).digest('hex'),
   }));
 }
-
 export type SubtitleCue = { index: number; startMs: number; endMs: number; text: string };
 const timestamp = (ms: number): string => {
   const hours = Math.floor(ms / 3_600_000);
@@ -75,20 +75,50 @@ const timestamp = (ms: number): string => {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
 };
 
+export function validateSubtitleCues(cues: SubtitleCue[], durationMs?: number): void {
+  let previousEnd = 0;
+  const indices = new Set<number>();
+  for (const cue of cues) {
+    if (
+      !Number.isInteger(cue.index) ||
+      cue.index < 1 ||
+      indices.has(cue.index) ||
+      cue.startMs < 0 ||
+      cue.endMs <= cue.startMs ||
+      cue.startMs < previousEnd ||
+      !cue.text.trim()
+    )
+      throw new Error('Invalid or non-monotonic subtitle cue');
+    if (durationMs !== undefined && cue.endMs > durationMs)
+      throw new Error('Subtitle cue exceeds chapter audio duration');
+    indices.add(cue.index);
+    previousEnd = cue.endMs;
+  }
+}
+
 export function subtitlesFromSegments(
   segments: Array<{ text: string; durationMs: number }>,
 ): SubtitleCue[] {
   let cursor = 0;
-  return segments.map((segment, index) => {
+  const cues = segments.map((segment, index) => {
+    if (!Number.isFinite(segment.durationMs) || segment.durationMs <= 0)
+      throw new Error('Subtitle segment duration must be positive');
     const startMs = cursor;
     const endMs = cursor + Math.max(1, Math.round(segment.durationMs));
     cursor = endMs;
     return { index: index + 1, startMs, endMs, text: segment.text };
   });
+  validateSubtitleCues(cues);
+  return cues;
 }
 
 export function serializeSrt(cues: SubtitleCue[]): string {
-  return `${cues.map((cue) => `${cue.index}\n${timestamp(cue.startMs)} --> ${timestamp(cue.endMs)}\n${cue.text}\n`).join('\n')}`;
+  validateSubtitleCues(cues);
+  return `${cues
+    .map(
+      (cue) => `${cue.index}\n${timestamp(cue.startMs)} --> ${timestamp(cue.endMs)}\n${cue.text}\n`,
+    )
+    .join('\n')}`;
 }
 
 export function parseSrt(input: string): SubtitleCue[] {
@@ -108,11 +138,8 @@ export function parseSrt(input: string): SubtitleCue[] {
       Number(h) * 3_600_000 + Number(m) * 60_000 + Number(s) * 1000 + Number(ms);
     const startMs = toMs(timing[1]!, timing[2]!, timing[3]!, timing[4]!);
     const endMs = toMs(timing[5]!, timing[6]!, timing[7]!, timing[8]!);
-    if (endMs <= startMs) throw new Error('SRT cue end must be after start');
     cues.push({ index: Number(lines[0]), startMs, endMs, text: lines.slice(2).join('\n') });
   }
-  for (let index = 1; index < cues.length; index += 1)
-    if (cues[index]!.startMs < cues[index - 1]!.endMs)
-      throw new Error('SRT cues must be monotonic');
+  validateSubtitleCues(cues);
   return cues;
 }

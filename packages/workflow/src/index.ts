@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { rmSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -13,6 +14,8 @@ import {
 import {
   FfmpegTools,
   ProcessRunner,
+  buildConcatArguments,
+  buildRenderArguments,
   type WorkspacePaths,
   initializeWorkspace,
   promoteFile,
@@ -21,9 +24,14 @@ import {
 } from '@studio/media';
 import {
   AppError,
+  type ChapterDto,
   type ChapterInput,
   type Id,
+  type JobDto,
+  type ProjectDto,
   type ProjectInput,
+  type StatusSummary,
+  type WorkflowStatus,
   renderConfigSchema,
 } from '@studio/shared';
 import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
@@ -48,43 +56,65 @@ export class StudioService {
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
   }
-  createProject(input: ProjectInput): ReturnType<ProjectRepository['create']> {
+  createProject(input: ProjectInput): ProjectDto {
     return this.projects.create(input);
   }
-  listProjects(): ReturnType<ProjectRepository['list']> {
+  listProjects(): ProjectDto[] {
     return this.projects.list();
   }
-  getProject(id: Id): ReturnType<ProjectRepository['get']> {
+  getProject(id: Id): ProjectDto | null {
     return this.projects.get(id);
   }
-  updateProject(id: Id, input: Partial<ProjectInput>): ReturnType<ProjectRepository['update']> {
+  updateProject(id: Id, input: Partial<ProjectInput>): ProjectDto {
+    if (!this.projects.get(id)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     return this.projects.update(id, input);
   }
   deleteProject(id: Id): void {
+    if (!this.projects.get(id)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     this.projects.delete(id);
+    rmSync(join(this.context.workspace.projects, id), { recursive: true, force: true });
   }
-  listChapters(projectId: Id): ReturnType<ChapterRepository['list']> {
+  listChapters(projectId: Id): ChapterDto[] {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     return this.chapters.list(projectId);
   }
-  getChapter(id: Id): ReturnType<ChapterRepository['get']> {
+  getChapter(id: Id): ChapterDto | null {
     return this.chapters.get(id);
   }
-  createChapter(projectId: Id, input: ChapterInput): ReturnType<ChapterRepository['create']> {
+  createChapter(projectId: Id, input: ChapterInput): ChapterDto {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     return this.chapters.create(projectId, input);
   }
-  updateChapter(id: Id, input: ChapterInput): ReturnType<ChapterRepository['update']> {
+  updateChapter(id: Id, input: ChapterInput): ChapterDto {
     const current = this.chapters.get(id);
     if (!current) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
     const contentChanged = input.content !== current.content;
-    const chapter = this.chapters.update(id, input);
+    let chapter: ChapterDto;
+    try {
+      chapter = this.chapters.update(id, input);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Revision conflict')
+        throw new AppError('REVISION_CONFLICT', error.message, 409);
+      throw error;
+    }
     if (contentChanged) this.invalidateChapterDescendants(chapter.projectId, chapter.id);
     return chapter;
   }
   deleteChapter(id: Id): void {
+    const chapter = this.chapters.get(id);
+    if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
     this.chapters.delete(id);
+    this.invalidateRender(chapter.projectId);
   }
-  reorderChapters(projectId: Id, ids: Id[]): ReturnType<ChapterRepository['list']> {
-    return this.chapters.reorder(projectId, ids);
+  reorderChapters(projectId: Id, ids: Id[]): ChapterDto[] {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    try {
+      return this.chapters.reorder(projectId, ids);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Complete chapter ordering is required')
+        throw new AppError('INVALID_ORDER', error.message, 400);
+      throw error;
+    }
   }
   setRenderConfig(projectId: Id, input: unknown): void {
     this.projects.setRenderConfig(projectId, renderConfigSchema.parse(input));
@@ -95,6 +125,37 @@ export class StudioService {
       ...renderConfigSchema.parse({}),
       ...this.projects.getRenderConfig(projectId),
     });
+  }
+  getStatus(projectId: Id, chapterId?: Id): StatusSummary {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    if (chapterId) {
+      const chapter = this.chapters.get(chapterId);
+      if (!chapter || chapter.projectId !== projectId)
+        throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    }
+    const latestStep = (type: string, entityId: Id): WorkflowStatus => {
+      const row = this.context.database.sqlite
+        .prepare(
+          'SELECT status FROM workflow_steps WHERE type=? AND entity_id=? ORDER BY updated_at DESC LIMIT 1',
+        )
+        .get(type, entityId) as { status: WorkflowStatus } | undefined;
+      return row?.status ?? 'PENDING';
+    };
+    const jobs = this.context.database.sqlite
+      .prepare(
+        'SELECT id,type,entity_id as entityId,status,progress,error,attempts,created_at as createdAt,started_at as startedAt,completed_at as completedAt FROM jobs WHERE entity_id=? ORDER BY created_at DESC',
+      )
+      .all(chapterId ?? projectId) as JobDto[];
+    const background = this.assets.current(projectId, 'project:background');
+    return {
+      projectId,
+      ...(chapterId ? { chapterId } : {}),
+      narration: chapterId ? latestStep('MERGE_AUDIO', chapterId) : 'PENDING',
+      subtitles: chapterId ? latestStep('SUBTITLE', chapterId) : 'PENDING',
+      background: background ? 'COMPLETED' : 'PENDING',
+      render: latestStep('RENDER', projectId),
+      jobs,
+    };
   }
   scheduleChapterTts(chapterId: Id): { executionId: Id; jobIds: Id[] } {
     const chapter = this.chapters.get(chapterId);
@@ -193,6 +254,12 @@ export class StudioService {
     );
     return this.workflow.createJob('SUBTITLE', chapter.id, step);
   }
+  private renderFingerprint(projectId: Id): string {
+    const inputs = this.context.database.sqlite
+      .prepare('SELECT role,sha256 FROM assets WHERE project_id=? AND is_current=1 ORDER BY role')
+      .all(projectId) as Array<{ role: string; sha256: string }>;
+    return fingerprint({ projectId, config: this.getRenderConfig(projectId), inputs });
+  }
   scheduleRender(projectId: Id): Id {
     const project = this.projects.get(projectId);
     if (!project) throw new AppError('NOT_FOUND', 'Project not found', 404);
@@ -202,7 +269,7 @@ export class StudioService {
       `render:${projectId}`,
       'RENDER',
       projectId,
-      fingerprint({ projectId, config: this.getRenderConfig(projectId) }),
+      this.renderFingerprint(projectId),
     );
     return this.workflow.createJob('RENDER', projectId, step);
   }
@@ -212,6 +279,12 @@ export class StudioService {
   private invalidateChapterDescendants(projectId: Id, chapterId: Id): void {
     for (const role of [`chapter:${chapterId}:audio`, `chapter:${chapterId}:subtitle`])
       this.assets.invalidateRole(projectId, role);
+    this.assets.invalidateSource(projectId, chapterId, ['TTS_SEGMENT_AUDIO', 'CHAPTER_AUDIO']);
+    this.context.database.sqlite
+      .prepare(
+        "UPDATE tts_segments SET status='INVALIDATED',audio_asset_id=NULL,duration_ms=NULL,error='StaleInput' WHERE chapter_id=?",
+      )
+      .run(chapterId);
     this.workflow.invalidateSteps(chapterId, [
       'CLEAN_TEXT',
       'TTS_SEGMENT',
@@ -257,14 +330,15 @@ export class WorkerExecutor {
     private readonly workerId: string,
     private readonly tts: TtsProvider = new EdgeTtsProvider(context.runner),
   ) {}
-  async execute(step: ClaimedStep): Promise<void> {
+  async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new AppError('CANCELLED', 'Work was cancelled', 409);
     if (step.type === 'CLEAN_TEXT') return;
     if (step.type === 'TTS_SEGMENT') {
-      await this.executeTts(step);
+      await this.executeTts(step, signal);
       return;
     }
     if (step.type === 'MERGE_AUDIO') {
-      await this.executeMerge(step);
+      await this.executeMerge(step, signal);
       return;
     }
     if (step.type === 'SUBTITLE') {
@@ -272,7 +346,7 @@ export class WorkerExecutor {
       return;
     }
     if (step.type === 'RENDER') {
-      await this.executeRender(step);
+      await this.executeRender(step, signal);
       return;
     }
     throw new Error(`Unknown workflow step: ${step.type}`);
@@ -285,7 +359,7 @@ export class WorkerExecutor {
       .get(step.id, step.attemptId, this.workerId, step.input_fingerprint);
     return Boolean(current);
   }
-  private async executeTts(step: ClaimedStep): Promise<void> {
+  private async executeTts(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     const segment = this.context.database.sqlite
       .prepare(
         'SELECT chapter_id as chapterId,text,text_hash as textHash,status,fingerprint FROM tts_segments WHERE id=? AND chapter_id=?',
@@ -307,6 +381,7 @@ export class WorkerExecutor {
       segment.text,
       process.env.EDGE_TTS_VOICE ?? 'vi-VN-HoaiMyNeural',
       output,
+      signal,
     );
     if (!this.stepIsCurrent(step)) throw new Error('TTS segment input changed during synthesis');
     const probe = await this.context.media.probe(output);
@@ -360,7 +435,7 @@ export class WorkerExecutor {
       throw new Error('TTS segment record changed before completion');
     }
   }
-  private async executeMerge(step: ClaimedStep): Promise<void> {
+  private async executeMerge(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     const chapter = this.context.database.sqlite
       .prepare('SELECT project_id as projectId,id FROM chapters WHERE id=?')
       .get(step.entity_id) as { projectId: Id; id: Id } | undefined;
@@ -406,18 +481,7 @@ export class WorkerExecutor {
       'utf8',
     );
     const output = join(staging, 'chapter.mp3');
-    await this.context.media.run([
-      '-y',
-      '-f',
-      'concat',
-      '-safe',
-      '0',
-      '-i',
-      list,
-      '-c',
-      'copy',
-      output,
-    ]);
+    await this.context.media.run(buildConcatArguments(list, output), { signal });
     if (!this.stepIsCurrent(step)) throw new Error('Merge input changed during execution');
     const probe = await this.context.media.probe(output);
     const durationMs = Math.round(
@@ -518,7 +582,7 @@ export class WorkerExecutor {
       throw new Error('Subtitle input changed before promotion');
     }
   }
-  private async executeRender(step: ClaimedStep): Promise<void> {
+  private async executeRender(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     const projectId = step.entity_id;
     const chapter = this.context.database.sqlite
       .prepare('SELECT id FROM chapters WHERE project_id=? ORDER BY number LIMIT 1')
@@ -543,7 +607,8 @@ export class WorkerExecutor {
         "SELECT path FROM assets WHERE project_id=? AND role='project:music' AND is_current=1",
       )
       .get(projectId) as { path: string } | undefined;
-    if (!audio || !background) throw new Error('Current chapter audio and background are required');
+    if (!audio || !background || !subtitle)
+      throw new Error('Current chapter audio, subtitles, and background are required');
     const project = this.context.database.sqlite
       .prepare('SELECT render_config as renderConfig FROM projects WHERE id=?')
       .get(projectId) as { renderConfig: string };
@@ -554,51 +619,119 @@ export class WorkerExecutor {
     const output = join(staging, 'render.mp4');
     const probe = await this.context.media.probe(audioPath);
     const duration = Number((probe.format as { duration?: string } | undefined)?.duration ?? 0);
-    if (!duration) throw new Error('Narration has no duration');
-    const videoInput =
-      background.type === 'BACKGROUND_IMAGE'
-        ? ['-loop', '1', '-i', background.path]
-        : ['-stream_loop', '-1', '-i', background.path];
-    const subtitleFilter = subtitle ? `,subtitles=${subtitle.path.replaceAll('\\\\', '/')}` : '';
-    const scale = `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease,pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2${subtitleFilter}`;
-    const musicPath = config.musicEnabled && music ? music.path : null;
-    const audioInput = musicPath
-      ? ['-i', audio.path, '-stream_loop', '-1', '-i', musicPath]
-      : ['-i', audio.path];
-    const audioFilter = musicPath
-      ? [
-          '-filter_complex',
-          `[1:a]volume=${config.narrationVolume}[n];[2:a]volume=${config.musicVolume}[m];[n][m]amix=inputs=2:duration=first:dropout_transition=2[a]`,
-          '-map',
-          '0:v:0',
-          '-map',
-          '[a]',
-        ]
-      : ['-map', '0:v:0', '-map', '1:a:0'];
+    const musicPath =
+      config.musicEnabled && music ? join(this.context.workspace.root, music.path) : undefined;
+    const backgroundPath = join(this.context.workspace.root, background.path);
+    const subtitlePath = join(this.context.workspace.root, subtitle.path);
+    const currentInputs = this.context.database.sqlite
+      .prepare(
+        'SELECT role,path,sha256 FROM assets WHERE project_id=? AND is_current=1 ORDER BY role',
+      )
+      .all(projectId) as Array<{ role: string; path: string; sha256: string }>;
+    if (
+      fingerprint({
+        projectId,
+        config,
+        inputs: currentInputs.map(({ role, sha256 }) => ({ role, sha256 })),
+      }) !== step.input_fingerprint
+    )
+      throw new Error('Render inputs are stale');
+    const manifest = {
+      version: 1,
+      projectId,
+      chapterId: chapter?.id ?? null,
+      durationMs: Math.round(duration * 1000),
+      configuration: config,
+      inputs: currentInputs,
+    };
+    const manifestStaging = join(staging, 'timeline.json');
+    await writeFile(manifestStaging, JSON.stringify(manifest), 'utf8');
     await this.context.media.run(
       [
-        '-y',
-        ...videoInput,
-        ...audioInput,
-        '-t',
-        String(duration),
-        '-vf',
-        scale,
-        ...audioFilter,
-        '-r',
-        String(config.fps),
-        '-c:v',
-        'libx264',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-shortest',
-        relativeAssetPath(this.context.workspace.root, output),
+        ...buildRenderArguments({
+          backgroundPath,
+          backgroundType: background.type as 'BACKGROUND_IMAGE' | 'BACKGROUND_VIDEO',
+          narrationPath: audioPath,
+          subtitlePath,
+          subtitleFontSize: config.subtitleFontSize,
+          musicPath,
+          loopMusic: config.loopMusic,
+          durationSeconds: duration,
+          width: config.width,
+          height: config.height,
+          fps: config.fps,
+          narrationVolume: config.narrationVolume,
+          musicVolume: config.musicVolume,
+        }),
+        output,
       ],
-      { cwd: this.context.workspace.root },
+      { cwd: this.context.workspace.root, signal },
     );
     const outputProbe = await this.context.media.probe(output);
+    const outputStreams = Array.isArray(outputProbe.streams) ? outputProbe.streams : [];
+    const videoStream = outputStreams.find(
+      (stream): stream is { codec_type?: string; width?: number; height?: number } =>
+        Boolean(
+          stream &&
+          typeof stream === 'object' &&
+          'codec_type' in stream &&
+          stream.codec_type === 'video',
+        ),
+    );
+    const audioStream = outputStreams.some(
+      (stream) =>
+        stream &&
+        typeof stream === 'object' &&
+        'codec_type' in stream &&
+        stream.codec_type === 'audio',
+    );
+    const outputDuration = Number(
+      (outputProbe.format as { duration?: string } | undefined)?.duration ?? 0,
+    );
+    if (
+      !videoStream ||
+      !audioStream ||
+      videoStream.width !== config.width ||
+      videoStream.height !== config.height ||
+      outputDuration <= 0
+    )
+      throw new Error('Rendered MP4 failed validation');
+    const assets = new AssetRepository(this.context.database);
+    const timelineDestination = join(
+      this.context.workspace.projects,
+      projectId,
+      'renders',
+      `${step.id}.timeline.json`,
+    );
+    const timelineDigest = await sha256File(manifestStaging);
+    await promoteFile(manifestStaging, timelineDestination);
+    const guard = {
+      stepId: step.id,
+      attemptId: step.attemptId,
+      workerId: this.workerId,
+      inputFingerprint: step.input_fingerprint,
+    };
+    const timelineRegistered = assets.registerIfCurrentStep(
+      {
+        id: randomUUID(),
+        projectId,
+        type: 'TIMELINE_MANIFEST',
+        role: 'project:timeline',
+        path: relativeAssetPath(this.context.workspace.root, timelineDestination),
+        mediaType: 'application/json',
+        bytes: timelineDigest.bytes,
+        sha256: timelineDigest.hash,
+        sourceEntityId: projectId,
+        sourceStepId: step.id,
+        inputFingerprint: step.input_fingerprint,
+        metadata: manifest,
+      },
+      guard,
+    );
+    if (!timelineRegistered) {
+      await rm(timelineDestination, { force: true });
+      throw new Error('Render inputs changed before manifest promotion');
+    }
     const digest = await sha256File(output);
     const destination = join(
       this.context.workspace.projects,
@@ -607,20 +740,27 @@ export class WorkerExecutor {
       `${step.id}.mp4`,
     );
     await promoteFile(output, destination);
-    new AssetRepository(this.context.database).register({
-      id: randomUUID(),
-      projectId,
-      type: 'RENDERED_VIDEO',
-      role: 'project:render',
-      path: relativeAssetPath(this.context.workspace.root, destination),
-      mediaType: 'video/mp4',
-      bytes: digest.bytes,
-      sha256: digest.hash,
-      sourceEntityId: projectId,
-      sourceStepId: step.id,
-      inputFingerprint: step.input_fingerprint,
-      metadata: { duration, probe: outputProbe },
-    });
+    const renderRegistered = assets.registerIfCurrentStep(
+      {
+        id: randomUUID(),
+        projectId,
+        type: 'RENDERED_VIDEO',
+        role: 'project:render',
+        path: relativeAssetPath(this.context.workspace.root, destination),
+        mediaType: 'video/mp4',
+        bytes: digest.bytes,
+        sha256: digest.hash,
+        sourceEntityId: projectId,
+        sourceStepId: step.id,
+        inputFingerprint: step.input_fingerprint,
+        metadata: { duration, probe: outputProbe },
+      },
+      guard,
+    );
+    if (!renderRegistered) {
+      await rm(destination, { force: true });
+      throw new Error('Render inputs changed before output promotion');
+    }
   }
 }
 
@@ -633,3 +773,4 @@ export async function createContext(root: string, db: DatabaseHandle): Promise<S
     media: new FfmpegTools(new ProcessRunner()),
   };
 }
+export { parseSrt, serializeSrt, subtitlesFromSegments, validateSubtitleCues } from './text.js';

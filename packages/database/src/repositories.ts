@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseHandle } from './db.js';
+import { AppError } from '@studio/shared';
 import type {
   ChapterDto,
   ChapterInput,
@@ -9,9 +10,9 @@ import type {
   RenderConfig,
   WorkflowStatus,
 } from '@studio/shared';
-
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value);
+const safeError = (value: string): string => value.slice(0, 2_000);
 
 export class ProjectRepository {
   constructor(private readonly database: DatabaseHandle) {}
@@ -232,6 +233,23 @@ export class WorkflowRepository {
     return id;
   }
   dependency(stepId: Id, dependsOnStepId: Id): void {
+    if (stepId === dependsOnStepId)
+      throw new AppError('WORKFLOW_CYCLE', 'A step cannot depend on itself');
+    const pending = [dependsOnStepId];
+    const visited = new Set<Id>();
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (current === stepId)
+        throw new AppError('WORKFLOW_CYCLE', 'Workflow dependency cycle detected');
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const rows = this.database.sqlite
+        .prepare(
+          'SELECT depends_on_step_id as dependencyId FROM workflow_step_dependencies WHERE step_id=?',
+        )
+        .all(current) as Array<{ dependencyId: Id }>;
+      pending.push(...rows.map((row) => row.dependencyId));
+    }
     this.database.sqlite
       .prepare(
         'INSERT OR IGNORE INTO workflow_step_dependencies(step_id,depends_on_step_id) VALUES(?,?)',
@@ -253,7 +271,7 @@ export class WorkflowRepository {
   claim(workerId: string, leaseMs = 30_000): ClaimedStep | null {
     const candidate = this.database.sqlite
       .prepare(
-        "SELECT ws.* FROM workflow_steps ws WHERE ws.status='PENDING' AND (ws.next_attempt_at IS NULL OR ws.next_attempt_at<=?) AND NOT EXISTS (SELECT 1 FROM workflow_step_dependencies d JOIN workflow_steps dep ON dep.id=d.depends_on_step_id WHERE d.step_id=ws.id AND d.required=1 AND dep.status!='COMPLETED') ORDER BY ws.created_at LIMIT 1",
+        "SELECT ws.* FROM workflow_steps ws WHERE ws.status='PENDING' AND ws.cancellation_requested_at IS NULL AND (ws.next_attempt_at IS NULL OR ws.next_attempt_at<=?) AND NOT EXISTS (SELECT 1 FROM workflow_step_dependencies d JOIN workflow_steps dep ON dep.id=d.depends_on_step_id WHERE d.step_id=ws.id AND d.required=1 AND dep.status!='COMPLETED') ORDER BY ws.created_at LIMIT 1",
       )
       .get(now()) as StepRow | undefined;
     if (!candidate) return null;
@@ -292,19 +310,35 @@ export class WorkflowRepository {
       : null;
   }
   progress(step: ClaimedStep, value: number, message: string): void {
-    this.database.sqlite
+    const result = this.database.sqlite
       .prepare(
         "UPDATE workflow_steps SET progress=?,progress_message=?,updated_at=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND lease_owner=?",
       )
       .run(
         Math.max(0, Math.min(1, value)),
-        message,
+        safeError(message),
         now(),
         step.id,
         step.attemptId,
         step.lease_owner,
       );
-    this.database.sqlite.prepare('UPDATE jobs SET progress=? WHERE step_id=?').run(value, step.id);
+    if (result.changes === 1)
+      this.database.sqlite
+        .prepare('UPDATE jobs SET progress=? WHERE step_id=?')
+        .run(value, step.id);
+  }
+  heartbeat(step: ClaimedStep, leaseMs = 30_000): boolean {
+    const expiry = new Date(Date.now() + leaseMs).toISOString();
+    const result = this.database.sqlite
+      .prepare(
+        "UPDATE workflow_steps SET lease_expires_at=?,updated_at=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND lease_owner=?",
+      )
+      .run(expiry, now(), step.id, step.attemptId, step.lease_owner);
+    if (result.changes === 1)
+      this.database.sqlite
+        .prepare("UPDATE workflow_step_attempts SET heartbeat_at=? WHERE id=? AND status='RUNNING'")
+        .run(now(), step.attemptId);
+    return result.changes === 1;
   }
   complete(step: ClaimedStep): void {
     const stamp = now();
@@ -329,6 +363,7 @@ export class WorkflowRepository {
   }
   fail(step: ClaimedStep, error: string, retry = true): void {
     const stamp = now();
+    const safe = safeError(error);
     const next =
       retry && step.attemptNumber < step.max_attempts
         ? new Date(Date.now() + 1000).toISOString()
@@ -339,14 +374,14 @@ export class WorkflowRepository {
         .prepare(
           'UPDATE workflow_steps SET status=?,error=?,next_attempt_at=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND current_attempt_id=? AND lease_owner=?',
         )
-        .run(status, error, next, stamp, step.id, step.attemptId, step.lease_owner);
+        .run(status, safe, next, stamp, step.id, step.attemptId, step.lease_owner);
       if (result.changes !== 1) return;
       this.database.sqlite
         .prepare('UPDATE workflow_step_attempts SET status=?,error=?,finished_at=? WHERE id=?')
-        .run(status, error, stamp, step.attemptId);
+        .run(status, safe, stamp, step.attemptId);
       this.database.sqlite
         .prepare("UPDATE jobs SET status=?,error=? WHERE step_id=? AND status='RUNNING'")
-        .run(status, error, step.id);
+        .run(status, safe, step.id);
     })();
   }
   invalidateSteps(entityId: Id, types: string[], error = 'StaleInput'): number {
@@ -411,11 +446,46 @@ export class WorkflowRepository {
     return expired.length;
   }
   requestCancel(stepId: Id): void {
-    this.database.sqlite
-      .prepare(
-        "UPDATE workflow_steps SET cancellation_requested_at=?,status=CASE WHEN status='PENDING' THEN 'CANCELLED' ELSE status END,updated_at=? WHERE id=?",
-      )
-      .run(now(), now(), stepId);
+    const stamp = now();
+    this.database.sqlite.transaction(() => {
+      this.database.sqlite
+        .prepare(
+          "UPDATE workflow_steps SET cancellation_requested_at=?,status=CASE WHEN status='PENDING' THEN 'CANCELLED' ELSE status END,updated_at=? WHERE id=?",
+        )
+        .run(stamp, stamp, stepId);
+      this.database.sqlite
+        .prepare(
+          "UPDATE jobs SET status='CANCELLED',error='Cancelled by user' WHERE step_id=? AND status='PENDING'",
+        )
+        .run(stepId);
+    })();
+  }
+  isCancellationRequested(stepId: Id): boolean {
+    const row = this.database.sqlite
+      .prepare('SELECT cancellation_requested_at as requestedAt FROM workflow_steps WHERE id=?')
+      .get(stepId) as { requestedAt: string | null } | undefined;
+    return Boolean(row?.requestedAt);
+  }
+  cancel(step: ClaimedStep, error = 'Cancelled by user'): boolean {
+    const stamp = now();
+    const safe = safeError(error);
+    return this.database.sqlite.transaction(() => {
+      const result = this.database.sqlite
+        .prepare(
+          "UPDATE workflow_steps SET status='CANCELLED',error=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND status='RUNNING' AND current_attempt_id=? AND lease_owner=?",
+        )
+        .run(safe, stamp, step.id, step.attemptId, step.lease_owner);
+      if (result.changes !== 1) return false;
+      this.database.sqlite
+        .prepare(
+          "UPDATE workflow_step_attempts SET status='CANCELLED',error=?,finished_at=? WHERE id=? AND status='RUNNING'",
+        )
+        .run(safe, stamp, step.attemptId);
+      this.database.sqlite
+        .prepare("UPDATE jobs SET status='CANCELLED',error=? WHERE step_id=? AND status='RUNNING'")
+        .run(safe, step.id);
+      return true;
+    })();
   }
   getJob(id: Id): Record<string, unknown> | null {
     return this.database.sqlite
@@ -456,8 +526,22 @@ export type AssetRegistration = {
   sourceStepId?: Id;
   inputFingerprint?: string;
   metadata?: unknown;
+  validationError?: string;
 };
 
+export type AssetRecord = AssetRegistration & {
+  status: 'READY' | 'INVALID';
+  isCurrent: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CurrentAsset = {
+  id: Id;
+  path: string;
+  type: string;
+  sha256: string;
+  mediaType: string;
+};
 export type StepLeaseGuard = {
   stepId: Id;
   attemptId: Id;
@@ -467,38 +551,48 @@ export type StepLeaseGuard = {
 
 export class AssetRepository {
   constructor(private readonly database: DatabaseHandle) {}
-  current(
-    projectId: Id,
-    role: string,
-  ): { id: Id; path: string; type: string; sha256: string; mediaType: string } | null {
+  private assertSafePath(path: string): void {
+    if (
+      !path ||
+      path.startsWith('/') ||
+      /^[A-Za-z]:[\\/]/.test(path) ||
+      path.split(/[\\/]/).includes('..')
+    )
+      throw new AppError('UNSAFE_PATH', 'Asset path must be workspace-relative', 400);
+  }
+  current(projectId: Id, role: string): CurrentAsset | null {
     return this.database.sqlite
       .prepare(
         "SELECT id,path,type,sha256,media_type as mediaType FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY' ORDER BY created_at DESC LIMIT 1",
       )
-      .get(projectId, role) as {
-      id: Id;
-      path: string;
-      type: string;
-      sha256: string;
-      mediaType: string;
-    } | null;
+      .get(projectId, role) as CurrentAsset | null;
+  }
+  get(id: Id): AssetRecord | null {
+    return this.database.sqlite
+      .prepare(
+        'SELECT id,project_id as projectId,type,role,status,path,media_type as mediaType,bytes,sha256,source_entity_id as sourceEntityId,source_step_id as sourceStepId,input_fingerprint as inputFingerprint,metadata,is_current as isCurrent,validation_error as validationError,created_at as createdAt,updated_at as updatedAt FROM assets WHERE id=?',
+      )
+      .get(id) as AssetRecord | null;
   }
   register(input: AssetRegistration): void {
+    this.assertSafePath(input.path);
     const stamp = now();
+    const valid = !input.validationError;
     this.database.sqlite.transaction(() => {
-      this.database.sqlite
-        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-        .run(stamp, input.projectId, input.role);
+      if (valid)
+        this.database.sqlite
+          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
+          .run(stamp, input.projectId, input.role);
       this.database.sqlite
         .prepare(
-          'INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,input_fingerprint,metadata,is_current,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,input_fingerprint,metadata,is_current,validation_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           input.id,
           input.projectId,
           input.type,
           input.role,
-          'READY',
+          valid ? 'READY' : 'INVALID',
           input.path,
           input.mediaType,
           input.bytes,
@@ -507,13 +601,15 @@ export class AssetRepository {
           input.sourceStepId ?? null,
           input.inputFingerprint ?? null,
           json(input.metadata ?? {}),
-          1,
+          valid ? 1 : 0,
+          input.validationError ?? null,
           stamp,
           stamp,
         );
     })();
   }
   registerIfCurrentStep(input: AssetRegistration, guard: StepLeaseGuard): boolean {
+    this.assertSafePath(input.path);
     const stamp = now();
     return this.database.sqlite.transaction(() => {
       const current = this.database.sqlite
@@ -554,5 +650,13 @@ export class AssetRepository {
     this.database.sqlite
       .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
       .run(now(), projectId, role);
+  }
+  invalidateSource(projectId: Id, sourceEntityId: Id, types: string[] = []): void {
+    const condition = types.length ? ` AND type IN (${types.map(() => '?').join(',')})` : '';
+    this.database.sqlite
+      .prepare(
+        `UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND source_entity_id=?${condition}`,
+      )
+      .run(now(), projectId, sourceEntityId, ...types);
   }
 }

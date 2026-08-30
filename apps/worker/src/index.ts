@@ -1,30 +1,26 @@
-import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createDatabase, HeartbeatRepository, WorkflowRepository } from '@studio/database';
-import { FfmpegTools, ProcessRunner, cleanupOldStaging, initializeWorkspace } from '@studio/media';
+import {
+  createDatabase,
+  migrateDatabase,
+  HeartbeatRepository,
+  WorkflowRepository,
+} from '@studio/database';
+import { FfmpegTools, ProcessRunner, reconcileWorkspace, initializeWorkspace } from '@studio/media';
 import { WorkerExecutor } from '@studio/workflow';
 const root =
   process.env.STUDIO_WORKSPACE ??
   join(dirname(fileURLToPath(import.meta.url)), '../../../workspace');
 const database = createDatabase(process.env.STUDIO_DB_PATH ?? join(root, 'studio.db'));
 try {
-  database.sqlite.exec(
-    readFileSync(
-      join(
-        dirname(fileURLToPath(import.meta.url)),
-        '../../../packages/database/migrations/0000_initial.sql',
-      ),
-      'utf8',
-    ),
-  );
+  migrateDatabase(database);
 } catch (error) {
   console.error('Database migration failed', error);
   process.exit(1);
 }
 const workspace = await initializeWorkspace(root);
-await cleanupOldStaging(workspace.staging);
+await reconcileWorkspace(workspace);
 const runner = new ProcessRunner();
 const context = { database, workspace, runner, media: new FfmpegTools(runner) };
 const workerId = `worker-${randomUUID()}`;
@@ -32,11 +28,14 @@ const heartbeat = new HeartbeatRepository(database);
 const workflow = new WorkflowRepository(database);
 const executor = new WorkerExecutor(context, workerId);
 let stopping = false;
+let activeController: AbortController | undefined;
 const stop = (): void => {
   stopping = true;
+  activeController?.abort();
 };
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
+const heartbeatTimer = setInterval(() => heartbeat.beat(workerId, 'READY'), 5_000);
 
 while (!stopping) {
   heartbeat.beat(workerId, 'READY');
@@ -46,12 +45,29 @@ while (!stopping) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     continue;
   }
+  const controller = new AbortController();
+  activeController = controller;
+  const cancellationPoll = setInterval(() => {
+    if (workflow.isCancellationRequested(step.id)) controller.abort();
+  }, 250);
+  const stepHeartbeat = setInterval(() => workflow.heartbeat(step), 5_000);
   try {
-    await executor.execute(step);
-    workflow.complete(step);
+    await executor.execute(step, controller.signal);
+    clearInterval(cancellationPoll);
+    if (controller.signal.aborted || workflow.isCancellationRequested(step.id))
+      workflow.cancel(step);
+    else workflow.complete(step);
   } catch (error) {
-    workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', true);
+    clearInterval(cancellationPoll);
+    if (controller.signal.aborted || workflow.isCancellationRequested(step.id))
+      workflow.cancel(step, 'Cancelled by user');
+    else workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', true);
+  } finally {
+    clearInterval(cancellationPoll);
+    clearInterval(stepHeartbeat);
+    activeController = undefined;
   }
 }
+clearInterval(heartbeatTimer);
 heartbeat.beat(workerId, 'STOPPED');
 database.sqlite.close();

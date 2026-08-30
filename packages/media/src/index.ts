@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { access, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, extname, join, normalize, relative, resolve, win32 } from 'node:path';
 import { AppError } from '@studio/shared';
@@ -8,17 +8,49 @@ import { AppError } from '@studio/shared';
 export type WorkspacePaths = { root: string; database: string; projects: string; staging: string };
 
 export async function initializeWorkspace(root: string): Promise<WorkspacePaths> {
+  const normalizedRoot = resolve(root);
   const paths = {
-    root: resolve(root),
-    database: join(resolve(root), 'studio.db'),
-    projects: join(resolve(root), 'projects'),
-    staging: join(resolve(root), 'staging'),
+    root: normalizedRoot,
+    database: join(normalizedRoot, 'studio.db'),
+    projects: join(normalizedRoot, 'projects'),
+    staging: join(normalizedRoot, 'staging'),
   };
   await Promise.all([
+    mkdir(normalizedRoot, { recursive: true }),
+    mkdir(dirname(paths.database), { recursive: true }),
     mkdir(paths.projects, { recursive: true }),
     mkdir(paths.staging, { recursive: true }),
   ]);
   return paths;
+}
+
+export type WorkspaceReconciliation = {
+  removedStagingEntries: number;
+  missingReferencedAssets: string[];
+};
+
+export async function reconcileWorkspace(
+  paths: WorkspacePaths,
+  referencedPaths: string[] = [],
+  ageMs = 24 * 60 * 60 * 1000,
+): Promise<WorkspaceReconciliation> {
+  await initializeWorkspace(paths.root);
+  const before = await readdir(paths.staging, { withFileTypes: true });
+  await cleanupOldStaging(paths.staging, ageMs);
+  const after = await readdir(paths.staging, { withFileTypes: true });
+  const missingReferencedAssets: string[] = [];
+  for (const relativePath of referencedPaths) {
+    const filename = safeWorkspacePath(paths.root, relativePath);
+    try {
+      await access(filename);
+    } catch {
+      missingReferencedAssets.push(relativePath);
+    }
+  }
+  return {
+    removedStagingEntries: before.length - after.length,
+    missingReferencedAssets,
+  };
 }
 
 export function safeWorkspacePath(workspaceRoot: string, relativePath: string): string {
@@ -114,10 +146,27 @@ export class ProcessRunner {
     const started = Date.now();
     const args = options.arguments ?? [];
     const max = options.maxOutputBytes ?? 2_000_000;
+    const inheritedKeys = [
+      'PATH',
+      'Path',
+      'SystemRoot',
+      'WINDIR',
+      'TEMP',
+      'TMP',
+      'HOME',
+      'USERPROFILE',
+      'ComSpec',
+    ];
+    const environment: Record<string, string> = {};
+    for (const key of inheritedKeys) {
+      const value = process.env[key];
+      if (value !== undefined) environment[key] = value;
+    }
+    Object.assign(environment, options.env ?? {});
     return await new Promise<ProcessResult>((resolvePromise, reject) => {
       const child = spawn(options.executable, args, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: environment,
         shell: false,
         windowsHide: true,
       });
@@ -125,20 +174,41 @@ export class ProcessRunner {
       let stderr = '';
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
-      const finish = (result: ProcessResult, error?: Error): void => {
+      const result = (exitCode: number | null, signal: NodeJS.Signals | null): ProcessResult => ({
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        durationMs: Date.now() - started,
+      });
+      const finish = (value: ProcessResult, error?: Error): void => {
         if (settled) return;
         settled = true;
-        if (timer) clearTimeout(timer);
+        clearTimeout(timer);
+        if (options.signal) options.signal.removeEventListener('abort', abort);
         if (error) reject(error);
-        else resolvePromise(result);
+        else resolvePromise(value);
       };
-      const terminate = (): void => {
-        if (process.platform === 'win32' && child.pid)
+      const forceTerminate = (): void => {
+        if (child.exitCode !== null) return;
+        if (process.platform === 'win32' && child.pid) {
           spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
             shell: false,
             windowsHide: true,
           });
+        } else {
+          child.kill('SIGKILL');
+        }
+      };
+      const terminate = (): void => {
+        if (process.platform === 'win32') child.kill();
         else child.kill('SIGTERM');
+        setTimeout(forceTerminate, 1_000);
+      };
+      const abort = (): void => {
+        terminate();
+        const cancelled = result(null, 'SIGTERM');
+        finish(cancelled, new ProcessError(cancelled, 'Process cancelled', false));
       };
       child.stdout.on('data', (chunk: Buffer) => {
         if (stdout.length < max) stdout += chunk.toString('utf8').slice(0, max - stdout.length);
@@ -146,17 +216,23 @@ export class ProcessRunner {
       child.stderr.on('data', (chunk: Buffer) => {
         if (stderr.length < max) stderr += chunk.toString('utf8').slice(0, max - stderr.length);
       });
-      const abort = (): void => {
-        terminate();
-        finish(
-          { stdout, stderr, exitCode: null, signal: 'SIGTERM', durationMs: Date.now() - started },
-          new ProcessError(
-            { stdout, stderr, exitCode: null, signal: 'SIGTERM', durationMs: Date.now() - started },
-            'Process cancelled',
-            false,
-          ),
-        );
-      };
+      child.on('error', (error) => {
+        const failed = result(null, null);
+        finish(failed, new ProcessError(failed, error.message, false));
+      });
+      child.on('close', (exitCode, signal) => {
+        const completed = result(exitCode, signal);
+        if (exitCode === 0) finish(completed);
+        else
+          finish(
+            completed,
+            new ProcessError(
+              completed,
+              `Process exited with code ${exitCode ?? signal}`,
+              exitCode !== 1,
+            ),
+          );
+      });
       if (options.signal) {
         if (options.signal.aborted) abort();
         else options.signal.addEventListener('abort', abort, { once: true });
@@ -164,43 +240,9 @@ export class ProcessRunner {
       if (options.timeoutMs)
         timer = setTimeout(() => {
           terminate();
-          finish(
-            { stdout, stderr, exitCode: null, signal: 'SIGTERM', durationMs: Date.now() - started },
-            new ProcessError(
-              {
-                stdout,
-                stderr,
-                exitCode: null,
-                signal: 'SIGTERM',
-                durationMs: Date.now() - started,
-              },
-              'Process timed out',
-            ),
-          );
+          const timedOut = result(null, 'SIGTERM');
+          finish(timedOut, new ProcessError(timedOut, 'Process timed out'));
         }, options.timeoutMs);
-      child.on('error', (error) =>
-        finish(
-          { stdout, stderr, exitCode: null, signal: null, durationMs: Date.now() - started },
-          new ProcessError(
-            { stdout, stderr, exitCode: null, signal: null, durationMs: Date.now() - started },
-            error.message,
-            false,
-          ),
-        ),
-      );
-      child.on('close', (exitCode, signal) => {
-        const result = { stdout, stderr, exitCode, signal, durationMs: Date.now() - started };
-        if (exitCode === 0) finish(result);
-        else
-          finish(
-            result,
-            new ProcessError(
-              result,
-              `Process exited with code ${exitCode ?? signal}`,
-              exitCode !== 1,
-            ),
-          );
-      });
     });
   }
 }
@@ -212,17 +254,44 @@ export class FfmpegTools {
     private readonly ffprobe = process.env.FFPROBE_PATH ?? 'ffprobe',
   ) {}
   async health(): Promise<{ ffmpeg: boolean; ffprobe: boolean; message: string }> {
+    let ffmpeg = false;
+    let ffprobe = false;
+    let ffmpegMessage = '';
+    let ffprobeMessage = '';
     try {
       await this.runner.run({ executable: this.ffmpeg, arguments: ['-version'], timeoutMs: 5000 });
-      await this.runner.run({ executable: this.ffprobe, arguments: ['-version'], timeoutMs: 5000 });
-      return { ffmpeg: true, ffprobe: true, message: 'FFmpeg and ffprobe available' };
+      ffmpeg = true;
     } catch (error) {
-      return {
-        ffmpeg: false,
-        ffprobe: false,
-        message: error instanceof Error ? error.message : 'Media tools unavailable',
-      };
+      ffmpegMessage = error instanceof Error ? error.message : 'FFmpeg unavailable';
     }
+    try {
+      await this.runner.run({ executable: this.ffprobe, arguments: ['-version'], timeoutMs: 5000 });
+      ffprobe = true;
+    } catch (error) {
+      ffprobeMessage = error instanceof Error ? error.message : 'ffprobe unavailable';
+    }
+    return {
+      ffmpeg,
+      ffprobe,
+      message:
+        [ffmpegMessage, ffprobeMessage].filter(Boolean).join('; ') || 'Media tools available',
+    };
+  }
+  async version(tool: 'ffmpeg' | 'ffprobe' = 'ffmpeg'): Promise<string> {
+    const executable = tool === 'ffmpeg' ? this.ffmpeg : this.ffprobe;
+    const result = await this.runner.run({ executable, arguments: ['-version'], timeoutMs: 5000 });
+    return result.stdout.split(/\r?\n/u)[0] ?? '';
+  }
+  async encoders(): Promise<string[]> {
+    const result = await this.runner.run({
+      executable: this.ffmpeg,
+      arguments: ['-hide_banner', '-encoders'],
+      timeoutMs: 10_000,
+    });
+    return result.stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim().split(/\s+/u)[1])
+      .filter((name): name is string => Boolean(name));
   }
   async probe(filename: string): Promise<Record<string, unknown>> {
     const result = await this.runner.run({
@@ -238,7 +307,37 @@ export class FfmpegTools {
       ],
       timeoutMs: 30_000,
     });
-    return JSON.parse(result.stdout) as Record<string, unknown>;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new ProcessError(result, 'ffprobe returned invalid JSON', false);
+    }
+    if (!parsed || typeof parsed !== 'object')
+      throw new ProcessError(result, 'ffprobe returned an invalid probe document', false);
+    return parsed as Record<string, unknown>;
+  }
+  async validateProbe(
+    filename: string,
+    expected: 'audio' | 'video' | 'image',
+  ): Promise<Record<string, unknown>> {
+    const probe = await this.probe(filename);
+    const streams = Array.isArray(probe.streams) ? probe.streams : [];
+    const expectedType = expected === 'image' ? 'video' : expected;
+    const valid = streams.some(
+      (stream) =>
+        stream &&
+        typeof stream === 'object' &&
+        'codec_type' in stream &&
+        stream.codec_type === expectedType,
+    );
+    if (!valid)
+      throw new ProcessError(
+        { stdout: '', stderr: '', exitCode: 1, signal: null, durationMs: 0 },
+        `Media is not a valid ${expected}`,
+        false,
+      );
+    return probe;
   }
   async run(
     args: string[],
@@ -246,6 +345,96 @@ export class FfmpegTools {
   ): Promise<ProcessResult> {
     return await this.runner.run({ ...options, executable: this.ffmpeg, arguments: args });
   }
+}
+export type MediaValidationKind = 'audio' | 'image' | 'video' | 'subtitle' | 'mp4';
+
+export async function validateMediaFile(
+  tools: FfmpegTools,
+  filename: string,
+  kind: MediaValidationKind,
+): Promise<Record<string, unknown> | null> {
+  const info = await stat(filename);
+  if (!info.isFile() || info.size === 0)
+    throw new AppError('INVALID_MEDIA', 'Media file is empty', 400);
+  if (kind === 'subtitle') {
+    const content = await readFile(filename, 'utf8');
+    if (!/^\s*\d+\s*\r?\n\d{2}:\d{2}:\d{2},\d{3}\s+-->/u.test(content))
+      throw new AppError('INVALID_MEDIA', 'Subtitle file is not valid SRT', 400);
+    return null;
+  }
+  return await tools.validateProbe(filename, kind === 'mp4' ? 'video' : kind);
+}
+export type RenderArguments = {
+  backgroundPath: string;
+  backgroundType: 'BACKGROUND_IMAGE' | 'BACKGROUND_VIDEO';
+  narrationPath: string;
+  subtitlePath?: string;
+  subtitleFontSize: number;
+  musicPath?: string;
+  loopMusic: boolean;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  narrationVolume: number;
+  musicVolume: number;
+};
+
+export function buildConcatArguments(listPath: string, outputPath: string): string[] {
+  return ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', outputPath];
+}
+
+export function buildRenderArguments(input: RenderArguments): string[] {
+  const videoInput =
+    input.backgroundType === 'BACKGROUND_IMAGE'
+      ? ['-loop', '1', '-i', input.backgroundPath]
+      : ['-stream_loop', '-1', '-i', input.backgroundPath];
+  const subtitleFilter = input.subtitlePath
+    ? `,subtitles='${input.subtitlePath.replaceAll('\\', '/').replaceAll(':', '\\:')}':force_style='FontSize=${input.subtitleFontSize}'`
+    : '';
+  const scale = `scale=${input.width}:${input.height}:force_original_aspect_ratio=decrease,pad=${input.width}:${input.height}:(ow-iw)/2:(oh-ih)/2${subtitleFilter}`;
+  const audio = input.musicPath
+    ? [
+        '-i',
+        input.narrationPath,
+        ...(input.loopMusic ? ['-stream_loop', '-1'] : []),
+        '-i',
+        input.musicPath,
+        '-filter_complex',
+        `[1:a]volume=${input.narrationVolume}[n];[2:a]volume=${input.musicVolume}[m];[n][m]amix=inputs=2:duration=first:dropout_transition=2[a]`,
+        '-map',
+        '0:v:0',
+        '-map',
+        '[a]',
+      ]
+    : [
+        '-i',
+        input.narrationPath,
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-filter:a',
+        `volume=${input.narrationVolume}`,
+      ];
+  return [
+    '-y',
+    ...videoInput,
+    ...audio,
+    '-t',
+    String(input.durationSeconds),
+    '-vf',
+    scale,
+    '-r',
+    String(input.fps),
+    '-c:v',
+    'libx264',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-shortest',
+  ];
 }
 
 export async function cleanupOldStaging(root: string, ageMs = 24 * 60 * 60 * 1000): Promise<void> {
@@ -275,5 +464,10 @@ export function contentTypeFor(filename: string): string {
 }
 
 export function relativeAssetPath(workspaceRoot: string, filename: string): string {
-  return relative(resolve(workspaceRoot), resolve(filename)).replaceAll('\\', '/');
+  const root = resolve(workspaceRoot);
+  const absolute = resolve(filename);
+  const value = relative(root, absolute).replaceAll('\\', '/');
+  if (!value || value === '..' || value.startsWith('../'))
+    throw new AppError('UNSAFE_PATH', 'Path is outside the managed workspace', 400);
+  return value;
 }

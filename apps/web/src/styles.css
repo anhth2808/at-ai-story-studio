@@ -112,6 +112,7 @@ aside {
 }
 .editor-head {
   align-items: flex-end;
+  flex-wrap: wrap;
   border-bottom: 1px solid #282e3a;
   padding-bottom: 22px;
   margin-bottom: 26px;
@@ -124,6 +125,28 @@ aside {
   background: #7dd3fc;
   color: #101820;
   border-color: #7dd3fc;
+}
+.editor-actions {
+  display: flex;
+  gap: 8px;
+}
+.danger {
+  border-color: #8f4652;
+  color: #ffb8bc;
+}
+.status-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding-top: 14px;
+  color: #9aa6b8;
+  font-size: 12px;
+}
+.status-grid span {
+  border: 1px solid #303847;
+  border-radius: 999px;
+  padding: 5px 9px;
 }
 .chapter {
   border: 1px solid #303847;
@@ -172,6 +195,26 @@ aside {
   background: #181c25;
   border-radius: 12px;
   padding: 20px;
+}
+.field {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.field textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  background: #11131a;
+  color: #e9edf5;
+  border: 1px solid #394252;
+  border-radius: 7px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.panel audio {
+  width: 100%;
+  margin: 18px 0;
 }
 .actions,
 .upload-grid {
