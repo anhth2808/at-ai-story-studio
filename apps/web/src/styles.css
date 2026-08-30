@@ -1,0 +1,270 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #e9edf5;
+  background: #11131a;
+  font-synthesis: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button {
+  border: 1px solid #394252;
+  border-radius: 8px;
+  background: #1d2532;
+  color: #e9edf5;
+  padding: 9px 13px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: #7dd3fc;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: calc(100vh - 98px);
+  border-top: 1px solid #282e3a;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24px 34px;
+}
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: #7dd3fc;
+  margin: 0 0 8px;
+}
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+h1 {
+  font-size: 28px;
+  margin-bottom: 0;
+}
+aside {
+  border-right: 1px solid #282e3a;
+  padding: 22px;
+}
+.aside-head,
+.section-head,
+.chapter-foot,
+.editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.project {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 10px;
+  text-align: left;
+}
+.project small,
+.muted {
+  color: #9aa6b8;
+}
+.project.active {
+  border-color: #7dd3fc;
+  background: #172b3a;
+}
+.health {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.health span {
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #292f3b;
+}
+.health .ok {
+  color: #8ee6a8;
+}
+.health .bad {
+  color: #ff9b9b;
+}
+.editor {
+  padding: 32px;
+  max-width: 1000px;
+}
+.editor-head {
+  align-items: flex-end;
+  border-bottom: 1px solid #282e3a;
+  padding-bottom: 22px;
+  margin-bottom: 26px;
+}
+.tabs {
+  display: flex;
+  gap: 8px;
+}
+.tabs .selected {
+  background: #7dd3fc;
+  color: #101820;
+  border-color: #7dd3fc;
+}
+.chapter {
+  border: 1px solid #303847;
+  background: #181c25;
+  border-radius: 12px;
+  padding: 16px;
+  margin: 14px 0;
+}
+.chapter input,
+.chapter textarea {
+  display: block;
+  width: 100%;
+  background: #11131a;
+  color: #e9edf5;
+  border: 1px solid #394252;
+  border-radius: 7px;
+  padding: 10px;
+}
+.chapter textarea {
+  min-height: 140px;
+  margin-top: 10px;
+  resize: vertical;
+}
+.chapter-foot {
+  font-size: 12px;
+  color: #9aa6b8;
+  margin-top: 12px;
+}
+.empty,
+.placeholder {
+  margin: 32px;
+  padding: 48px;
+  border: 1px dashed #394252;
+  border-radius: 14px;
+  max-width: 680px;
+}
+.error {
+  margin: 0 34px 18px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #481f29;
+  color: #ffc1c1;
+}
+.panel {
+  border: 1px solid #303847;
+  background: #181c25;
+  border-radius: 12px;
+  padding: 20px;
+}
+.actions,
+.upload-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 20px 0;
+}
+.upload {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 230px;
+  padding: 18px;
+  border: 1px dashed #4e5c70;
+  border-radius: 10px;
+  color: #dce6f5;
+}
+.upload input {
+  max-width: 230px;
+}
+.job-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+.job {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  padding: 11px;
+  border-radius: 8px;
+  background: #11131a;
+}
+.job small,
+.job em {
+  grid-column: 1/-1;
+  color: #9aa6b8;
+  font-size: 12px;
+}
+.job em {
+  color: #ff9b9b;
+}
+.status-completed {
+  color: #8ee6a8;
+}
+.status-failed {
+  color: #ff9b9b;
+}
+.status-running {
+  color: #7dd3fc;
+}
+.video {
+  display: block;
+  width: 100%;
+  margin-top: 22px;
+  border-radius: 10px;
+  background: #000;
+  max-height: 560px;
+}
+@media (max-width: 700px) {
+  header {
+    padding: 20px;
+    display: block;
+  }
+  .health {
+    justify-content: flex-start;
+    margin-top: 15px;
+  }
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  aside {
+    border-right: 0;
+    border-bottom: 1px solid #282e3a;
+  }
+  .editor {
+    padding: 20px;
+  }
+  .editor-head {
+    display: block;
+  }
+  .tabs {
+    margin-top: 18px;
+    overflow: auto;
+  }
+  .job {
+    grid-template-columns: 1fr;
+  }
+  .upload-grid {
+    display: grid;
+  }
+  .upload {
+    min-width: 0;
+  }
+}
