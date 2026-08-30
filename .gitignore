@@ -2,3 +2,5 @@
 !/references/
 /references/*
 !/references/README.md
+**/__pycache__/
+.omp/
