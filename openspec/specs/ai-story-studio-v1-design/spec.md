@@ -13,11 +13,13 @@ The design package SHALL contain every document listed in the proposal under `do
 - **THEN** the reviewer can navigate to product scope, architecture, domain, story, workflow, provider, asset, TTS, subtitle, render, database, job, UI, stack, reference, roadmap, and risk decisions
 
 ### Requirement: Small local-first architecture
-The design SHALL specify a modular monolith suitable for a personal/local application and SHALL exclude microservices, distributed brokers, Kubernetes, event sourcing, and mandatory cloud infrastructure from V1.
+The design SHALL specify a TypeScript-first modular monolith suitable for a personal/local application and SHALL exclude microservices, distributed brokers, Kubernetes, event sourcing, mandatory cloud infrastructure, and a mandatory Python backend from V1.
 
 #### Scenario: Developer selects the V1 deployment model
 - **WHEN** a developer reviews the system and technology decisions
-- **THEN** the selected baseline uses ASP.NET Core, SQLite, EF Core, a database-backed worker, local filesystem assets, provider interfaces, and FFmpeg
+- **THEN** the selected baseline uses a pnpm workspace with Node.js, TypeScript, React, Vite, Fastify, SQLite, Drizzle ORM, a database-backed Node.js worker, local filesystem assets, provider interfaces, and FFmpeg/ffprobe
+- **AND** Python is limited to an optional explicit sidecar or subprocess boundary when native Node integration, an external HTTP API, or an existing service API is not practical
+- **AND** the architecture preserves the approved V1 product scope and introduces no application code
 
 ### Requirement: Durable dependency-aware workflow
 The design SHALL define persisted workflow steps with PENDING, RUNNING, COMPLETED, FAILED, INVALIDATED, and CANCELLED states, independent retry, restart recovery, checkpoints, progress, errors, cancellation, and dependency-based invalidation.

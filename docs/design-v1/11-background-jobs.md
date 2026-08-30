@@ -2,48 +2,93 @@
 
 ## V1 decision
 
-A database-backed worker is enough. `WorkflowSteps` are both dependency nodes and queue work items; `.NET BackgroundService` claims them from SQLite. Do not add Redis/RabbitMQ or a separate job framework until multiple machines or high concurrent producers are required.
+A persisted Node.js worker is enough. `WorkflowSteps` are both dependency nodes and queue work items; SQLite is the source of truth. The Fastify API creates work in SQLite, and one separately runnable local worker claims and executes it.
+
+Do not add Redis, BullMQ, RabbitMQ, Kafka, or a separate job framework until measured requirements need multiple machines, many concurrent producers, or queue semantics that SQLite cannot provide.
 
 ## Lifecycle
 
 ```mermaid
 sequenceDiagram
-  participant API
+  participant API as Fastify API
   participant DB as SQLite
-  participant W as Worker
+  participant W as Node.js Worker
   participant P as Provider/FFmpeg
   participant FS as Asset staging
   API->>DB: materialize pending steps
-  W->>DB: transactionally claim + lease step
-  W->>DB: create attempt
-  W->>P: execute with cancellation/idempotency
+  W->>DB: BEGIN IMMEDIATE
+  W->>DB: conditional claim + attempt
+  W->>DB: COMMIT
+  W->>P: execute with AbortSignal/idempotency
   P-->>W: progress/output
   W->>DB: heartbeat/progress/checkpoint
   W->>FS: write and validate staged output
   W->>DB: commit asset + complete step
 ```
 
+The API never executes long work in an HTTP handler. The worker never treats in-memory queue state as authoritative.
+
+## Worker loop
+
+The initial worker has one process identity and one execution loop:
+
+1. Recover expired attempts and reconcile stale staging data.
+2. Poll SQLite for one due, dependency-ready step.
+3. Claim it atomically and create an attempt in the same transaction.
+4. Execute outside the transaction with an attempt-scoped `AbortController`.
+5. Persist heartbeats, monotonic progress, and restart checkpoints.
+6. Commit a terminal outcome and validated assets conditionally against the active attempt.
+7. Wait with bounded backoff when no step is claimable.
+
+One worker does not imply one opaque job. A step is the smallest practical retry and invalidation unit. Internal resource concurrency may be added only after the vertical slice works and must remain bounded.
+
 ## Claiming and leases
 
-In a short transaction, select a due `PENDING` step whose required dependencies are completed/current and whose resource lane is available. Conditional update sets `RUNNING`, `LeaseOwner`, `LeaseExpiresAt`, and attempt. If another worker changed the row, retry selection. Keep the transaction short; provider/media work runs outside it.
+In a short `BEGIN IMMEDIATE` transaction, select one due `PENDING` step whose cancellation flag is clear and required dependencies are completed/current. Use the claim index and deterministic priority ordering. A conditional update sets:
 
-Worker heartbeat renews the lease and attempt timestamp. Lease duration exceeds normal heartbeat jitter but is far shorter than multi-hour execution. On startup/periodically, expired running steps close as `WorkerLost` and retry or fail per policy.
+- status `RUNNING`;
+- `LeaseOwner` to the worker identity;
+- `LeaseExpiresAt`;
+- incremented attempt count;
+- `CurrentAttemptId`;
+- updated timestamp.
 
-## Resource-aware concurrency
+Insert the append-only attempt row before commit. Execute the step only if the conditional update affected exactly one row. A zero-row update means the step changed or lost eligibility; roll back and retry later.
 
-V1 has a small in-process scheduler:
+Provider, network, process, hashing, probing, and filesystem work all run after commit. Heartbeats renew the lease only when status, attempt ID, and lease owner still match. Completion uses the same ownership guard so a stale worker cannot overwrite a recovered attempt.
 
-- `Database/Control`: low cost, short;
-- `Network`: configurable parallelism with per-provider limiter;
+Lease duration exceeds normal heartbeat and event-loop jitter but is much shorter than a multi-hour operation. On startup and periodically, an expired running step closes its attempt as `WorkerLost`, then transitions to retry or terminal failure according to persisted policy.
+
+## Duplicate-execution guarantees
+
+Under the normal one-worker model, an atomic conditional claim prevents two executions of the same attempt. The design also preserves lease fields so an accidental second worker follows the same guard.
+
+A process can crash after an external provider accepts work but before the checkpoint is persisted. No local queue can guarantee exactly-once behavior across that boundary. Reduce ambiguity with:
+
+- stable attempt/idempotency keys supplied to providers that support them;
+- persisted remote provider job IDs and polling checkpoints;
+- attempt-scoped staging directories;
+- input fingerprints and reuse of current matching outputs;
+- conditional asset promotion and terminal updates;
+- explicit `OutcomeUnknown` failure when blind retry could duplicate paid or non-idempotent work.
+
+The guarantee is no duplicate execution under normal operation, not universal exactly-once side effects after arbitrary crashes.
+
+## Resource-aware execution
+
+Start with one active workflow step. When measured throughput justifies limited concurrency, use in-process semaphores by resource class:
+
+- `Database/Control`: low cost and short;
+- `Network`: configured parallelism with per-provider limiter;
 - `CPU`: limited by configured cores;
 - `GPU`: normally one job/model lane on a consumer GPU;
-- `FFmpeg`: one heavy render by default, possibly separate light probe lane.
+- `FFmpeg`: one heavy render by default, with an optional separate light probe lane.
 
-A step declares resource class and provider configuration. Global and per-provider semaphores are execution guards, while the DB remains the truth. Leases prevent duplicate claims across optional web/worker processes.
+Semaphores are execution guards, not job truth. SQLite statuses, leases, attempts, and checkpoints remain authoritative.
 
 ## Batch generation
 
-“Generate 100 chapters” materializes chapter steps plus dependencies. It does not create one opaque 100-chapter job. Scheduling policy can keep chapter generation sequential where continuity requires prior summary, while TTS for completed chapters proceeds concurrently within provider/resource limits. Backpressure limits how far downstream work expands and disk use.
+“Generate 100 chapters” materializes chapter steps plus dependencies. It does not create one opaque 100-chapter job. Scheduling can keep chapter generation sequential where continuity requires the prior summary, while TTS for completed chapters proceeds within configured resource limits. Backpressure limits how far downstream work expands and controls disk use.
 
 Suggested dependencies:
 
@@ -52,31 +97,56 @@ Suggested dependencies:
 - subtitle N depends on audio/timing N;
 - render depends on all selected chapters/subtitles/background.
 
-## Progress
+## Persisted progress and checkpoints
 
-Each step exposes `Current`, `Total`, `Unit`, and safe message. Aggregate progress is weighted by known work units, not naive step count: chapters, TTS chunks, audio duration, or FFmpeg output time. Show stage-specific fractions (`35/50`) because a single percent hides actionable detail. Progress is monotonic within an attempt and may reset on a new attempt.
+Each step exposes `Current`, `Total`, `Unit`, and a safe message. Aggregate progress is weighted by known work units, not naive step count: chapters, TTS chunks, audio duration, or FFmpeg output time. Show stage-specific fractions (`35/50`) because a single percent hides actionable detail. Progress is monotonic within an attempt and may reset for a new attempt.
 
-## Retry
+Persist checkpoints only at restart-safe boundaries:
 
-- Automatic only for classified transient errors within `MaxAttempts` and backoff.
-- Manual retry always records a new attempt; user may change provider/config first.
-- Reuse matching completed child steps/assets.
-- Provider remote job ID is checkpointed so polling resumes instead of submitting a duplicate where supported.
-- Attempt logs/errors remain after success for diagnosis.
+- completed TTS chunk IDs and their asset fingerprints;
+- remote provider job ID and last known state;
+- completed child-step IDs;
+- validated input manifest and output staging references.
+
+Do not persist transient in-memory objects, child process handles, or model instances.
+
+## Retry and failure recovery
+
+- Automatic retry applies only to classified transient errors within `MaxAttempts`, using persisted `NextAttemptAt` and bounded exponential backoff with jitter.
+- Manual retry always records a new attempt; the user may change provider/config first.
+- A new attempt reuses matching completed child steps and assets.
+- A checkpointed remote job resumes polling instead of submitting a duplicate where supported.
+- Attempt logs and errors remain after eventual success.
+- Permanent input, authentication, content-policy, unsupported-capability, and deterministic media-validation errors fail visibly without automatic retry.
+- Worker loss follows the same persisted attempt policy rather than an in-memory retry counter.
 
 ## Cancellation
 
-`CancellationRequestedAt` is durable. Workers check before claim, before/after provider calls, between chunks, and while reading progress. HTTP calls receive cancellation tokens. External process trees get graceful termination then forced kill. Remote paid jobs are cancelled when the adapter supports it; otherwise UI warns that provider billing may continue. Partial outputs never become current assets.
+`CancellationRequestedAt` is durable. The API only records the request; the worker observes it:
 
-Cancellation results in `CANCELLED`, not `FAILED`. “Resume” is an explicit new attempt from valid checkpoints/children.
+- before claim;
+- before and after provider calls;
+- between chunks;
+- during heartbeat/progress handling;
+- while an external process is active.
+
+An active attempt owns an `AbortController`. Its signal propagates to Node HTTP clients, provider adapters, and the centralized process runner. External process trees receive graceful termination and then forced termination after a bounded grace period. Remote paid jobs are cancelled when the adapter supports it; otherwise the UI warns that provider work or billing may continue.
+
+Cancellation commits `CANCELLED`, not `FAILED`. Partial outputs stay in attempt staging and never become current assets. “Resume” creates an explicit new attempt from valid checkpoints or completed children.
+
+## External process execution
+
+FFmpeg, ffprobe, appropriate CLIs, and future Python subprocesses run only through the centralized process abstraction. It passes executable arguments separately with shell mode disabled, captures stdout/stderr separately, enforces output limits and timeouts, returns exit code/signal/duration, accepts `AbortSignal`, terminates the process tree, and writes redacted structured logs.
+
+Never execute untrusted strings through a shell. Workflow step payloads contain typed settings and managed asset references, not command text.
 
 ## Error logs and observability
 
 - Structured application logs: IDs, step type, timing, provider, resource, outcome.
-- User-safe error on step; technical detail and bounded stderr/raw response as protected log asset.
+- User-safe error on the step; technical detail and bounded stderr/raw response as a protected log asset.
 - Rolling local log files with retention.
 - Event feed for UI: queued, started, progress, retry scheduled, completed, failed, invalidated, cancelled.
-- No source story bodies, chapter bodies, API keys, or signed URLs in routine logs.
+- No source story bodies, chapter bodies, API keys, signed URLs, or full unbounded process output in routine logs.
 
 ## Restart scenarios
 
@@ -84,15 +154,22 @@ Cancellation results in `CANCELLED`, not `FAILED`. “Resume” is an explicit n
 |---|---|
 | pending | remains pending |
 | completed | remains completed; validate current fingerprint before use |
-| running, lease active because process restarts quickly | wait until lease expires or startup owns same worker identity safely; simplest V1 expires local worker leases on clean startup |
-| running, lease expired | close attempt `WorkerLost`; retry/fail |
-| staged output, no DB asset | reconciliation quarantines/deletes after grace period |
-| remote provider job checkpoint | adapter polls existing job |
-| FFmpeg partial file | new attempt starts from timeline; delete/quarantine partial file |
+| running with a live lease | wait for lease expiry; a restarted process does not assume ownership without a conditional recovery transition |
+| running with an expired lease | close attempt as `WorkerLost`; retry or fail under policy |
+| staged output with no DB asset | reconciliation quarantines or deletes it after a grace period |
+| remote provider job checkpoint | adapter polls the existing job |
+| FFmpeg partial file | new attempt starts from the timeline; delete or quarantine the partial file |
+| cancellation requested while worker was down | worker cancels before starting or aborts immediately after recovery |
 
-## Decision: workflow-step queue
+## Evolution path
 
-- **Alternatives:** Hangfire/Quartz; channel-only queue; Redis/RabbitMQ.
-- **Why:** workflow already needs persisted fine-grained status/dependencies; using the same rows avoids conflicting job truth.
-- **Trade-offs:** custom claim/recovery code must be well tested; SQLite constrains worker scale.
-- **Future impact:** an outbox/remote queue can transport step IDs later while workflow state remains authoritative.
+The schema and claim rules tolerate more than one local worker, but V1 operates one. If later requirements demand remote or multi-machine workers, first measure SQLite write contention and lease behavior. A queue transport may eventually carry step IDs while SQLite remains workflow truth, or persistence may move to PostgreSQL if its concurrency is required.
+
+Do not introduce distributed infrastructure merely because the lease model leaves that evolution seam.
+
+## Decision: persisted workflow-step queue
+
+- **Alternatives:** in-memory queue; BullMQ/Redis; RabbitMQ/Kafka; generic scheduler plus separate workflow state.
+- **Why:** workflow already needs fine-grained persisted status, dependencies, attempts, cancellation, and invalidation; using the same rows avoids conflicting sources of truth.
+- **Trade-offs:** claim/recovery code is load-bearing; SQLite allows one writer; arbitrary crashes cannot guarantee exactly-once external side effects.
+- **Future impact:** a transport or database can evolve later without moving workflow ownership out of TypeScript application modules.

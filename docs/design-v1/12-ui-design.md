@@ -2,7 +2,7 @@
 
 ## Interaction model
 
-Desktop-oriented responsive React SPA served by ASP.NET Core. Navigation is project-first. The UI reads persisted status; refreshing/restarting never resets a progress bar optimistically. Destructive/regenerative actions state what becomes invalidated before execution.
+Desktop-oriented responsive React SPA built with Vite and served on the same local origin as the Fastify API in production. Navigation is project-first. The UI reads persisted status; refreshing/restarting never resets a progress bar optimistically. Destructive/regenerative actions state what becomes invalidated before execution.
 
 ## Main navigation
 
@@ -120,15 +120,15 @@ Use color plus icon/text; never color alone. Status aggregation always links to 
 
 ## V1 update transport
 
-Start with polling lightweight status endpoints every 1–2 seconds while work is active and slower when idle. SignalR is optional after durable state is correct. Persisted state, not push messages, is authoritative.
+Start with polling lightweight status endpoints every 1-2 seconds while work is active and slower when idle. A lower-latency push transport is optional after durable state is correct. Persisted state, not push messages, is authoritative.
 
 ## Accessibility and long-form usability
 
 Keyboard-accessible controls, visible focus, labels/errors, subtitle contrast preview, chapter autosave draft separated from committed revision, confirmation for paid batches, and no modal that must remain open during jobs.
 
-## Decision: React SPA, no desktop shell initially
+## Decision: React/Vite SPA, no desktop shell initially
 
-- **Alternatives:** Blazor; Electron/Tauri; server-rendered MVC.
-- **Why:** React handles editors, virtualized lists, players, and progress dashboards well while ASP.NET serves one local origin.
-- **Trade-offs:** TypeScript adds a second language/toolchain; filesystem reveal needs a backend endpoint.
+- **Alternatives:** Electron/Tauri; full-stack server-rendered framework; server-rendered forms.
+- **Why:** React handles editors, virtualized lists, players, and progress dashboards well; Vite provides focused browser tooling; Fastify provides the local API boundary.
+- **Trade-offs:** native filesystem features need backend endpoints; shared TypeScript DTOs must not expose persistence/domain internals.
 - **Future impact:** the same SPA can be wrapped as a desktop app or hosted remotely if requirements change.

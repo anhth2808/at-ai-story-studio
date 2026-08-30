@@ -44,7 +44,7 @@ Consistent images → pan/zoom/parallax or Image-to-Video
 → VideoClip assets → Timeline
 ```
 
-Add `ShotPlan`, `MotionPlan`, continuation/reference lineage, `IVideoProvider`, resource/cost policies, and duration reconciliation. Character/world facts expand into `CharacterBible`/`WorldBible` revisions. Context compiler gains additional item providers and retrieval ranking.
+Add `ShotPlan`, `MotionPlan`, continuation/reference lineage, `VideoProvider`, resource/cost policies, and duration reconciliation. Character/world facts expand into `CharacterBible`/`WorldBible` revisions. Context compiler gains additional item providers and retrieval ranking.
 
 This is where GPU scheduling, remote provider job checkpoints, and media quality validation become more important. Still no need for microservices on one workstation.
 

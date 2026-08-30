@@ -2,7 +2,11 @@
 
 ## Executive decision
 
-Build V1 as a **local-first modular monolith**: ASP.NET Core on the current .NET LTS, React/TypeScript, EF Core with SQLite, a database-backed `BackgroundService`, versioned assets on the local filesystem, and FFmpeg/ffprobe. Python AI tools remain optional external processes or local HTTP services behind provider adapters.
+Build V1 as a **TypeScript-first local modular monolith** in a pnpm workspace: React/TypeScript with Vite, a Fastify API, a persisted Node.js worker, Drizzle ORM with SQLite, versioned assets on the local filesystem, and FFmpeg/ffprobe.
+
+The API and worker are independently runnable applications that share explicit domain, workflow, database, provider, and media modules. Fastify routes stay thin; SQLite is job truth; long work runs in the worker. Use Zod for runtime boundary validation where useful and share stable DTO schemas, IDs, enums, workflow statuses, and provider identifiers without exposing Drizzle rows or internal domain objects to the UI.
+
+Python is not the main backend. Prefer native Node integration, an external HTTP API, or an existing service API such as ComfyUI. Add a versioned Python sidecar or controlled subprocess only when a model/library such as F5-TTS, WhisperX, PyTorch, Transformers, or Diffusers is substantially easier or only practical in Python. Node.js retains workflow, project state, retries, asset tracking, and orchestration.
 
 V1's required path is deliberately narrow:
 
@@ -28,15 +32,17 @@ A single user can create a project, generate a new story or adapt a story they a
 
 | Area | V1 decision | Reason |
 |---|---|---|
-| Shape | Modular monolith | One deployment and transaction boundary; module seams remain explicit. |
-| Persistence | SQLite in WAL mode + EF Core | Appropriate for one machine and low write concurrency. |
+| Shape | TypeScript-first modular monolith in a pnpm workspace | One local deployment and shared tooling; module and process seams remain explicit. |
+| Web/API | React + Vite over Fastify | Strong editor/media UI and a small typed HTTP composition boundary with thin routes. |
+| Persistence | SQLite in WAL mode + Drizzle ORM | Appropriate for one machine and one local worker; typed schema and explicit migrations. |
 | Assets | Immutable versioned files + metadata/lineage in SQLite | Large media does not belong in database blobs; hashes make staleness explainable. |
-| Jobs | SQLite-backed workflow-step queue with leases | Restart-safe without Redis/RabbitMQ. |
+| Jobs | Persisted Node.js worker claiming SQLite workflow steps with leases | Restart-safe without Redis, BullMQ, RabbitMQ, or Kafka. |
+| Shared contracts | Zod DTO schemas, IDs, enums, statuses, provider identifiers | Reuse stable boundaries without leaking persistence or domain internals into UI. |
 | Story context | Blueprint + relevant characters + prior summaries + unresolved events + current plan | Maintains continuity without sending the whole story. |
 | TTS | Stable text segments and independently retryable chunks | Provider limits and one failed chunk do not force full chapter regeneration. |
 | Subtitle | TTS segment timing first; WhisperX optional | Fast, free, deterministic text; alignment remains an upgrade path. |
-| Render | Manifest-driven FFmpeg/ffprobe | Deterministic command construction, resumable job, broad codec support. |
-| Providers | Capability contracts; local/free → cheap → premium | Workflow logic stays provider-neutral and costs remain controllable. |
+| Render | Manifest-driven FFmpeg/ffprobe through a shell-free process runner | Deterministic argument construction, cancellation, progress, and broad codec support. |
+| Providers | TypeScript capability contracts; local/free → cheap → premium | Workflow logic stays provider-neutral and costs remain controllable. |
 
 ## Document map
 
@@ -64,7 +70,7 @@ A single user can create a project, generate a new story or adapt a story they a
 
 | Milestone | Deliverable | Exit check |
 |---|---|---|
-| **M0 — Executable skeleton** | ASP.NET Core API, React shell, SQLite connection, worker run mode, FFmpeg/ffprobe health checks, local workspace. | UI reports API, database, worker, and FFmpeg healthy. |
+| **M0 - Executable skeleton** | pnpm workspace, React/Vite shell, Fastify API, SQLite/Drizzle connection, Node.js worker, FFmpeg/ffprobe health checks, local workspace. | UI reports API, database, worker, and FFmpeg healthy. |
 | **M1 — Projects and assets** | Create/edit project; import story or manually enter one chapter; upload background/music; immutable asset records. | Project survives restart and imported files pass hash/probe validation. |
 | **M2 — Durable workflow** | Persisted executions, dependency steps, attempts, leases, progress, cancellation, retry, invalidation, event log. | A deliberately interrupted sample step resumes; editing chapter text invalidates only descendants. |
 | **M3 — Narration vertical slice** | Text cleaning, caption segments, TTS chunk manifest, first Edge TTS adapter, independent chunk retry, FFmpeg audio merge. | A long chapter becomes playable chapter audio; one failed chunk retries alone. |

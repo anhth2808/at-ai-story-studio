@@ -2,16 +2,75 @@
 
 ## Recommendation
 
-Use SQLite with EF Core for V1. One workstation, a handful of worker lanes, large blobs outside the database, and short transactions fit SQLite well. Enable foreign keys, WAL journal mode, a busy timeout, and regular checkpoint/backup behavior. Do not introduce PostgreSQL, Redis, or a broker until multi-machine/multi-user write concurrency is a demonstrated need.
+Use SQLite with Drizzle ORM for V1. One workstation, one local worker, large blobs outside the database, and short transactions fit SQLite well. Enable foreign keys, WAL journal mode, a busy timeout, and coordinated checkpoint/backup behavior. Do not introduce PostgreSQL, Redis, or a broker until multi-machine/multi-user write concurrency or measured SQLite contention demonstrates a real need.
 
 ## Conventions
 
-- IDs: application-generated UUIDv7 values (`Guid.CreateVersion7`) stored as canonical lowercase TEXT for simple EF Core/SQLite inspection and time-ordered indexes; external/provider request IDs remain separate strings.
-- Timestamps: UTC, stored consistently; durations in integer milliseconds/ticks.
-- Enums: readable TEXT with application/database validation.
-- Optimistic concurrency: integer `RowVersion` incremented by application update.
-- Rich structured creative/configuration content: versioned canonical JSON plus promoted relational columns/links needed for querying.
-- Soft lifecycle for projects/assets; immutable revisions/attempts are not updated except controlled status fields.
+- IDs: application-generated UUIDv7 values stored as canonical lowercase TEXT for simple SQLite inspection and time-ordered indexes; external/provider request IDs remain separate strings.
+- Timestamps: UTC ISO-8601 TEXT or integer epoch milliseconds, chosen once and used consistently; durations use integer milliseconds.
+- Enums: readable TEXT constrained by application validation and database `CHECK` constraints where practical.
+- Optimistic concurrency: integer `row_version` incremented in the same conditional update that changes the row.
+- Rich structured creative/configuration content: versioned canonical JSON plus promoted relational columns or links needed for querying.
+- Soft lifecycle for projects/assets; immutable revisions/attempts are not updated except controlled status, progress, heartbeat, and outcome fields.
+
+## Drizzle schema and migrations
+
+Drizzle schema declarations are the typed source for tables, columns, relations, indexes, and constraints. Generated SQL migration files are ordered, reviewed artifacts. Applied migration identity is recorded in SQLite; deployed databases are never synchronized by destructive schema push.
+
+Migration policy:
+
+- run migrations through one explicit CLI/startup coordination path before API and worker accept work;
+- never let API and worker independently race to migrate the same database;
+- acquire an application-level migration lock and use SQLite's transactional DDL where supported;
+- back up before a migration that rebuilds or transforms large tables;
+- make data backfills explicit and restart-aware rather than hiding them in ordinary request startup;
+- fail startup with a clear schema-version error instead of operating against a partial migration.
+
+No migrations are created in this design phase.
+
+## Connection and transaction policy
+
+Every connection sets `PRAGMA foreign_keys = ON` and a configured `busy_timeout`. Workspace initialization sets `journal_mode = WAL`; the application verifies the effective mode rather than assuming the pragma succeeded. `synchronous = NORMAL` is a reasonable WAL default for the local application, subject to explicit durability testing and documentation.
+
+The API and worker may hold separate connection pools, but pool sizes stay small. SQLite still has one writer at a time; a large pool does not create write parallelism. All write transactions are short and contain only database work:
+
+- aggregate update plus dependency invalidation;
+- step claim plus attempt creation;
+- heartbeat/progress checkpoint;
+- asset metadata plus successful step completion;
+- cancellation or failure transition.
+
+Provider calls, FFmpeg, hashing, probing, filesystem copies, and waits never occur inside a database transaction. Use Drizzle transactions for ordinary operations. Parameterized raw SQL is permitted only behind a focused repository when SQLite-specific claim or migration semantics are clearer and safer than the query builder.
+
+## Index policy
+
+Create indexes from concrete access paths, not for every foreign key or JSON field:
+
+- project/revision and current-pointer lookups;
+- unique stable ordering such as project plus chapter number;
+- workflow dependency joins;
+- due-step claiming by status, next-attempt time, priority, and creation time;
+- expired-lease recovery;
+- project/type/role/current asset lookup;
+- unique asset path and useful content-hash lookup.
+
+Verify critical claim and status queries with `EXPLAIN QUERY PLAN` when implementation begins. Promote JSON fields to columns only when filtering or uniqueness requires it.
+
+## Safe job claiming
+
+One local worker is the initial assumption, but claiming remains atomic so a future second process cannot normally execute the same step.
+
+In one short `BEGIN IMMEDIATE` transaction:
+
+1. Select one due `PENDING` step whose required dependencies are completed/current and whose cancellation flag is clear.
+2. Order by priority, next-attempt time, and creation time using the claim index.
+3. Conditionally update that exact step from `PENDING` to `RUNNING`, setting lease owner, lease expiry, current attempt ID, and incremented attempt count.
+4. Insert the append-only attempt row.
+5. Commit before executing provider or media work.
+
+The worker proceeds only when the conditional update affects exactly one row. If it affects zero, the claim lost a race or became ineligible; roll back and retry later. Completion and heartbeat updates also require the expected running status, attempt ID, and lease owner so a stale worker cannot overwrite a recovered attempt.
+
+SQLite does not provide `SELECT ... FOR UPDATE` or skip-locked queue semantics. `BEGIN IMMEDIATE` obtains the write reservation before selection, and the conditional update remains the correctness guard. Keep the claim transaction bounded to one step; do not reserve a batch that may sit idle.
 
 ## Proposed tables
 
@@ -53,7 +112,7 @@ If chapter bodies are stored as files, `Body` may be omitted after early impleme
 | `WorkflowStepAttempts` | `Id`, step ID, attempt number, worker ID, status/outcome, provider config snapshot, start/heartbeat/end, checkpoint JSON/version, error category/code/message/detail, log asset ID, usage/cost JSON | unique `(StepId, AttemptNumber)`; append-only evidence |
 | `WorkflowEvents` | `Id`, execution/step/attempt IDs, sequence, kind, payload JSON, created at | UI/audit events, not event sourcing |
 
-Claim query index: `(Status, NextAttemptAt, Priority, CreatedAt)` plus `(LeaseExpiresAt)` and dependency lookup indexes. SQLite transactions atomically claim one/few candidates; no long transaction spans execution.
+Claim query index: `(Status, NextAttemptAt, Priority, CreatedAt)` plus `(LeaseExpiresAt)` and dependency lookup indexes. The worker atomically claims one candidate per short transaction; no transaction spans execution.
 
 ### Assets/media
 

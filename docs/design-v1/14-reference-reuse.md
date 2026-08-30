@@ -8,7 +8,7 @@ Labels are decisions, not license opinions:
 
 - **LEARN FROM:** architecture/behavior evidence only; write an original implementation.
 - **WRAP:** call the project/package/executable/service behind a studio adapter; preserve license/notices and isolate its data/process contract.
-- **REIMPLEMENT:** build the behavior from requirements in the new .NET architecture, without copying source.
+- **REIMPLEMENT:** build the behavior from requirements in the new TypeScript-first architecture, without copying source.
 - **OPTIONAL:** useful but not required for V1's shipping path.
 - **DO NOT USE:** exclude the component/path from the studio core.
 
@@ -21,7 +21,7 @@ Dependency, model, dataset, service terms, and output rights must be checked sep
 Research: [`docs/projects/story-claw.md`](../projects/story-claw.md).
 
 - **LEARN FROM:** staged novel workflow; persistent character/location/archive concepts; selected prior/later context; storyboards/global order; duration-first media; quality checks, retries, completeness gates, and persistent stage progress.
-- **REIMPLEMENT:** bounded story context, story event/archive model, workflow checkpoints, typed visual/timeline records, and deterministic validation in the .NET modules. TypeScript/Pi-agent/workspace coupling is not the target architecture.
+- **REIMPLEMENT:** bounded story context, story event/archive model, workflow checkpoints, typed visual/timeline records, and deterministic validation in the TypeScript modules. Reuse architectural lessons, not the reference project's Pi-agent or workspace coupling.
 - **OPTIONAL:** future ComfyUI/image-to-video adapter ideas and reference/continuation image handling for V2–V4.
 - **DO NOT USE:** Electron/CLI presentation, metered GPU shutdown scripts, or sub-agent tool orchestration as the deterministic production engine.
 
@@ -32,7 +32,7 @@ MIT would permit reuse with notice, but original reimplementation avoids draggin
 Research: [`docs/projects/pyvideotrans.md`](../projects/pyvideotrans.md).
 
 - **LEARN FROM:** named dubbing stages, explicit stage queues, cancellation, GPU-aware workers, provider registries, cache scopes, FFmpeg hardware probing, and alignment behavior.
-- **REIMPLEMENT:** durable stage/attempt/dependency vocabulary and typed capability registry as original .NET code.
+- **REIMPLEMENT:** durable stage/attempt/dependency vocabulary and typed capability registry as original TypeScript code.
 - **OPTIONAL:** a separate future dubbing product flow; it is not the V1 story-generation path.
 - **DO NOT USE:** copy/link the GPL application UI, mutable mixin pipeline, or source into a differently licensed studio unless the project explicitly chooses GPL-compatible distribution and completes legal review.
 
@@ -78,7 +78,7 @@ Research: [`docs/projects/ShortGPT.md`](../projects/ShortGPT.md).
 
 Research: [`docs/projects/whisperX.md`](../projects/whisperX.md).
 
-- **WRAP:** package/CLI/local service behind `IASRProvider` for optional ASR/forced alignment; preserve BSD attribution and review transitive model licenses.
+- **WRAP:** package/CLI/local service behind `ASRProvider` for optional ASR/forced alignment; preserve BSD attribution and review transitive model licenses.
 - **LEARN FROM:** segment/word/speaker timing schema, staged ASR→alignment→diarization, cache/device controls.
 - **OPTIONAL:** V1 subtitle quality mode; default subtitles use known TTS segments.
 - **DO NOT USE:** subtitle writers as the entire subtitle domain or diarization in the required story path.
@@ -87,7 +87,7 @@ Research: [`docs/projects/whisperX.md`](../projects/whisperX.md).
 
 Research: [`docs/projects/edge-tts.md`](../projects/edge-tts.md).
 
-- **WRAP:** an installed external Python CLI/package behind `ITTSProvider`; record version and comply with LGPL distribution/notice obligations. This is the fastest V1 TTS path, not a stable owned service.
+- **WRAP:** an installed external Python CLI/package behind `TTSProvider`; record version and comply with LGPL distribution/notice obligations. This is the fastest V1 TTS path, not a stable owned service.
 - **LEARN FROM:** UTF-8-aware chunking, word/sentence boundary events, offset compensation, and boundary-to-SRT concepts.
 - **OPTIONAL:** direct use of the small MIT SRT composer is unnecessary because the studio will implement its own cue serializer.
 - **DO NOT USE:** copy protocol/DRM/WebSocket implementation into the studio, or assume an undocumented free service has permanent availability/terms.
@@ -96,7 +96,7 @@ Research: [`docs/projects/edge-tts.md`](../projects/edge-tts.md).
 
 Research: [`docs/projects/F5-TTS.md`](../projects/F5-TTS.md).
 
-- **WRAP:** pinned local Python HTTP/worker adapter behind `ITTSProvider`/voice-conditioning capability; keep stateful model lifetime outside ASP.NET requests.
+- **WRAP:** pinned local Python HTTP sidecar behind `TTSProvider` and voice-conditioning capability; keep stateful model lifetime outside Fastify and the Node.js worker.
 - **LEARN FROM:** reference preprocessing/hash cache, chunking/cross-fade, reference transcript handling, and multi-voice tags.
 - **OPTIONAL:** second V1/early post-V1 TTS provider for local/private narration after Edge validates the pipeline.
 - **DO NOT USE:** training/Gradio UI in the studio core; copy global cache/config mechanics. Audit model/vocoder/checkpoint terms separately.
@@ -105,7 +105,7 @@ Research: [`docs/projects/F5-TTS.md`](../projects/F5-TTS.md).
 
 Research: [`docs/projects/GPT-SoVITS.md`](../projects/GPT-SoVITS.md).
 
-- **WRAP:** existing FastAPI/local service behind `ITTSProvider` when mature multilingual/Chinese voice cloning is needed.
+- **WRAP:** existing FastAPI/local service behind `TTSProvider` when mature multilingual voice cloning is needed.
 - **LEARN FROM:** reference-audio prompt contract, model/prompt cache ownership, streaming modes, and preprocessing/training lifecycle separation.
 - **OPTIONAL:** provider pack after the simpler V1 narration path; especially valuable for users already operating its models.
 - **DO NOT USE:** monolithic Gradio training UI or embed stateful GPU models in the web host. Audit included third-party/model terms.
@@ -125,6 +125,6 @@ Research: [`docs/projects/GPT-SoVITS.md`](../projects/GPT-SoVITS.md).
 ## Decision: wrap tools, reimplement product
 
 - **Alternatives:** fork one reference; copy permissively licensed components; ignore references entirely.
-- **Why:** no reference supplies the required long-story, durable, local-first .NET product; wrappers preserve mature ML while original modules fit the domain.
+- **Why:** no reference supplies the required long-story, durable, local-first TypeScript product; wrappers preserve mature ML while original modules fit the domain.
 - **Trade-offs:** more original engineering; adapters require version/operations testing.
 - **Future impact:** reference projects can be upgraded/replaced without becoming the studio's architecture.

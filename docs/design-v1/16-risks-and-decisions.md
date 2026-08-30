@@ -2,17 +2,17 @@
 
 ## Decision register
 
-### ADR-001 — Modular monolith
+### ADR-001 - TypeScript-first modular monolith
 
-- **Decision:** One .NET application/solution with explicit modules; web and worker may be separate run modes, not services.
-- **Alternatives:** microservices; desktop monolith with work in UI process.
-- **Why:** one developer/local deployment needs minimal operations and one transactional authority.
-- **Trade-offs:** modules require discipline without network enforcement; one database limits distributed scale.
-- **Future impact:** extract only a proven resource/deployment boundary, keeping application contracts.
+- **Decision:** One pnpm workspace with explicit TypeScript modules and three local applications: React/Vite web, Fastify API, and a persisted Node.js worker. These are run modes of one modular monolith, not services.
+- **Alternatives:** ASP.NET Core/.NET solution; microservices; desktop monolith with work in the UI process.
+- **Why:** one developer and local deployment need minimal operations, while one primary language/toolchain enables practical sharing of stable contracts, validation, domain vocabulary, and tooling across frontend and backend.
+- **Trade-offs:** package boundaries require discipline without network enforcement; Node.js requires deliberate isolation of CPU-heavy processes; one database limits distributed scale.
+- **Future impact:** extract only a proven resource or deployment boundary, keeping application contracts and TypeScript orchestration authoritative.
 
 ### ADR-002 — SQLite metadata, filesystem assets
 
-- **Decision:** EF Core/SQLite stores transactional metadata; immutable media/text artifacts use managed files.
+- **Decision:** Drizzle ORM with SQLite stores transactional metadata; immutable media/text artifacts use managed files.
 - **Alternatives:** PostgreSQL; BLOBs; filesystem JSON only.
 - **Why:** simple local installation and efficient multi-gigabyte media.
 - **Trade-offs:** DB/files cannot commit atomically; backup and reconciliation span both.
@@ -42,13 +42,13 @@
 - **Trade-offs:** omitted subtle facts; summary extraction quality matters.
 - **Future impact:** fact/vector/world-bible retrievers plug into the same context-item output.
 
-### ADR-006 — Capability-based provider adapters
+### ADR-006 - Capability-based TypeScript provider adapters
 
-- **Decision:** compiled interfaces for LLM/TTS/ASR/image/video/translation; local/free first, paid fallback only by explicit configuration.
-- **Alternatives:** provider-specific workflow branches; dynamic plugin framework; provider microservices.
-- **Why:** provider replacement/cost control without premature extension complexity.
-- **Trade-offs:** a common contract can hide unique features; capability flags and native extensions need care.
-- **Future impact:** adapters can move to sidecars/remote services without workflow changes.
+- **Decision:** TypeScript interfaces for LLM/TTS/ASR/image/video/translation; local/free first, paid fallback only by explicit configuration.
+- **Alternatives:** provider-specific workflow branches; dynamic plugin framework; Python-first provider orchestration; provider microservices.
+- **Why:** provider replacement and cost control without premature extension complexity, while allowing Node-native, HTTP, ComfyUI, Python sidecar, or subprocess implementations.
+- **Trade-offs:** a common contract can hide unique features; capability flags, runtime validation, and versioned sidecar contracts need care.
+- **Future impact:** adapter implementations can move between runtimes or processes without changing workflow definitions.
 
 ### ADR-007 — Segment-first TTS and known-text subtitles
 
@@ -66,13 +66,23 @@
 - **Trade-offs:** filter graphs/timebases/progress parsing are specialized work; exact bytes vary by build/encoder.
 - **Future impact:** AI images/video are clip producers; render contract survives.
 
-### ADR-009 — React SPA served locally
+### ADR-009 - React/Vite SPA over Fastify
 
-- **Decision:** React/TypeScript UI over ASP.NET API; polling first.
-- **Alternatives:** Blazor; Electron; server-rendered forms.
-- **Why:** rich chapter editing, media playback, virtual lists, and status dashboard without desktop packaging.
-- **Trade-offs:** second language/toolchain; native filesystem features use API endpoints.
-- **Future impact:** desktop wrapper or remote hosting remains possible.
+- **Decision:** React/TypeScript UI built with Vite over a Fastify API; polling persisted status first.
+- **Alternatives:** full-stack server-rendered framework; Electron/Tauri; server-rendered forms.
+- **Why:** rich chapter editing, media playback, virtual lists, and status dashboards with one TypeScript toolchain and a clean local API boundary.
+- **Trade-offs:** native filesystem features use API endpoints; shared types require deliberate DTO boundaries rather than exposing backend internals.
+- **Future impact:** a desktop wrapper or remote hosting remains possible without replacing the SPA or application modules.
+
+### ADR-010 - Replace .NET with TypeScript/Node.js
+
+- **Status:** accepted before application implementation.
+- **Decision:** replace the ASP.NET Core, EF Core, and `.NET BackgroundService` baseline with Node.js, TypeScript, Fastify, Drizzle ORM, a persisted Node.js worker, React, Vite, and a pnpm workspace.
+- **Why the decision changed:** the product now prioritizes a TypeScript-first architecture so frontend and backend can share one language, tooling, selected validation schemas, stable DTO contracts, identifiers, enums, and workflow/provider vocabulary. This reduces context switching and duplicate boundary definitions while preserving the existing modular-monolith and local-first decisions.
+- **Advantages:** one primary toolchain and lockfile; practical reuse of Zod schemas and DTO types; consistent domain vocabulary; direct React/Fastify integration; broad Node SDK and HTTP ecosystem; simpler contributor onboarding for a TypeScript codebase.
+- **Disadvantages:** Node.js is less suitable for CPU-heavy work inside the event loop; child-process tree termination and local packaging need platform-specific care; TypeScript type sharing can accidentally couple UI, domain, and persistence; the ecosystem has more competing conventions than the previous .NET baseline.
+- **Python interoperability:** Python remains optional. Prefer native Node integration, external HTTP APIs, or an existing service API such as ComfyUI. Use a small isolated Python sidecar for F5-TTS, WhisperX, PyTorch, Transformers, Diffusers, or another model/library only when Python is substantially easier or the only practical runtime. Use versioned request/response contracts. Node.js owns workflow, retries, projects, assets, and orchestration; Python owns model loading and inference.
+- **Future impact:** future AI runtimes can change behind provider contracts without moving the product backend to Python. Remote workers or PostgreSQL remain triggered by real concurrency requirements, not by this language decision.
 
 ## Risk register
 
@@ -97,12 +107,16 @@
 | Secrets leak in DB/log/export | Low/high | OS secret store references, redaction, safe DTOs, restricted diagnostic assets, localhost binding. |
 | Localhost app exposed to LAN without auth | Low/high | bind localhost by default; enabling non-loopback requires authentication/security design. |
 | Provider costs surprise user | Medium/high | cost tier badges, estimates/unknown state, per-batch confirmation/caps, no silent paid fallback, actual usage ledger. |
+| Node.js event loop blocked by CPU-heavy work | Medium/high | Keep FFmpeg and model work out of process; worker orchestrates and observes rather than performing heavy compute in-process. |
+| Shared TypeScript types leak persistence into UI | Medium/medium | Share only Zod DTO schemas, identifiers, enums, statuses, and safe capabilities; keep Drizzle rows and domain internals private. |
+| Python sidecar contract/version drift | Medium/medium | Version and validate both sides; expose health/model versions; pin environments; keep managed-file and cancellation semantics explicit. |
+| Child process tree survives cancellation | Medium/high | Central process runner, shell disabled, graceful then forced tree termination, and real platform smoke checks before release. |
 | “Deterministic render” mistaken for byte identity | Medium/low | define determinism as recorded inputs/timeline/args/environment; software encoder default; validate semantic output. |
 
 ## Deferred decisions with triggers
 
 - **PostgreSQL/broker:** only with multi-machine workers or measured SQLite contention.
-- **SignalR:** after polling/status projections work; needed only for lower-latency updates.
+- **Push transport:** after polling/status projections work; needed only for lower-latency updates.
 - **Desktop wrapper:** when installer, tray, or file-dialog limitations become material.
 - **Vector database:** when structured relational context misses measured continuity cases.
 - **General plugin system:** when third-party providers require independent distribution and a security/versioning model exists.

@@ -4,96 +4,169 @@
 
 | Layer | Choice | Rationale for this project |
 |---|---|---|
-| Runtime/backend | ASP.NET Core on current .NET LTS (target .NET 10 LTS at implementation start) | Developer fit, strong async/process hosting, DI/config/logging, maintainable domain code. |
-| API | Minimal APIs or controllers by module; OpenAPI | Boring typed HTTP boundary; choose one convention and keep modules grouped. |
-| Persistence | EF Core + SQLite | Transactions and migrations for rich workflow state with minimal local operations. |
-| Worker | `BackgroundService` using persisted `WorkflowSteps` | No broker; shares domain/application modules; restart through DB leases. |
-| Frontend | React + TypeScript + Vite | Strong long-form editor/status/media ecosystem; static assets served by ASP.NET. |
-| Media | Pinned FFmpeg + ffprobe | Proven local composition, progress, codecs, long-duration efficiency. |
-| AI integrations | .NET HTTP adapters; Python CLI/HTTP sidecars only where necessary | Keeps orchestration/business logic in .NET without reimplementing ML runtimes. |
-| Files | Managed local workspace | Simple, fast for large media, backup/exportable. |
-| Tests later | xUnit + focused integration/smoke fixtures; frontend component tests only for behavior | Fits .NET; avoid media-heavy broad tests without contract value. |
+| Runtime/backend | Node.js + TypeScript | One primary language across browser, API, worker, domain/application modules, contracts, validation, and tooling. |
+| Package/workspace | pnpm workspace | Fast, deterministic dependency installation with explicit local package boundaries and one lockfile. |
+| API | Fastify | Small core, low overhead, plugin encapsulation, lifecycle hooks, structured logging, and schema-oriented validation/serialization. |
+| Boundary validation | Zod where runtime validation matters | One deliberate source for API DTO, configuration, manifest, and sidecar contract validation; inferred types reduce boundary drift. |
+| Persistence | Drizzle ORM + SQLite | Typed schema/query access and explicit SQL migrations without hiding SQLite transaction behavior. |
+| Worker | persisted Node.js worker using `WorkflowSteps` | Restart-safe work without a broker; shares application modules while running independently from the API. |
+| Frontend | React + TypeScript + Vite | Strong long-form editor/status/media ecosystem and fast local development/build tooling. |
+| Media | pinned FFmpeg + ffprobe | Proven local composition, progress, codecs, and long-duration efficiency. |
+| AI integrations | Node-native or HTTP adapters first; isolated Python sidecars only when justified | Keeps orchestration in TypeScript while retaining access to Python-only or Python-practical ML ecosystems. |
+| Files | managed local workspace | Simple and fast for large media, with explicit backup/export and reconciliation. |
+| Tests later | Node/TypeScript test tooling selected during implementation, focused integration/smoke fixtures, frontend tests only for behavior | Avoids freezing a runner before packages exist and avoids broad media-heavy tests without contract value. |
 
-Version numbers should be pinned when implementation begins, not frozen in architecture prose except the LTS baseline. FFmpeg build/license/features must be recorded in distribution notices.
+Pin supported Node.js, pnpm, TypeScript, dependency, SQLite driver, and FFmpeg versions when implementation begins. Record the FFmpeg build, license, and enabled features in distribution notices.
 
-## Suggested solution layout
+## pnpm workspace
+
+Target layout:
 
 ```text
-src/
-  Studio.Web/               API + SPA hosting/composition root
-  Studio.Worker/            optional separate host using same modules
-  Studio.Domain/            project/story/workflow/media domain types
-  Studio.Application/       commands, queries, orchestration ports
-  Studio.Infrastructure/    EF Core, files, process runner, secrets
-  Studio.Providers/         compiled provider adapters
-  Studio.Web.UI/            React/TypeScript
+apps/
+  web/                         React + Vite
+  api/                         Fastify API composition root
+  worker/                      persisted workflow worker
+
+packages/
+  domain/                      domain rules and provider-neutral types
+  database/                    Drizzle schema, migrations, repositories
+  workflow/                    workflow state machine and execution
+  providers/                   provider contracts and adapters
+  media/                       process runner and FFmpeg/ffprobe
+  shared/                      stable browser/server DTO schemas only
 ```
 
-Avoid one project per tiny module. If domain/application split creates circular pressure, group by feature folders inside a smaller number of assemblies. The important boundary is dependency direction, not project count.
+This is a boundary map, not a package quota. Start with fewer packages when two concerns have no independent dependencies or consumers. A package must provide one of:
 
-## ASP.NET Core
+- reuse by more than one application;
+- an enforceable dependency direction;
+- isolation of volatile infrastructure dependencies;
+- an independently testable contract with meaningful ownership.
 
-- Localhost binding by default; explicit opt-in for LAN access.
-- OpenAPI for frontend/provider diagnostics.
-- Range-enabled asset streaming endpoints; no raw file-server exposure.
-- Built-in health checks for DB/workspace/worker/FFmpeg and configured providers.
-- Structured logging and problem-details errors.
+Do not create one package per domain noun, re-export every internal type through `shared`, or preserve an empty package for future purity. Package cycles indicate a wrong boundary; merge or move ownership rather than adding indirection.
 
-A full authentication system is unnecessary for localhost V1. If LAN binding is enabled later, authentication becomes mandatory before release.
+## Fastify API
 
-## EF Core and SQLite
+Fastify fits a local-first application:
 
-- Explicit transactions around aggregate + invalidation changes.
-- WAL, foreign keys, busy timeout; short-lived `DbContext` per command/worker operation.
-- Compiled/projection queries only where profiling shows need.
-- Do not lazy-load large navigation graphs/chapter bodies.
-- Migrations begin during implementation, but none are created in this design phase.
+- low framework overhead for a long-running localhost process;
+- plugin scopes provide explicit composition for database, workspace, logging, and routes;
+- lifecycle hooks coordinate startup health and graceful shutdown;
+- schema-oriented validation and serialization work with deliberate DTO contracts;
+- Pino-based structured logging is available without adding another logging model;
+- route grouping and encapsulation support a modular monolith without service extraction.
 
-Dapper/raw SQL may be used only for the atomic claim query if EF cannot express it safely; keep it behind the workflow repository. Do not mix data-access styles broadly.
+Bind to loopback by default; require a separate security decision before LAN exposure. Provide range-enabled asset streaming endpoints rather than raw filesystem serving. Health checks cover database/schema version, managed workspace, worker heartbeat, FFmpeg/ffprobe, and configured providers.
 
-## Worker/process execution
+Routes/controllers remain thin. They validate transport input, call an application command/query, and map the result. Business rules, workflow materialization, job claiming, retries, provider behavior, asset promotion, and FFmpeg command construction stay outside HTTP handlers.
 
-Use `System.Diagnostics.Process` argument lists, no shell. Redirect bounded output, pass cancellation, terminate process tree, and set explicit environment/working directory. FFmpeg progress parser and Python sidecar lifecycle are infrastructure adapters.
+## Type and validation sharing
 
-Web+worker may share one process for the first milestone. Support a separate worker executable early enough to isolate long FFmpeg/GPU work, but do not require Windows services, containers, or orchestration.
+Good candidates for `shared`:
+
+- Zod request/response DTO schemas and inferred transport types;
+- stable enums and opaque identifiers;
+- workflow statuses and progress units;
+- provider kinds, provider identifiers, and safe capability descriptors;
+- safe API error codes.
+
+Do not expose Drizzle row types, database schemas, repositories, aggregates, internal commands/events, provider SDK responses, secrets, or filesystem models to the browser. TypeScript makes sharing convenient, but convenience is not a boundary reason.
+
+During implementation, choose one API contract strategy consistently:
+
+1. shared Zod DTO schemas consumed directly by web and API; or
+2. server-owned schemas/OpenAPI with generated browser client types.
+
+Do not maintain parallel hand-written DTO types and schemas that can drift.
+
+## Drizzle ORM and SQLite
+
+- Drizzle schema declarations define typed tables, relations, constraints, and indexes.
+- Ordered generated SQL migrations are reviewed and recorded; production workspaces are not updated with destructive schema push.
+- One explicit migration path runs before API/worker accept work; the two processes do not race startup migrations.
+- Ordinary writes use short Drizzle transactions.
+- The atomic claim operation may use focused parameterized raw SQL behind the workflow repository when SQLite-specific semantics are clearer.
+- Every connection enables foreign keys and busy timeout.
+- Workspace initialization enables WAL; startup verifies the effective journal mode.
+- API and worker pools remain small because SQLite has one writer regardless of connection count.
+- Provider calls, child processes, file copies, hashing, and probing never occur inside a database transaction.
+
+PostgreSQL is not part of V1. Consider it only after measured SQLite contention, remote/multi-machine workers, or another specific requirement exceeds SQLite's local concurrency model.
+
+## Persisted Node.js worker
+
+Run the worker as `apps/worker`, independently restartable from Fastify. The API inserts workflow work into SQLite. The worker claims one due step in a short transaction, commits, performs work, persists progress/checkpoints/heartbeats, and conditionally commits result or failure.
+
+Use persisted lease owner/expiry and attempt IDs even with one worker. This prevents duplicate claims under normal operation and keeps an evolution path for later worker processes. Use `AbortController`/`AbortSignal` for active cancellation. Do not introduce an in-memory-only queue, Redis, BullMQ, RabbitMQ, or Kafka.
+
+## Centralized process execution
+
+One process runner in the media/infrastructure boundary accepts:
+
+- executable path;
+- argument array;
+- explicit working directory;
+- allowlisted environment additions;
+- timeout;
+- bounded stdout/stderr policy;
+- structured log context;
+- `AbortSignal`.
+
+Spawn directly with shell mode disabled. Never concatenate executable and user-controlled values into a shell command. Capture stdout and stderr separately, return exit code/signal/duration, redact structured logs, and terminate the process tree gracefully before forced termination.
+
+FFmpeg, ffprobe, an Edge TTS CLI when appropriate, and future one-shot Python tools all use this abstraction. Higher layers pass typed options and managed asset references, not raw command strings.
 
 ## Frontend choices
 
 - React Router for project tabs/routes.
 - A small server-state library is optional; do not introduce global state machinery until polling/edit caching needs it.
 - Native HTML media elements for playback.
-- Accessible component primitives rather than a huge design system.
-- Generate API types from OpenAPI or maintain one deliberate DTO layer; avoid duplicating domain entities into UI.
+- Accessible component primitives rather than a large design system.
+- Poll persisted status first; lower-latency push is optional after durable state works.
+- Vite builds static assets for the local application; development may proxy API requests while production serves both through one local origin or coordinated local hosts.
 
-## Python boundary
+## Python sidecar strategy
 
-Python is appropriate for WhisperX, F5-TTS, GPT-SoVITS, and ComfyUI-adjacent ML, not for the whole application. Prefer stable local HTTP APIs for stateful GPU models and one-shot CLI for small tools. Pin environments separately, health-check versions, exchange JSON/file assets, and let .NET own projects/workflows/costs.
+Python is not the main backend. Use this escalation order:
+
+1. native TypeScript/Node integration;
+2. external HTTP API;
+3. existing service API such as ComfyUI;
+4. small isolated Python sidecar;
+5. Python subprocess when its one-shot lifecycle is appropriate.
+
+F5-TTS, WhisperX, PyTorch models, Transformers, and Diffusers may justify a Python sidecar. Pin its environment separately and expose versioned request/response schemas, health/version discovery, managed-file exchange, bounded diagnostics, and cancellation where possible.
+
+Node.js remains responsible for project state, workflow, retries, job claiming, provider selection, asset tracking, and orchestration. Python remains responsible for model loading, inference, and model-specific preprocessing/postprocessing. ComfyUI normally runs separately and is integrated through its API rather than embedded in the Node.js process.
 
 ## Packaging
 
-V1 can be developer-run/self-contained .NET plus Node-built static assets and a configured FFmpeg path. Do not bundle large Python models by default. A later installer can manage optional provider packs and license notices after adapter behavior stabilizes.
+V1 can be developer-run through pnpm scripts with configured Node.js and FFmpeg/ffprobe paths. Build the web application with Vite and run API and worker as independently restartable Node.js processes. A coordinated development command is convenience, not a shared-process requirement.
+
+Do not bundle Python or large model environments by default. A later installer or desktop wrapper may manage optional provider packs and license notices after adapter behavior stabilizes.
 
 ## Alternatives
 
-### Blazor
+### ASP.NET Core / .NET
 
-Single-language appeal, but React is stronger for rich editing/media UI and matches a clean API boundary. Blazor remains viable if the developer values one language more than ecosystem breadth; it does not change backend architecture.
+The previous design offered strong process hosting, mature dependency injection, and robust server tooling. It was replaced because the product now prioritizes one TypeScript language/tooling model across frontend and backend and practical sharing of boundary contracts. The change trades some .NET runtime maturity for a smaller cognitive/toolchain split.
 
 ### Python backend
 
-Would simplify direct ML imports but weaken the stated .NET maintainability goal and mix GPU/model lifetime with business orchestration. Sidecars give the needed Python access without that cost.
+Direct model imports would be simpler, but model runtimes and GPU lifecycle would become coupled to project/workflow orchestration. Explicit sidecars provide Python interoperability without making Python the main backend.
 
-### PostgreSQL + broker
+### PostgreSQL plus broker
 
-Technically stronger concurrent claiming, operationally unnecessary for one local user. Introduce only with remote/multi-worker requirements.
+Stronger concurrent/distributed claiming is operationally unnecessary for one local user and one worker. Introduce only for measured concurrency or remote-worker requirements.
 
 ### Desktop shell
 
-Useful for installer/file dialogs/tray behavior later, not required for the first local web application. Avoid Electron memory/packaging cost until browser limitations are real.
+Useful for installers, file dialogs, or tray behavior later, not required for the first local web application. Avoid Electron/Tauri until browser limitations are real.
 
-## Decision: .NET owns orchestration
+## Decision: TypeScript owns orchestration
 
-- **Alternatives:** all-Python app; TypeScript full stack.
-- **Why:** matches developer expertise and long-term domain/workflow complexity while preserving access to AI tools through adapters.
-- **Trade-offs:** process/service integration and two frontend/backend toolchains.
-- **Future impact:** provider processes can change languages independently; business rules remain stable.
+- **Alternatives:** ASP.NET Core/.NET primary application; Python-first application; distributed services.
+- **Why:** one primary language and pnpm toolchain maximizes practical reuse of contracts, validation, domain vocabulary, and developer tooling across React, API, and worker while retaining external integration seams.
+- **Trade-offs:** Node.js requires deliberate CPU/process isolation; shared types can create accidental coupling; process-tree behavior varies by platform; the ecosystem offers more competing conventions than .NET.
+- **Future impact:** provider implementations and AI sidecars may use other runtimes, but project state, workflow, retries, asset lineage, and orchestration remain stable TypeScript responsibilities.
