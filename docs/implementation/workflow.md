@@ -14,6 +14,15 @@ The worker claims one eligible step transactionally, creates an attempt, leases 
 
 Chapter edits create a new revision and invalidate dependent current outputs. Asset registration first clears the prior current pointer for a role, then commits a validated READY asset. Historical rows and files remain available for diagnosis.
 
+Story generation uses the same durable workflow tables:
+
+```text
+GENERATE_STORY_BLUEPRINT -> GENERATE_CHAPTER_PLANS -> GENERATE_CHAPTER
+                                                    `-> GENERATE_CHAPTER_SUMMARY
+```
+
+Blueprint, plan, chapter, and summary jobs are independently retryable and report progress from the isolated OMP host. A completed Story step does not enqueue media. Generating a chapter promotes a validated envelope into the ordinary chapter revision only when the plan-item fingerprint is still current; a newer manual chapter revision produces `MANUAL_EDIT_CONFLICT` instead of being overwritten. Changing settings, blueprint, a plan item, or a chapter invalidates only dependent Story records and media descendants.
+
 Manual flow:
 
 1. Create a project.

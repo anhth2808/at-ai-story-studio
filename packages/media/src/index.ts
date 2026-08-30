@@ -118,6 +118,7 @@ export type ProcessOptions = {
   arguments?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  input?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   maxOutputBytes?: number;
@@ -170,6 +171,8 @@ export class ProcessRunner {
         shell: false,
         windowsHide: true,
       });
+      if (options.input !== undefined) child.stdin.end(options.input);
+      else child.stdin.end();
       let stdout = '';
       let stderr = '';
       let settled = false;

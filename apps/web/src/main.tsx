@@ -1,4 +1,5 @@
 import { StrictMode, useEffect, useState } from 'react';
+import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type {
   ChapterDto,
@@ -7,11 +8,35 @@ import type {
   ProjectDto,
   RenderConfig,
   StatusSummary,
+  StorySettings,
+  StorySettingsDto,
+  StorySnapshotDto,
 } from '@studio/shared';
 import './styles.css';
-const API_BASE = 'http://127.0.0.1:3001';
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 type ProjectDetail = { project: ProjectDto; chapters: ChapterDto[] };
 type RenderAsset = { id: string; url: string; mediaType: string };
+const defaultStorySettings: StorySettings = {
+  mode: 'IDEA_TO_STORY',
+  idea: '',
+  language: 'vi-VN',
+  genre: '',
+  tone: '',
+  audience: '',
+  targetChapterCount: 3,
+  chapterLength: 800,
+  pacing: 'MEDIUM',
+  contentBoundaries: [],
+  characterNotes: '',
+  worldNotes: '',
+  plotRequirements: '',
+  generation: {
+    model: null,
+    contextBudget: 5_000,
+    temperature: 0.7,
+    maxOutputTokens: 8_000,
+  },
+};
 type AudioAsset = { id: string; url: string; mediaType: string };
 type SubtitleAsset = { srt: string; url: string };
 
@@ -40,6 +65,19 @@ async function apiText(path: string): Promise<string> {
   }
   return response.text();
 }
+type StoryJobScheduleDto = { executionId: string; jobId?: string; jobIds?: string[] };
+const storyApi = {
+  snapshot: (projectId: string) => api<StorySnapshotDto>(`/api/projects/${projectId}/story`),
+  saveSettings: (projectId: string, settings: StorySettings) =>
+    api<StorySettingsDto>(`/api/projects/${projectId}/story/settings`, {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }),
+  generate: (path: string, body: Record<string, unknown> = {}) =>
+    api<StoryJobScheduleDto>(path, { method: 'POST', body: JSON.stringify(body) }),
+  retryJob: (jobId: string) => api(`/api/jobs/${jobId}/retry`, { method: 'POST' }),
+  cancelJob: (jobId: string) => api(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
+};
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
   const asset = await api<RenderAsset>(`/api/projects/${projectId}/render`).catch(() => null);
   return asset
@@ -54,10 +92,11 @@ function App() {
   const [chapters, setChapters] = useState<ChapterDto[]>([]);
   const [jobs, setJobs] = useState<JobDto[]>([]);
   const [status, setStatus] = useState<StatusSummary | null>(null);
+  const [renderConfig, setRenderConfig] = useState<RenderConfig | null>(null);
+  const [story, setStory] = useState<StorySnapshotDto | null>(null);
   const [audio, setAudio] = useState<AudioAsset | null>(null);
   const [subtitle, setSubtitle] = useState<SubtitleAsset | null>(null);
   const [render, setRender] = useState<RenderAsset | null>(null);
-  const [renderConfig, setRenderConfig] = useState<RenderConfig | null>(null);
   const [error, setError] = useState('');
   const [tab, setTab] = useState('Story');
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
@@ -74,6 +113,7 @@ function App() {
         const detail = await api<ProjectDetail>(`/api/projects/${selected.id}`);
         setSelected(detail.project);
         setChapters(detail.chapters);
+        setStory(await storyApi.snapshot(selected.id));
         const chapterId = activeChapterId ?? detail.chapters[0]?.id;
         setActiveChapterId((current) => current ?? detail.chapters[0]?.id ?? null);
         setStatus(
@@ -112,6 +152,7 @@ function App() {
         }
         setRenderConfig(await api<RenderConfig>(`/api/projects/${selected.id}/render-config`));
       } else {
+        setStory(null);
         setAudio(null);
         setSubtitle(null);
       }
@@ -170,6 +211,7 @@ function App() {
     setChapters(detail.chapters);
     setActiveChapterId(detail.chapters[0]?.id ?? null);
     setJobs([]);
+    setStory(null);
     setStatus(await api<StatusSummary>(`/api/projects/${project.id}/status`));
     setRender(await loadRender(project.id));
   };
@@ -193,6 +235,13 @@ function App() {
         content: chapter.content,
         expectedRevision: chapter.revision,
       }),
+    });
+    await refresh();
+  };
+  const generateSummary = async (chapter: ChapterDto): Promise<void> => {
+    await api(`/api/chapters/${chapter.id}/story/summary`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedChapterRevision: chapter.revision }),
     });
     await refresh();
   };
@@ -334,6 +383,14 @@ function App() {
             </div>
             {tab === 'Story' && (
               <>
+                <StoryWorkspace
+                  projectId={selected.id}
+                  story={story}
+                  chapters={chapters}
+                  activeChapterId={activeChapter?.id ?? null}
+                  onChanged={() => void refresh()}
+                  onError={setError}
+                />
                 <div className="section-head">
                   <h3>Chapters</h3>
                   <button onClick={() => void addChapter()}>+ Chương</button>
@@ -366,6 +423,11 @@ function App() {
                       <span>
                         Chương {chapter.number} · revision {chapter.revision}
                       </span>
+                      <span
+                        className={`origin-badge ${chapter.origin === 'GENERATED' ? 'generated' : ''}`}
+                      >
+                        {chapter.origin === 'GENERATED' ? 'AI tạo - cần duyệt' : 'Thủ công'}
+                      </span>
                       <button
                         className="secondary"
                         onClick={() => setActiveChapterId(chapter.id)}
@@ -374,6 +436,18 @@ function App() {
                         {activeChapter?.id === chapter.id ? 'Đang chọn' : 'Chọn chương'}
                       </button>
                       <button onClick={() => void saveChapter(chapter)}>Lưu nội dung</button>
+                      <button
+                        className="secondary"
+                        onClick={() =>
+                          void generateSummary(chapter).catch((cause) =>
+                            setError(
+                              cause instanceof Error ? cause.message : 'Không thể tạo tóm tắt',
+                            ),
+                          )
+                        }
+                      >
+                        Tạo tóm tắt
+                      </button>
                     </div>
                   </article>
                 ))}
@@ -543,6 +617,433 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+function StoryWorkspace({
+  projectId,
+  story,
+  chapters,
+  activeChapterId,
+  onChanged,
+  onError,
+}: {
+  projectId: string;
+  story: StorySnapshotDto | null;
+  chapters: ChapterDto[];
+  activeChapterId: string | null;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [draft, setDraft] = useState<StorySettings>(story?.settings ?? defaultStorySettings);
+  useEffect(() => {
+    setDraft(story?.settings ?? defaultStorySettings);
+  }, [story?.settings?.revision]);
+  const setField = <K extends keyof StorySettings>(key: K, value: StorySettings[K]): void => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+  const submitSettings = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    try {
+      await storyApi.saveSettings(projectId, draft);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu cài đặt Story');
+    }
+  };
+  const generate = async (path: string): Promise<void> => {
+    try {
+      await storyApi.generate(path);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo nội dung Story');
+    }
+  };
+  if (!story) {
+    return (
+      <div className="story-empty">
+        <strong>Đang tải Story...</strong>
+        <span>Đang đọc trạng thái đã lưu từ SQLite.</span>
+      </div>
+    );
+  }
+  const settings = story.settings;
+  const chapterJobFor = (planItemId: string) =>
+    story.jobs.find((job) => job.type === 'GENERATE_CHAPTER' && job.entityId === planItemId);
+  const generatePlanItem = async (planItemId: string): Promise<void> => {
+    const existingChapter = chapters.find((chapter) => chapter.storyPlanItemId === planItemId);
+    if (
+      existingChapter?.origin === 'MANUAL' &&
+      !window.confirm(
+        'Chương này đã được sửa thủ công. Xác nhận yêu cầu tạo lại để kiểm tra xung đột?',
+      )
+    )
+      return;
+    const job = chapterJobFor(planItemId);
+    try {
+      if (job?.status === 'FAILED') {
+        await storyApi.retryJob(job.id);
+      } else {
+        await storyApi.generate(
+          `/api/projects/${projectId}/story/chapters/${planItemId}/generate`,
+          {
+            expectedPlanRevision: story.plan?.revision ?? null,
+            expectedChapterRevision: existingChapter?.revision ?? null,
+          },
+        );
+      }
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo chương');
+    }
+  };
+  return (
+    <div className="story-workspace">
+      <div className="story-toolbar">
+        <div>
+          <p className="eyebrow">STORY ENGINE</p>
+          <h3>Ý tưởng đến câu chuyện</h3>
+          <p className="muted">
+            Tạo từng lớp nội dung để duyệt. Story không tự tạo narration hay video.
+          </p>
+        </div>
+        <div className={`readiness ${story?.omp.ready ? 'ready' : 'not-ready'}`}>
+          <span aria-hidden="true" />
+          <span>{story?.omp.ready ? 'OMP sẵn sàng' : 'OMP chưa sẵn sàng'}</span>
+          {story?.omp.model && <small>{story.omp.model}</small>}
+        </div>
+      </div>
+      <form className="story-settings" onSubmit={(event) => void submitSettings(event)}>
+        <div className="story-settings-head">
+          <div>
+            <h4>Cài đặt câu chuyện</h4>
+            <p className="muted">
+              {settings
+                ? `Revision ${settings.revision} đang được lưu trong SQLite.`
+                : 'Chưa có cài đặt. Lưu để bắt đầu.'}
+            </p>
+          </div>
+          <button type="submit">Lưu cài đặt</button>
+        </div>
+        <label className="field field-wide">
+          <span>Ý tưởng chính</span>
+          <textarea
+            required
+            maxLength={20_000}
+            value={draft.idea}
+            onChange={(event) => setField('idea', event.target.value)}
+          />
+        </label>
+        <div className="story-field-grid">
+          <label className="field">
+            <span>Ngôn ngữ</span>
+            <input
+              required
+              value={draft.language}
+              onChange={(event) => setField('language', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Thể loại</span>
+            <input
+              required
+              value={draft.genre}
+              onChange={(event) => setField('genre', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Giọng kể</span>
+            <input
+              required
+              value={draft.tone}
+              onChange={(event) => setField('tone', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Đối tượng</span>
+            <input
+              required
+              value={draft.audience}
+              onChange={(event) => setField('audience', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Số chương</span>
+            <input
+              required
+              min={1}
+              max={200}
+              type="number"
+              value={draft.targetChapterCount}
+              onChange={(event) => setField('targetChapterCount', Number(event.target.value))}
+            />
+          </label>
+          <label className="field">
+            <span>Độ dài chương (từ)</span>
+            <input
+              required
+              min={100}
+              max={20_000}
+              type="number"
+              value={draft.chapterLength}
+              onChange={(event) => setField('chapterLength', Number(event.target.value))}
+            />
+          </label>
+          <label className="field">
+            <span>Nhịp truyện</span>
+            <select
+              value={draft.pacing}
+              onChange={(event) =>
+                setField('pacing', event.target.value as StorySettings['pacing'])
+              }
+            >
+              <option value="SLOW">Chậm</option>
+              <option value="MEDIUM">Vừa</option>
+              <option value="FAST">Nhanh</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Model OMP (tuỳ chọn)</span>
+            <input
+              value={draft.generation.model ?? ''}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  generation: { ...current.generation, model: event.target.value || null },
+                }))
+              }
+            />
+          </label>
+        </div>
+        <label className="field field-wide">
+          <span>Ranh giới nội dung (mỗi dòng một mục)</span>
+          <textarea
+            value={draft.contentBoundaries.join('\n')}
+            onChange={(event) =>
+              setField(
+                'contentBoundaries',
+                event.target.value
+                  .split('\n')
+                  .map((item) => item.trim())
+                  .filter(Boolean),
+              )
+            }
+          />
+        </label>
+        <div className="story-field-grid">
+          <label className="field">
+            <span>Ghi chú nhân vật</span>
+            <textarea
+              value={draft.characterNotes}
+              onChange={(event) => setField('characterNotes', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Ghi chú thế giới</span>
+            <textarea
+              value={draft.worldNotes}
+              onChange={(event) => setField('worldNotes', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Yêu cầu cốt truyện</span>
+            <textarea
+              value={draft.plotRequirements}
+              onChange={(event) => setField('plotRequirements', event.target.value)}
+            />
+          </label>
+        </div>
+      </form>
+      <div className="story-actions">
+        <button
+          disabled={!settings}
+          onClick={() => void generate(`/api/projects/${projectId}/story/blueprint/generate`)}
+        >
+          Tạo blueprint
+        </button>
+        <button
+          disabled={!story?.blueprint}
+          onClick={() => void generate(`/api/projects/${projectId}/story/plans/generate`)}
+        >
+          Tạo dàn ý chương
+        </button>
+        <button
+          disabled={!settings}
+          className="secondary"
+          onClick={() => void generate(`/api/projects/${projectId}/story/generate`)}
+        >
+          Chạy blueprint + dàn ý
+        </button>
+      </div>
+      {story?.jobs.some((job) => job.type.startsWith('GENERATE_')) && (
+        <div className="story-jobs">
+          <div className="section-head">
+            <h4>Tiến trình Story</h4>
+            <span className="muted">Trạng thái đã lưu</span>
+          </div>
+          {story.jobs
+            .filter((job) => job.type.startsWith('GENERATE_'))
+            .map((job) => (
+              <div className="story-job" key={job.id}>
+                <span>{job.type.replaceAll('_', ' ')}</span>
+                <strong className={`status-${job.status.toLowerCase()}`}>{job.status}</strong>
+                <small>
+                  {Math.round(job.progress * 100)}% · lần thử {job.attempts}
+                </small>
+                {job.error && <em>{job.error}</em>}
+                {job.status === 'FAILED' && (
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void storyApi
+                        .retryJob(job.id)
+                        .then(onChanged)
+                        .catch((cause) =>
+                          onError(cause instanceof Error ? cause.message : 'Không thể thử lại'),
+                        )
+                    }
+                  >
+                    Thử lại
+                  </button>
+                )}
+                {(job.status === 'PENDING' || job.status === 'RUNNING') && (
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void storyApi
+                        .cancelJob(job.id)
+                        .then(onChanged)
+                        .catch((cause) =>
+                          onError(cause instanceof Error ? cause.message : 'Không thể hủy job'),
+                        )
+                    }
+                  >
+                    Hủy
+                  </button>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
+      {story?.blueprint && (
+        <section className="story-output">
+          <div className="section-head">
+            <div>
+              <h4>Blueprint · revision {story.blueprint.revision}</h4>
+              <p>{story.blueprint.blueprint.premise}</p>
+            </div>
+            {story.blueprint.metadata && (
+              <small className="provenance">
+                Model: {story.blueprint.metadata.model ?? 'unknown'} ·{' '}
+                {story.blueprint.metadata.promptVersion}
+              </small>
+            )}
+          </div>
+          <p className="muted">{story.blueprint.blueprint.plotDirection}</p>
+          <div className="chip-row">
+            {story.blueprint.blueprint.themes.map((theme) => (
+              <span className="chip" key={theme}>
+                {theme}
+              </span>
+            ))}
+          </div>
+          <div className="character-grid">
+            {story.blueprint.blueprint.characters.map((character) => (
+              <article className="character-card" key={character.id}>
+                <strong>{character.name}</strong>
+                <span>{character.role}</span>
+                <small>
+                  {character.ageRange} · {character.appearance}
+                </small>
+                <p>Muốn: {character.wants}</p>
+                <p>Sợ: {character.fears}</p>
+                <div className="chip-row">
+                  {character.traits.map((trait) => (
+                    <span className="chip" key={trait}>
+                      {trait}
+                    </span>
+                  ))}
+                </div>
+                <p>{character.personality}</p>
+                <small>Arc: {character.arc}</small>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+      {story?.plan && (
+        <section className="story-output">
+          <div className="section-head">
+            <h4>Dàn ý chương · revision {story.plan.revision}</h4>
+            <span className="provenance">Blueprint {story.plan.blueprintRevision}</span>
+          </div>
+          <div className="plan-list">
+            {story.plan.plan.items.map((item) => {
+              const job = chapterJobFor(item.id);
+              const existingChapter = chapters.find(
+                (chapter) => chapter.storyPlanItemId === item.id,
+              );
+              const state =
+                job?.status ?? (existingChapter?.origin === 'MANUAL' ? 'MANUAL_EDIT' : 'READY');
+              return (
+                <div className="plan-row" key={item.id}>
+                  <div>
+                    <strong>
+                      {item.chapterNumber}. {item.title}
+                    </strong>
+                    <p>{item.summary}</p>
+                    <small>
+                      {item.estimatedWordCount} từ · {item.emotionalArc} · {state}
+                    </small>
+                  </div>
+                  <button
+                    className="secondary"
+                    disabled={job?.status === 'PENDING' || job?.status === 'RUNNING'}
+                    onClick={() => void generatePlanItem(item.id)}
+                  >
+                    {job?.status === 'FAILED'
+                      ? 'Thử lại'
+                      : existingChapter?.origin === 'MANUAL'
+                        ? 'Xác nhận tạo lại'
+                        : 'Tạo chương'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+      {story?.summaries.length ? (
+        <section className="story-output">
+          <div className="section-head">
+            <h4>Tóm tắt và cảnh báo</h4>
+            <span className="muted">{story.summaries.length} chương có tóm tắt</span>
+          </div>
+          {story.summaries.map((item) => (
+            <article className="summary-row" key={item.id}>
+              <div>
+                <strong>
+                  Chương {item.chapterId === activeChapterId ? 'đang chọn' : item.chapterId}
+                </strong>
+                <p>{item.summary.recap}</p>
+              </div>
+              {item.warnings.length > 0 && (
+                <div className="warning-list">
+                  {item.warnings.map((warning) => (
+                    <span key={warning}>Cảnh báo: {warning}</span>
+                  ))}
+                </div>
+              )}
+            </article>
+          ))}
+        </section>
+      ) : (
+        <div className="story-empty">
+          <strong>Chưa có đầu ra Story</strong>
+          <span>Lưu cài đặt rồi tạo blueprint để bắt đầu quy trình duyệt.</span>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -30,6 +30,9 @@ export const chapters = sqliteTable(
     status: text('status').notNull().default('ACTIVE'),
     revision: integer('revision').notNull().default(1),
     rowVersion: integer('row_version').notNull().default(1),
+    storyOrigin: text('story_origin').notNull().default('MANUAL'),
+    storyPlanItemId: text('story_plan_item_id'),
+    storyGenerationId: text('story_generation_id'),
     ...timestamps,
   },
   (table) => ({

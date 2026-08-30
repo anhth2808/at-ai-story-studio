@@ -91,16 +91,18 @@ export class ChapterRepository {
   list(projectId: Id): ChapterDto[] {
     return this.database.sqlite
       .prepare(
-        'SELECT id, project_id as projectId, number, title, content, revision, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE project_id=? ORDER BY number',
+        'SELECT id, project_id as projectId, number, title, content, revision, story_origin as origin, story_plan_item_id as storyPlanItemId, story_generation_id as storyGenerationId, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE project_id=? ORDER BY number',
       )
       .all(projectId) as ChapterDto[];
   }
   get(id: Id): ChapterDto | null {
-    return this.database.sqlite
-      .prepare(
-        'SELECT id, project_id as projectId, number, title, content, revision, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE id=?',
-      )
-      .get(id) as ChapterDto | null;
+    return (
+      (this.database.sqlite
+        .prepare(
+          'SELECT id, project_id as projectId, number, title, content, revision, story_origin as origin, story_plan_item_id as storyPlanItemId, story_generation_id as storyGenerationId, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE id=?',
+        )
+        .get(id) as ChapterDto | undefined) ?? null
+    );
   }
   create(projectId: Id, input: ChapterInput): ChapterDto {
     const max = this.database.sqlite
@@ -110,9 +112,38 @@ export class ChapterRepository {
     const stamp = now();
     this.database.sqlite
       .prepare(
-        'INSERT INTO chapters (id,project_id,number,title,content,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
+        'INSERT INTO chapters (id,project_id,number,title,content,story_origin,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
       )
-      .run(id, projectId, max.next, input.title, input.content, stamp, stamp);
+      .run(id, projectId, max.next, input.title, input.content, 'MANUAL', stamp, stamp);
+    return this.get(id)!;
+  }
+  createGenerated(
+    projectId: Id,
+    input: ChapterInput,
+    storyPlanItemId: string,
+    storyGenerationId: Id,
+  ): ChapterDto {
+    const max = this.database.sqlite
+      .prepare('SELECT COALESCE(MAX(number),0)+1 as next FROM chapters WHERE project_id=?')
+      .get(projectId) as { next: number };
+    const id = randomUUID();
+    const stamp = now();
+    this.database.sqlite
+      .prepare(
+        'INSERT INTO chapters (id,project_id,number,title,content,story_origin,story_plan_item_id,story_generation_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        id,
+        projectId,
+        max.next,
+        input.title,
+        input.content,
+        'GENERATED',
+        storyPlanItemId,
+        storyGenerationId,
+        stamp,
+        stamp,
+      );
     return this.get(id)!;
   }
   update(id: Id, input: ChapterInput): ChapterDto {
@@ -124,9 +155,9 @@ export class ChapterRepository {
     const stamp = now();
     this.database.sqlite
       .prepare(
-        'UPDATE chapters SET title=?, content=?, revision=revision+?, row_version=row_version+1, updated_at=? WHERE id=?',
+        "UPDATE chapters SET title=?, content=?, story_origin=CASE WHEN ? THEN 'MANUAL' ELSE story_origin END, revision=revision+?, row_version=row_version+1, updated_at=? WHERE id=?",
       )
-      .run(input.title, input.content, changed ? 1 : 0, stamp, id);
+      .run(input.title, input.content, changed ? 1 : 0, changed ? 1 : 0, stamp, id);
     return this.get(id)!;
   }
   delete(id: Id): void {
@@ -208,7 +239,7 @@ export class WorkflowRepository {
     executionId: Id,
     stepKey: string,
     type: string,
-    entityId: Id,
+    entityId: string,
     fingerprint: string,
     maxAttempts = 3,
   ): Id {
@@ -256,7 +287,7 @@ export class WorkflowRepository {
       )
       .run(stepId, dependsOnStepId);
   }
-  createJob(type: string, entityId: Id, stepId: Id): Id {
+  createJob(type: string, entityId: string, stepId: Id): Id {
     const id = randomUUID();
     this.database.sqlite
       .prepare('INSERT INTO jobs(id,type,entity_id,step_id,created_at) VALUES(?,?,?,?,?)')
@@ -394,6 +425,39 @@ export class WorkflowRepository {
           `SELECT id,current_attempt_id FROM workflow_steps WHERE entity_id=? AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
         )
         .all(entityId, ...types) as Array<{ id: Id; current_attempt_id: Id | null }>;
+      for (const step of steps) {
+        this.database.sqlite
+          .prepare(
+            "UPDATE workflow_steps SET status='INVALIDATED',error=?,cancellation_requested_at=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?",
+          )
+          .run(error, stamp, stamp, step.id);
+        if (step.current_attempt_id) {
+          this.database.sqlite
+            .prepare(
+              "UPDATE workflow_step_attempts SET status='FAILED',error=?,finished_at=? WHERE id=? AND status='RUNNING'",
+            )
+            .run(error, stamp, step.current_attempt_id);
+        }
+        this.database.sqlite
+          .prepare(
+            "UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL WHERE step_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
+          )
+          .run(error, step.id);
+      }
+      return steps.length;
+    })();
+  }
+  invalidateEntities(entityIds: Id[], types: string[], error = 'StaleInput'): number {
+    if (!entityIds.length || !types.length) return 0;
+    const entities = entityIds.map(() => '?').join(',');
+    const placeholders = types.map(() => '?').join(',');
+    const stamp = now();
+    return this.database.sqlite.transaction(() => {
+      const steps = this.database.sqlite
+        .prepare(
+          `SELECT id,current_attempt_id FROM workflow_steps WHERE entity_id IN (${entities}) AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+        )
+        .all(...entityIds, ...types) as Array<{ id: Id; current_attempt_id: Id | null }>;
       for (const step of steps) {
         this.database.sqlite
           .prepare(

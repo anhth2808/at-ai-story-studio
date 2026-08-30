@@ -23,6 +23,10 @@ export const workflowStepTypeSchema = z.enum([
   'SUBTITLE',
   'PREPARE_BACKGROUND',
   'RENDER',
+  'GENERATE_STORY_BLUEPRINT',
+  'GENERATE_CHAPTER_PLANS',
+  'GENERATE_CHAPTER',
+  'GENERATE_CHAPTER_SUMMARY',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);
@@ -106,6 +110,9 @@ export type ChapterDto = {
   title: string;
   content: string;
   revision: number;
+  origin?: 'MANUAL' | 'GENERATED';
+  storyPlanItemId?: string | null;
+  storyGenerationId?: Id | null;
   createdAt: string;
   updatedAt: string;
   audioStatus?: WorkflowStatus;
@@ -151,3 +158,4 @@ export class AppError extends Error {
     this.name = 'AppError';
   }
 }
+export * from './story.js';

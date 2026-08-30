@@ -23,7 +23,7 @@ export function createDatabase(filename: string): DatabaseHandle {
 
 export function migrateDatabase(database: DatabaseHandle): string {
   const migrationDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
-  const migrations = ['0000_initial', '0001_status_constraints'];
+  const migrations = ['0000_initial', '0001_status_constraints', '0002_story_engine'];
   database.sqlite.exec(readFileSync(join(migrationDirectory, '0000_initial.sql'), 'utf8'));
   database.sqlite.exec(
     'CREATE TABLE IF NOT EXISTS _studio_migrations (id TEXT PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)',

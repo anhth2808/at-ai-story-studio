@@ -7,6 +7,7 @@ import {
   AssetRepository,
   ChapterRepository,
   ProjectRepository,
+  StoryRepository,
   WorkflowRepository,
   type ClaimedStep,
   type DatabaseHandle,
@@ -35,6 +36,7 @@ import {
   renderConfigSchema,
 } from '@studio/shared';
 import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
+import type { StoryEngine } from './story-engine.js';
 
 export type StudioContext = {
   database: DatabaseHandle;
@@ -48,11 +50,13 @@ const fingerprint = (value: unknown): string =>
 export class StudioService {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
+  readonly story: StoryRepository;
   readonly workflow: WorkflowRepository;
   readonly assets: AssetRepository;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
+    this.story = new StoryRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
   }
@@ -119,6 +123,105 @@ export class StudioService {
   setRenderConfig(projectId: Id, input: unknown): void {
     this.projects.setRenderConfig(projectId, renderConfigSchema.parse(input));
     this.invalidateRender(projectId);
+  }
+  scheduleStoryBlueprint(projectId: Id): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    if (!this.story.getSettings(projectId))
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-blueprint:${projectId}`,
+      'GENERATE_STORY_BLUEPRINT',
+      projectId,
+      fingerprint({ operation: 'BLUEPRINT', settings: this.story.getSettings(projectId) }),
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_STORY_BLUEPRINT', projectId, stepId),
+    };
+  }
+  scheduleStoryPlans(projectId: Id): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const blueprint = this.story.getBlueprint(projectId);
+    if (!blueprint) throw new AppError('PREREQUISITE_MISSING', 'Story blueprint is required', 409);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-plans:${projectId}:${blueprint.revision}`,
+      'GENERATE_CHAPTER_PLANS',
+      projectId,
+      fingerprint({ operation: 'CHAPTER_PLANS', blueprint }),
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_CHAPTER_PLANS', projectId, stepId),
+    };
+  }
+  scheduleStoryStages(projectId: Id): { executionId: Id; jobIds: Id[] } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    if (!this.story.getSettings(projectId))
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const blueprintStep = this.workflow.createStep(
+      executionId,
+      `story-blueprint:${projectId}`,
+      'GENERATE_STORY_BLUEPRINT',
+      projectId,
+      fingerprint({ operation: 'BLUEPRINT', settings: this.story.getSettings(projectId) }),
+    );
+    const planStep = this.workflow.createStep(
+      executionId,
+      `story-plans:${projectId}`,
+      'GENERATE_CHAPTER_PLANS',
+      projectId,
+      fingerprint({ operation: 'CHAPTER_PLANS', settings: this.story.getSettings(projectId) }),
+    );
+    this.workflow.dependency(planStep, blueprintStep);
+    return {
+      executionId,
+      jobIds: [
+        this.workflow.createJob('GENERATE_STORY_BLUEPRINT', projectId, blueprintStep),
+        this.workflow.createJob('GENERATE_CHAPTER_PLANS', projectId, planStep),
+      ],
+    };
+  }
+  scheduleStoryChapter(projectId: Id, planItemId: string): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const item = this.story.getPlanItem(projectId, planItemId);
+    if (!item) throw new AppError('PREREQUISITE_MISSING', 'Chapter plan item is required', 409);
+    if (!this.story.getBlueprint(projectId))
+      throw new AppError('PREREQUISITE_MISSING', 'Story blueprint is required', 409);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-chapter:${planItemId}`,
+      'GENERATE_CHAPTER',
+      planItemId,
+      fingerprint({ operation: 'CHAPTER', projectId, planId: item.planId, planItem: item.item }),
+    );
+    return { executionId, jobId: this.workflow.createJob('GENERATE_CHAPTER', planItemId, stepId) };
+  }
+  scheduleStorySummary(chapterId: Id): { executionId: Id; jobId: Id } {
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const executionId = this.workflow.createExecution(chapter.projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-summary:${chapterId}:${chapter.revision}`,
+      'GENERATE_CHAPTER_SUMMARY',
+      chapterId,
+      fingerprint({
+        operation: 'CHAPTER_SUMMARY',
+        chapterId,
+        revision: chapter.revision,
+        content: chapter.content,
+      }),
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_CHAPTER_SUMMARY', chapterId, stepId),
+    };
   }
   getRenderConfig(projectId: Id) {
     return renderConfigSchema.parse({
@@ -273,32 +376,17 @@ export class StudioService {
     );
     return this.workflow.createJob('RENDER', projectId, step);
   }
-  invalidateRenderForAsset(projectId: Id): void {
-    this.invalidateRender(projectId);
-  }
-  private invalidateChapterDescendants(projectId: Id, chapterId: Id): void {
-    for (const role of [`chapter:${chapterId}:audio`, `chapter:${chapterId}:subtitle`])
-      this.assets.invalidateRole(projectId, role);
-    this.assets.invalidateSource(projectId, chapterId, ['TTS_SEGMENT_AUDIO', 'CHAPTER_AUDIO']);
-    this.context.database.sqlite
-      .prepare(
-        "UPDATE tts_segments SET status='INVALIDATED',audio_asset_id=NULL,duration_ms=NULL,error='StaleInput' WHERE chapter_id=?",
-      )
-      .run(chapterId);
-    this.workflow.invalidateSteps(chapterId, [
-      'CLEAN_TEXT',
-      'TTS_SEGMENT',
-      'MERGE_AUDIO',
-      'SUBTITLE',
-    ]);
-    this.invalidateRender(projectId);
-  }
   private invalidateRender(projectId: Id): void {
     this.assets.invalidateRole(projectId, 'project:render');
     this.workflow.invalidateSteps(projectId, ['RENDER']);
   }
+  invalidateRenderForAsset(projectId: Id): void {
+    this.invalidateRender(projectId);
+  }
+  private invalidateChapterDescendants(projectId: Id, chapterId: Id): void {
+    this.story.invalidateScope({ projectId, kind: 'CHAPTER', chapterId });
+  }
 }
-
 export type TtsProvider = {
   synthesize(text: string, voice: string, outputFile: string, signal?: AbortSignal): Promise<void>;
 };
@@ -325,13 +413,33 @@ export class EdgeTtsProvider implements TtsProvider {
 }
 
 export class WorkerExecutor {
+  private readonly workflow: WorkflowRepository;
   constructor(
     private readonly context: StudioContext,
     private readonly workerId: string,
     private readonly tts: TtsProvider = new EdgeTtsProvider(context.runner),
-  ) {}
+    private readonly storyEngine?: StoryEngine,
+  ) {
+    this.workflow = new WorkflowRepository(context.database);
+  }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new AppError('CANCELLED', 'Work was cancelled', 409);
+    if (
+      step.type === 'GENERATE_STORY_BLUEPRINT' ||
+      step.type === 'GENERATE_CHAPTER_PLANS' ||
+      step.type === 'GENERATE_CHAPTER' ||
+      step.type === 'GENERATE_CHAPTER_SUMMARY'
+    ) {
+      if (!this.storyEngine)
+        throw new AppError('CONFIGURATION_ERROR', 'Story Engine worker is not configured', 500);
+      await this.storyEngine.executeStep(step, signal, (event) => {
+        const progress = { STARTING: 0.05, AUTHENTICATING: 0.1, GENERATING: 0.5, PARSING: 0.9 }[
+          event.stage
+        ];
+        this.workflow.progress(step, progress, event.message);
+      });
+      return;
+    }
     if (step.type === 'CLEAN_TEXT') return;
     if (step.type === 'TTS_SEGMENT') {
       await this.executeTts(step, signal);
@@ -774,3 +882,7 @@ export async function createContext(root: string, db: DatabaseHandle): Promise<S
   };
 }
 export { parseSrt, serializeSrt, subtitlesFromSegments, validateSubtitleCues } from './text.js';
+export * from './omp-agent.js';
+export * from './story-context.js';
+export * from './story-prompts.js';
+export * from './story-engine.js';

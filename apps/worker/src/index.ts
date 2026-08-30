@@ -8,7 +8,7 @@ import {
   WorkflowRepository,
 } from '@studio/database';
 import { FfmpegTools, ProcessRunner, reconcileWorkspace, initializeWorkspace } from '@studio/media';
-import { WorkerExecutor } from '@studio/workflow';
+import { WorkerExecutor, createOmpAgent, createStoryEngine } from '@studio/workflow';
 const root =
   process.env.STUDIO_WORKSPACE ??
   join(dirname(fileURLToPath(import.meta.url)), '../../../workspace');
@@ -26,7 +26,8 @@ const context = { database, workspace, runner, media: new FfmpegTools(runner) };
 const workerId = `worker-${randomUUID()}`;
 const heartbeat = new HeartbeatRepository(database);
 const workflow = new WorkflowRepository(database);
-const executor = new WorkerExecutor(context, workerId);
+const storyEngine = createStoryEngine({ database, agent: createOmpAgent(runner) });
+const executor = new WorkerExecutor(context, workerId, undefined, storyEngine);
 let stopping = false;
 let activeController: AbortController | undefined;
 const stop = (): void => {

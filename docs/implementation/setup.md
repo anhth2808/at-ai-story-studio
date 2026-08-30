@@ -17,6 +17,30 @@ ffmpeg -version
 ffprobe -version
 ```
 
+## OMP Story Engine
+
+Story generation runs through the isolated Bun host in `apps/omp-agent`. The Node API and worker never import the OMP SDK. Use Bun 1.3.14 or newer and verify the installed OMP CLI:
+
+```powershell
+bun --version
+omp --version
+omp models
+```
+
+The host uses OMP's supported local authentication discovery. Configure a provider through the normal OMP environment variables or OAuth/auth-broker flow; do not put API keys or OAuth tokens in Story settings:
+
+```powershell
+# OAuth/auth-broker setup, when supported by the provider
+omp auth-broker status
+omp auth-broker login <provider>
+
+# Refresh and inspect the available model catalog
+omp models refresh
+omp models
+```
+
+Story settings may select a model using `provider/model`, for example `openai-codex/gpt-5.6-luna`. The API and UI expose only safe readiness fields through `/api/projects/:projectId/story/readiness`: Bun runtime, selected model, readiness, and setup guidance. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host.
+
 ## Install and build
 
 ```powershell

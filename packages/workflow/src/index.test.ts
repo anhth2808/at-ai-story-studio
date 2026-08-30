@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createDatabase, WorkflowRepository } from '@studio/database';
+import { createDatabase, migrateDatabase, WorkflowRepository } from '@studio/database';
 import { FfmpegTools, ProcessRunner, initializeWorkspace } from '@studio/media';
 import { chapterInputSchema } from '@studio/shared';
 import { StudioService, WorkerExecutor, type StudioContext, type TtsProvider } from './index.js';
@@ -12,9 +11,7 @@ import { StudioService, WorkerExecutor, type StudioContext, type TtsProvider } f
 async function setup(content = 'Một. Hai. Ba.') {
   const root = await mkdtemp(join(tmpdir(), 'studio-workflow-'));
   const database = createDatabase(join(root, 'studio.db'));
-  database.sqlite.exec(
-    readFileSync(join(process.cwd(), 'packages/database/migrations/0000_initial.sql'), 'utf8'),
-  );
+  migrateDatabase(database);
   const workspace = await initializeWorkspace(root);
   const runner = new ProcessRunner();
   const media = {

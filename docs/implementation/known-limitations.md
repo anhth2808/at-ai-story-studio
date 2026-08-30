@@ -12,3 +12,9 @@
 - Automated coverage includes workflow claimability, failed-segment-only retry, stale-input protection, chapter invalidation, and worker restart recovery. Full process cancellation, subtitle replacement, standalone render manifests, and multi-worker race fixtures remain future hardening work.
 
 These limitations are deliberate V1 scope or known gaps against the design notes. The next milestone should harden the current first-working-video loop before adding advanced AI stages.
+
+## Story Engine verification gate
+
+`READY_FOR_LONG_STORY = NO`.
+
+Fake-agent schema, bounded-context, revision-lineage, scoped-invalidation, retry, and live UI checks pass. The real OMP structured-generation smoke currently stops at the provider boundary with the safe diagnostic `PROVIDER_ERROR`; a real three-chapter generation, worker restart between chapters, and explicit generated-chapter TTS handoff therefore remain unverified. Do not claim long-story readiness until those gates pass with supported OMP authentication and model configuration.

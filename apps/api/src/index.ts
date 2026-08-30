@@ -17,14 +17,18 @@ import {
 import {
   AppError,
   chapterInputSchema,
+  idSchema,
   projectInputSchema,
   projectUpdateSchema,
   reorderSchema,
   renderConfigSchema,
   subtitleReplacementSchema,
-  idSchema,
+  storyGenerationRequestSchema,
+  storySettingsSchema,
+  storyStableIdSchema,
 } from '@studio/shared';
-import { StudioService, parseSrt } from '@studio/workflow';
+import type { OmpReadiness } from '@studio/shared';
+import { StudioService, createOmpAgent, createStoryEngine, parseSrt } from '@studio/workflow';
 import { WorkflowRepository } from '@studio/database';
 import { createReadStream, createWriteStream, readFileSync, statSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -45,6 +49,27 @@ const runner = new ProcessRunner();
 const media = new FfmpegTools(runner);
 const context = { database, workspace, media, runner };
 const service = new StudioService(context);
+const ompAgent = createOmpAgent(runner);
+const storyEngine = createStoryEngine({ database, agent: ompAgent });
+let ompReadinessCache: { value: OmpReadiness; cachedAt: number } | null = null;
+let ompReadinessRequest: Promise<OmpReadiness> | null = null;
+const getOmpReadiness = async (): Promise<OmpReadiness> => {
+  if (ompReadinessCache && Date.now() - ompReadinessCache.cachedAt < 5_000) {
+    return ompReadinessCache.value;
+  }
+  if (!ompReadinessRequest) {
+    ompReadinessRequest = ompAgent
+      .readiness()
+      .then((value) => {
+        ompReadinessCache = { value, cachedAt: Date.now() };
+        return value;
+      })
+      .finally(() => {
+        ompReadinessRequest = null;
+      });
+  }
+  return ompReadinessRequest;
+};
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -70,6 +95,91 @@ app.get('/api/health', async () => {
     status: Object.values(checks).every((check) => check.ok) ? 'ready' : 'degraded',
     checks,
   };
+});
+async function storySnapshot(projectId: string) {
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const snapshot = service.story.snapshot(projectId);
+  const jobs = database.sqlite
+    .prepare(
+      'SELECT j.id,j.type,j.entity_id as entityId,j.status,j.progress,j.error,j.attempts FROM jobs j JOIN workflow_steps s ON s.id=j.step_id JOIN workflow_executions e ON e.id=s.execution_id WHERE e.project_id=? ORDER BY j.created_at DESC',
+    )
+    .all(projectId);
+  return { ...snapshot, jobs, omp: await getOmpReadiness() };
+}
+app.get('/api/projects/:projectId/story', async (request) => {
+  const params = request.params as { projectId: string };
+  return storySnapshot(idSchema.parse(params.projectId));
+});
+app.get('/api/projects/:projectId/story/readiness', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return getOmpReadiness();
+});
+app.get('/api/projects/:projectId/story/settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.getSettings(idSchema.parse(params.projectId));
+});
+app.get('/api/projects/:projectId/story/blueprint', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.getBlueprint(idSchema.parse(params.projectId));
+});
+app.get('/api/projects/:projectId/story/plan', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.getPlan(idSchema.parse(params.projectId));
+});
+app.get('/api/projects/:projectId/story/summaries', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.story.getSummaries(idSchema.parse(params.projectId));
+});
+app.put('/api/projects/:projectId/story/settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.saveSettings(
+    idSchema.parse(params.projectId),
+    storySettingsSchema.parse(request.body),
+  );
+});
+app.post('/api/projects/:projectId/story/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply.code(202).send(service.scheduleStoryStages(idSchema.parse(params.projectId)));
+});
+app.post('/api/projects/:projectId/story/blueprint/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply.code(202).send(service.scheduleStoryBlueprint(idSchema.parse(params.projectId)));
+});
+app.post('/api/projects/:projectId/story/plans/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply.code(202).send(service.scheduleStoryPlans(idSchema.parse(params.projectId)));
+});
+app.post('/api/projects/:projectId/story/chapters/:planItemId/generate', async (request, reply) => {
+  const params = request.params as { projectId: string; planItemId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const planItemId = storyStableIdSchema.parse(params.planItemId);
+  const body = storyGenerationRequestSchema.parse(request.body ?? {});
+  const plan = service.story.getPlan(projectId);
+  if (body.expectedPlanRevision !== undefined && plan?.revision !== body.expectedPlanRevision)
+    throw new AppError('REVISION_CONFLICT', 'Chapter plan revision is stale', 409);
+  const chapter = service
+    .listChapters(projectId)
+    .find((item) => item.storyPlanItemId === planItemId);
+  if (
+    body.expectedChapterRevision !== undefined &&
+    chapter?.revision !== body.expectedChapterRevision
+  )
+    throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
+  return reply.code(202).send(service.scheduleStoryChapter(projectId, planItemId));
+});
+app.post('/api/chapters/:id/story/summary', async (request, reply) => {
+  const params = request.params as { id: string };
+  const chapter = service.getChapter(idSchema.parse(params.id));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const body = storyGenerationRequestSchema.parse(request.body ?? {});
+  if (
+    body.expectedChapterRevision !== undefined &&
+    chapter.revision !== body.expectedChapterRevision
+  )
+    throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
+  return reply.code(202).send(service.scheduleStorySummary(chapter.id));
 });
 app.get('/api/projects/:id/render', async (request) => {
   const params = request.params as { id: string };
