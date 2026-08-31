@@ -5,11 +5,12 @@
 ## User rules
 
 - Use "-" instead of "—"
-  This is already set in the repo's git config, so just commit normally - do not
-  pass `-c user.name=` / `-c user.email=` overrides.
+This is already set in the repo's git config, so just commit normally - do not
+pass `-c user.name=` / `-c user.email=` overrides.
 - Sometime i will write vietnamese. You can answer by vietnamese but do not write any code, docs by vietnamese (except site content)
 - Site content (UI copy, Sanity content, SEO metadata) is Vietnamese. Code, comments, and planning artifacts are English.
 - Imporant: only use Vietnamese or English. No chinese here.
+- ALWAYS use /ponytail-review before comimt anything
 
 This repository contains AI Story Studio.
 
@@ -580,21 +581,22 @@ modular monolith. Keep all durable orchestration in Node/TypeScript and keep
 provider-specific behavior behind the OMP agent boundary.
 
 - Persist every accepted generated chapter, summary, StoryState revision, state
-  delta, lineage record, generation metadata, and usage record transactionally
-  before completing the workflow step.
+delta, lineage record, generation metadata, and usage record transactionally
+before completing the workflow step.
 - Treat StoryState as the compact canonical checkpoint. Use bounded summaries,
-  selected characters, active threads, important facts, recent events, and
-  explicit omission diagnostics instead of assembling the full novel into every
-  prompt.
+selected characters, active threads, important facts, recent events, and
+explicit omission diagnostics instead of assembling the full novel into every
+prompt.
 - For targets over 20 chapters, require arcs and bounded plan windows. Do not
-  restore a full-project plan as a shortcut.
+restore a full-project plan as a shortcut.
 - Changing an older generated chapter must preserve later chapter content and
-  media, mark the generated suffix stale, and pause affected batches. Rebuild
-  from a valid checkpoint or regenerate the suffix in order.
+media, mark the generated suffix stale, and pause affected batches. Rebuild
+from a valid checkpoint or regenerate the suffix in order.
 - Manual chapter edits clear generated lineage. Accept state deltas from manual
-  analysis only after explicit review.
+analysis only after explicit review.
 - Keep stable IDs and revision chains for settings, blueprint, plans, arcs,
-  windows, summaries, state checkpoints, and generated outputs. Never overwrite
-  historical revisions.
+windows, summaries, state checkpoints, and generated outputs. Never overwrite
+historical revisions.
 - Strictly validate OMP structured output at the boundary. Persist provider
-  usage when available and leave unavailable token or cost values unknown.
+usage when available and leave unavailable token or cost values unknown.
+
