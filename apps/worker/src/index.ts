@@ -5,6 +5,7 @@ import {
   createDatabase,
   migrateDatabase,
   HeartbeatRepository,
+  StoryBatchRepository,
   WorkflowRepository,
 } from '@studio/database';
 import { FfmpegTools, ProcessRunner, reconcileWorkspace, initializeWorkspace } from '@studio/media';
@@ -27,6 +28,7 @@ const workerId = `worker-${randomUUID()}`;
 const heartbeat = new HeartbeatRepository(database);
 const workflow = new WorkflowRepository(database);
 const storyEngine = createStoryEngine({ database, agent: createOmpAgent(runner) });
+const batches = new StoryBatchRepository(database);
 const executor = new WorkerExecutor(context, workerId, undefined, storyEngine);
 let stopping = false;
 let activeController: AbortController | undefined;
@@ -41,11 +43,13 @@ const heartbeatTimer = setInterval(() => heartbeat.beat(workerId, 'READY'), 5_00
 while (!stopping) {
   heartbeat.beat(workerId, 'READY');
   workflow.recoverExpired();
+  batches.reconcileRecoveredSteps();
   const step = workflow.claim(workerId);
   if (!step) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     continue;
   }
+  batches.markRunning(step.id);
   const controller = new AbortController();
   activeController = controller;
   const cancellationPoll = setInterval(() => {
@@ -55,14 +59,22 @@ while (!stopping) {
   try {
     await executor.execute(step, controller.signal);
     clearInterval(cancellationPoll);
-    if (controller.signal.aborted || workflow.isCancellationRequested(step.id))
+    if (controller.signal.aborted || workflow.isCancellationRequested(step.id)) {
       workflow.cancel(step);
-    else workflow.complete(step);
+      batches.reconcileWorkflowStep(step.id);
+    } else {
+      workflow.complete(step);
+      batches.reconcileWorkflowStep(step.id);
+    }
   } catch (error) {
     clearInterval(cancellationPoll);
-    if (controller.signal.aborted || workflow.isCancellationRequested(step.id))
+    if (controller.signal.aborted || workflow.isCancellationRequested(step.id)) {
       workflow.cancel(step, 'Cancelled by user');
-    else workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', true);
+      batches.reconcileWorkflowStep(step.id);
+    } else {
+      workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', true);
+      batches.reconcileWorkflowStep(step.id);
+    }
   } finally {
     clearInterval(cancellationPoll);
     clearInterval(stepHeartbeat);

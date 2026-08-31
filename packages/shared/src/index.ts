@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { StoryLongStoryCounts } from './story.js';
 
 export const idSchema = z.string().uuid();
 export type Id = z.infer<typeof idSchema>;
@@ -27,6 +28,11 @@ export const workflowStepTypeSchema = z.enum([
   'GENERATE_CHAPTER_PLANS',
   'GENERATE_CHAPTER',
   'GENERATE_CHAPTER_SUMMARY',
+  'GENERATE_STORY_ARCS',
+  'GENERATE_CHAPTER_PLAN_WINDOW',
+  'GENERATE_CHAPTER_V2',
+  'ANALYZE_STORY_STATE',
+  'CHECK_CONTINUITY',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);
@@ -113,6 +119,9 @@ export type ChapterDto = {
   origin?: 'MANUAL' | 'GENERATED';
   storyPlanItemId?: string | null;
   storyGenerationId?: Id | null;
+  continuityStatus?: 'CURRENT' | 'CONTINUITY_STALE' | 'NOT_ANALYZED';
+  continuityCheckStatus?: 'PASS' | 'WARN' | 'FAIL' | null;
+  summaryStatus?: 'CURRENT' | 'STALE' | 'MISSING';
   createdAt: string;
   updatedAt: string;
   audioStatus?: WorkflowStatus;
@@ -138,11 +147,20 @@ export type StatusSummary = {
   background: WorkflowStatus;
   render: WorkflowStatus;
   jobs: JobDto[];
+  story?: StoryLongStoryCounts;
 };
 export type SafeError = {
   code: string;
   message: string;
   retryable: boolean;
+  category?:
+    | 'INFRASTRUCTURE'
+    | 'PROVIDER'
+    | 'STRUCTURED_OUTPUT'
+    | 'CONTEXT'
+    | 'CONTINUITY'
+    | 'CANCELLED'
+    | 'BUDGET';
   diagnostics?: string;
 };
 

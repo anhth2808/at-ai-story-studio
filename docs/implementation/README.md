@@ -1,35 +1,51 @@
-# V1 implementation
+# Implementation
 
-AI Story Studio V1 is a local-first vertical slice:
+AI Story Studio is a local-first modular monolith with two connected paths:
 
 `Story -> TTS -> SRT subtitles -> background -> FFmpeg -> MP4`
+
+and the bounded long-story engine:
+
+`Idea -> blueprint -> arcs/windows -> chapter generation -> StoryState -> review`
+
+The story engine is an authoring workflow. It does not automatically create
+narration or video assets; media remains an explicit handoff after chapter
+review.
+
+## Implementation guides
 
 - [Setup](setup.md)
 - [Architecture](architecture.md)
 - [Workflow](workflow.md)
+- [Long-story engine](long-story.md)
+- [StoryState](story-state.md)
+- [Batch generation](batch-generation.md)
+- [Continuity](continuity.md)
+- [AI usage](ai-usage.md)
 - [Filesystem](filesystem.md)
 - [Known limitations](known-limitations.md)
 
-The implementation intentionally stops before story generation, character memory, scene planning, image generation, and AI video.
+## Scope boundaries
+
+The long-story path supports bounded structured generation, durable SQLite
+state, resumable chapter batches, manual chapter analysis, continuity review,
+and explicit regeneration. It intentionally stops before character-memory
+retrieval systems, scene graphs, image generation, AI video, publishing, and
+generic workflow/plugin frameworks.
+
+The media path remains focused on the first working video: project and chapter
+creation, narration, subtitles, background media, FFmpeg rendering, and MP4
+playback.
 
 ## Verification record
 
-The hardened V1 path was exercised with Node 22.22.2, pnpm 11.22.0, SQLite, the real Edge TTS provider, FFmpeg, ffprobe, and the filesystem workspace.
+The V1 media path has been exercised with Node, pnpm, SQLite, the Edge TTS
+provider, FFmpeg, ffprobe, the filesystem workspace, and Chromium. The
+long-story path has targeted coverage for schema validation, revisioned
+StoryState reduction, bounded context selection, arc/window persistence,
+batch retry and recovery, continuity invalidation, usage accounting, and
+OMP protocol handling.
 
-Automated checks:
-
-- `pnpm run typecheck` - passed
-- `pnpm run build` - passed
-- `pnpm test` - passed, 13 tests
-- `pnpm run lint` - passed
-- `pnpm run format:check` - passed
-
-The real smoke path created a project and a Vietnamese chapter with three narration segments, uploaded a PNG background, synthesized all Edge TTS segments, merged chapter audio, generated SRT subtitles, rendered MP4, probed the MP4, and played it in Chromium. The output was:
-
-`workspace-e2e-hardening/projects/bc1cceec-8e76-476e-aa9e-f86382476e59/renders/7b63ecd6-15a3-47b3-83cd-bdfa3bbae5e7.mp4`
-
-The MP4 contained H.264 video at 1920x1080 and AAC audio and was reported as 10.705958 seconds by ffprobe. API and worker were stopped and restarted; the project, completed render job, and current rendered asset remained available from SQLite.
-
-The automated retry fixture verifies provider invocation counts: after segments 1 and 2 complete and segment 3 fails, rescheduling invokes the provider only for segment 3 and then merges all three valid segments. Chapter content-change and stale in-flight work fixtures also pass.
-
-The exact local procedure is the three-terminal setup in [Setup](setup.md). The current render implementation intentionally uses the first chapter only; multi-chapter project assembly is a separate milestone. No Story AI, LLM, OMP, or other future-stage capability was implemented.
+The exact local startup procedure is documented in [Setup](setup.md). Current
+provider readiness and real-provider smoke results, including known quota or
+model-output limitations, are recorded in [Known limitations](known-limitations.md).

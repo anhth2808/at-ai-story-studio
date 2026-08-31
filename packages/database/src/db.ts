@@ -28,6 +28,9 @@ export function migrateDatabase(database: DatabaseHandle): string {
     '0001_status_constraints',
     '0002_story_engine',
     '0003_story_continuity_outputs',
+    '0004_long_story_engine',
+    '0005_manual_analysis',
+    '0006_arc_ordinal',
   ];
   database.sqlite.exec(readFileSync(join(migrationDirectory, '0000_initial.sql'), 'utf8'));
   database.sqlite.exec(

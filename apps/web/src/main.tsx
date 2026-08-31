@@ -9,14 +9,20 @@ import type {
   ProjectDto,
   RenderConfig,
   StatusSummary,
+  StoryArc,
   StoryBlueprint,
+  StoryGenerationBatch,
+  StoryGenerationBatchItem,
+  StoryPlanWindowResult,
+  StoryPlanWindowSummary,
   StorySettings,
   StorySettingsDto,
   StorySnapshotDto,
+  StoryUsageSummary,
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
-type ProjectDetail = { project: ProjectDto; chapters: ChapterDto[] };
+type ProjectDetail = { project: ProjectDto; chapters?: ChapterDto[] };
 type RenderAsset = { id: string; url: string; mediaType: string };
 const defaultStorySettings: StorySettings = {
   mode: 'IDEA_TO_STORY',
@@ -67,6 +73,7 @@ async function apiText(path: string): Promise<string> {
   }
   return response.text();
 }
+type ChapterStatusFilter = '' | 'FAILED' | 'PENDING' | 'CONTINUITY_STALE' | 'WARN';
 type StoryJobScheduleDto = { executionId: string; jobId?: string; jobIds?: string[] };
 const storyApi = {
   snapshot: (projectId: string) => api<StorySnapshotDto>(`/api/projects/${projectId}/story`),
@@ -89,6 +96,85 @@ const storyApi = {
       body: JSON.stringify(item),
     }),
   cancelJob: (jobId: string) => api(`/api/jobs/${jobId}/cancel`, { method: 'POST' }),
+  generateArcs: (projectId: string) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/story/arcs/generate`, {
+      method: 'POST',
+    }),
+  updateArc: (projectId: string, arc: StoryArc) =>
+    api<StoryArc>(`/api/projects/${projectId}/story/arcs/${arc.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(arc),
+    }),
+  updatePlanWindow: (projectId: string, window: StoryPlanWindowResult) =>
+    api<StoryPlanWindowResult>(
+      `/api/projects/${projectId}/story/plan-windows/${window.window.id}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(window),
+      },
+    ),
+  getPlanWindow: (projectId: string, windowId: string) =>
+    api<StoryPlanWindowResult>(`/api/projects/${projectId}/story/plan-windows/${windowId}`),
+  generatePlanWindow: (
+    projectId: string,
+    input: { arcId: string; startChapter: number; endChapter: number },
+  ) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/story/plan-windows/generate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  generateBatch: (
+    projectId: string,
+    input: {
+      mode: 'NEXT' | 'RANGE' | 'UNTIL_END';
+      count?: number;
+      startChapter?: number;
+      endChapter?: number;
+    },
+  ) =>
+    api<{ batch: StoryGenerationBatch; executionId: string; jobIds: string[] }>(
+      `/api/projects/${projectId}/story/batches`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+  batchItems: (projectId: string, batchId: string) =>
+    api<StoryGenerationBatchItem[]>(`/api/projects/${projectId}/story/batches/${batchId}/items`),
+  retryBatchItem: (projectId: string, batchId: string, chapterNumber: number) =>
+    api<StoryJobScheduleDto>(
+      `/api/projects/${projectId}/story/batches/${batchId}/items/${chapterNumber}/retry`,
+      { method: 'POST' },
+    ),
+  skipBatchItem: (projectId: string, batchId: string, chapterNumber: number, reason: string) =>
+    api<StoryGenerationBatchItem>(
+      `/api/projects/${projectId}/story/batches/${batchId}/items/${chapterNumber}/skip`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  cancelBatch: (projectId: string, batchId: string) =>
+    api<StoryGenerationBatch>(`/api/projects/${projectId}/story/batches/${batchId}/cancel`, {
+      method: 'POST',
+    }),
+  analyzeChapter: (chapterId: string) =>
+    api<StoryJobScheduleDto>(`/api/chapters/${chapterId}/story/analyze`, { method: 'POST' }),
+  checkContinuity: (chapterId: string) =>
+    api<StoryJobScheduleDto>(`/api/chapters/${chapterId}/story/continuity`, { method: 'POST' }),
+  acceptAnalysis: (chapterId: string, checkId: string) =>
+    api(`/api/chapters/${chapterId}/story/continuity/${checkId}/accept`, { method: 'POST' }),
+  rebuildContinuity: (projectId: string, fromChapter: number) =>
+    api(`/api/projects/${projectId}/story/rebuild-continuity`, {
+      method: 'POST',
+      body: JSON.stringify({ fromChapter }),
+    }),
+  keepStale: (projectId: string, fromChapter: number) =>
+    api<{ disposition: 'KEEP_STALE'; fromChapter: number; updated: number }>(
+      `/api/projects/${projectId}/story/continuity/keep-stale`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ fromChapter }),
+      },
+    ),
+  compactSummary: (projectId: string) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/story/summary/compact`, {
+      method: 'POST',
+    }),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
   const asset = await api<RenderAsset>(`/api/projects/${projectId}/render`).catch(() => null);
@@ -112,6 +198,10 @@ function App() {
   const [error, setError] = useState('');
   const [tab, setTab] = useState('Story');
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  const [chapterOffset, setChapterOffset] = useState(0);
+  const [chapterSearch, setChapterSearch] = useState('');
+  const [chapterStatus, setChapterStatus] = useState<ChapterStatusFilter>('');
+  const chapterPageSize = 25;
 
   const refresh = async (): Promise<void> => {
     try {
@@ -122,12 +212,24 @@ function App() {
       setHealth(nextHealth);
       setProjects(nextProjects);
       if (selected) {
-        const detail = await api<ProjectDetail>(`/api/projects/${selected.id}`);
+        const chapterQuery = new URLSearchParams({
+          limit: String(chapterPageSize),
+          offset: String(chapterOffset),
+        });
+        if (chapterSearch.trim()) chapterQuery.set('search', chapterSearch.trim());
+        if (chapterStatus) chapterQuery.set('status', chapterStatus);
+        const [detail, nextChapters] = await Promise.all([
+          api<ProjectDetail>(`/api/projects/${selected.id}?includeChapters=false`),
+          api<ChapterDto[]>(`/api/projects/${selected.id}/chapters?${chapterQuery.toString()}`),
+        ]);
         setSelected(detail.project);
-        setChapters(detail.chapters);
+        setChapters(nextChapters);
         setStory(await storyApi.snapshot(selected.id));
-        const chapterId = activeChapterId ?? detail.chapters[0]?.id;
-        setActiveChapterId((current) => current ?? detail.chapters[0]?.id ?? null);
+        const chapterId =
+          activeChapterId && nextChapters.some((chapter) => chapter.id === activeChapterId)
+            ? activeChapterId
+            : nextChapters[0]?.id;
+        setActiveChapterId(chapterId ?? null);
         setStatus(
           await api<StatusSummary>(
             chapterId ? `/api/chapters/${chapterId}/status` : `/api/projects/${selected.id}/status`,
@@ -173,12 +275,11 @@ function App() {
       setError(cause instanceof Error ? cause.message : 'Không thể kết nối API');
     }
   };
-
   useEffect(() => {
     void refresh();
     const timer = setInterval(() => void refresh(), 2000);
     return () => clearInterval(timer);
-  }, [selected?.id, jobs.length, activeChapterId]);
+  }, [selected?.id, jobs.length, activeChapterId, chapterOffset, chapterSearch, chapterStatus]);
 
   const createProject = async (): Promise<void> => {
     const title = window.prompt('Tên dự án');
@@ -218,10 +319,16 @@ function App() {
   };
 
   const openProject = async (project: ProjectDto): Promise<void> => {
-    const detail = await api<ProjectDetail>(`/api/projects/${project.id}`);
+    const query = new URLSearchParams({ limit: '25', offset: '0' });
+    const [detail, firstPage] = await Promise.all([
+      api<ProjectDetail>(`/api/projects/${project.id}?includeChapters=false`),
+      api<ChapterDto[]>(`/api/projects/${project.id}/chapters?${query.toString()}`),
+    ]);
     setSelected(detail.project);
-    setChapters(detail.chapters);
-    setActiveChapterId(detail.chapters[0]?.id ?? null);
+    setChapters(firstPage);
+    setChapterOffset(0);
+    setChapterSearch('');
+    setActiveChapterId(firstPage[0]?.id ?? null);
     setJobs([]);
     setStory(null);
     setStatus(await api<StatusSummary>(`/api/projects/${project.id}/status`));
@@ -256,6 +363,28 @@ function App() {
       body: JSON.stringify({ expectedChapterRevision: chapter.revision }),
     });
     await refresh();
+  };
+  const generateStoryChapter = async (chapter: ChapterDto): Promise<void> => {
+    if (!selected || !story || !chapter.storyPlanItemId) return;
+    if (
+      chapter.origin === 'MANUAL' &&
+      !window.confirm(
+        'Chương này đã được sửa thủ công. Xác nhận yêu cầu tạo lại để kiểm tra xung đột?',
+      )
+    )
+      return;
+    try {
+      await storyApi.generate(
+        `/api/projects/${selected.id}/story/chapters/${chapter.storyPlanItemId}/generate-v2`,
+        {
+          expectedPlanRevision: story.plan?.revision ?? null,
+          expectedChapterRevision: chapter.revision,
+        },
+      );
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Không thể tạo chương Story');
+    }
   };
 
   const track = async (ids: string[]): Promise<void> => {
@@ -403,66 +532,41 @@ function App() {
                   onChanged={() => void refresh()}
                   onError={setError}
                 />
-                <div className="section-head">
-                  <h3>Chapters</h3>
-                  <button onClick={() => void addChapter()}>+ Chương</button>
-                </div>
-                {chapters.map((chapter) => (
-                  <article className="chapter" key={chapter.id}>
-                    <input
-                      value={chapter.title}
-                      onChange={(event) =>
-                        setChapters((items) =>
-                          items.map((item) =>
-                            item.id === chapter.id ? { ...item, title: event.target.value } : item,
-                          ),
-                        )
-                      }
-                    />
-                    <textarea
-                      value={chapter.content}
-                      onChange={(event) =>
-                        setChapters((items) =>
-                          items.map((item) =>
-                            item.id === chapter.id
-                              ? { ...item, content: event.target.value }
-                              : item,
-                          ),
-                        )
-                      }
-                    />
-                    <div className="chapter-foot">
-                      <span>
-                        Chương {chapter.number} · revision {chapter.revision}
-                      </span>
-                      <span
-                        className={`origin-badge ${chapter.origin === 'GENERATED' ? 'generated' : ''}`}
-                      >
-                        {chapter.origin === 'GENERATED' ? 'AI tạo - cần duyệt' : 'Thủ công'}
-                      </span>
-                      <button
-                        className="secondary"
-                        onClick={() => setActiveChapterId(chapter.id)}
-                        aria-pressed={activeChapter?.id === chapter.id}
-                      >
-                        {activeChapter?.id === chapter.id ? 'Đang chọn' : 'Chọn chương'}
-                      </button>
-                      <button onClick={() => void saveChapter(chapter)}>Lưu nội dung</button>
-                      <button
-                        className="secondary"
-                        onClick={() =>
-                          void generateSummary(chapter).catch((cause) =>
-                            setError(
-                              cause instanceof Error ? cause.message : 'Không thể tạo tóm tắt',
-                            ),
-                          )
-                        }
-                      >
-                        Tạo tóm tắt
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                <ChapterTable
+                  chapters={chapters}
+                  activeChapterId={activeChapter?.id ?? null}
+                  offset={chapterOffset}
+                  pageSize={chapterPageSize}
+                  search={chapterSearch}
+                  status={chapterStatus}
+                  onStatus={(value) => {
+                    setChapterStatus(value);
+                    setChapterOffset(0);
+                  }}
+                  onSearch={(value) => {
+                    setChapterSearch(value);
+                    setChapterOffset(0);
+                  }}
+                  onPageChange={setChapterOffset}
+                  onSelect={setActiveChapterId}
+                  onEdit={(chapterId, patch) =>
+                    setChapters((items) =>
+                      items.map((item) => (item.id === chapterId ? { ...item, ...patch } : item)),
+                    )
+                  }
+                  onSave={(chapter) =>
+                    void saveChapter(chapter).catch((cause) =>
+                      setError(cause instanceof Error ? cause.message : 'Không thể lưu chương'),
+                    )
+                  }
+                  onSummary={(chapter) =>
+                    void generateSummary(chapter).catch((cause) =>
+                      setError(cause instanceof Error ? cause.message : 'Không thể tạo tóm tắt'),
+                    )
+                  }
+                  onAdd={() => void addChapter()}
+                  onGenerate={(chapter) => void generateStoryChapter(chapter)}
+                />
               </>
             )}
             {tab === 'Audio' && (
@@ -738,8 +842,21 @@ function StoryWorkspace({
     );
   }
   const settings = story.settings;
+  const setGenerationField = <K extends keyof StorySettings['generation']>(
+    key: K,
+    value: StorySettings['generation'][K],
+  ): void => {
+    setDraft((current) => ({
+      ...current,
+      generation: { ...current.generation, [key]: value },
+    }));
+  };
   const chapterJobFor = (planItemId: string) =>
-    story.jobs.find((job) => job.type === 'GENERATE_CHAPTER' && job.entityId === planItemId);
+    story.jobs.find(
+      (job) =>
+        (job.type === 'GENERATE_CHAPTER_V2' || job.type === 'GENERATE_CHAPTER') &&
+        job.entityId === planItemId,
+    );
   const generatePlanItem = async (planItemId: string): Promise<void> => {
     const existingChapter = chapters.find((chapter) => chapter.storyPlanItemId === planItemId);
     if (
@@ -755,7 +872,7 @@ function StoryWorkspace({
         await storyApi.retryJob(job.id);
       } else {
         await storyApi.generate(
-          `/api/projects/${projectId}/story/chapters/${planItemId}/generate`,
+          `/api/projects/${projectId}/story/chapters/${planItemId}/generate-v2`,
           {
             expectedPlanRevision: story.plan?.revision ?? null,
             expectedChapterRevision: existingChapter?.revision ?? null,
@@ -783,6 +900,14 @@ function StoryWorkspace({
           {story?.omp.model && <small>{story.omp.model}</small>}
         </div>
       </div>
+      <LongStoryDashboard
+        projectId={projectId}
+        story={story}
+        chapters={chapters}
+        activeChapterId={activeChapterId}
+        onChanged={onChanged}
+        onError={onError}
+      />
       <form className="story-settings" onSubmit={(event) => void submitSettings(event)}>
         <div className="story-settings-head">
           <div>
@@ -873,15 +998,82 @@ function StoryWorkspace({
             </select>
           </label>
           <label className="field">
+            <span>Cửa sổ lập kế hoạch</span>
+            <input
+              type="number"
+              min={10}
+              max={25}
+              value={draft.generation.planningWindow ?? 20}
+              onChange={(event) => setGenerationField('planningWindow', Number(event.target.value))}
+            />
+          </label>
+          <label className="field">
+            <span>Batch tối đa</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={draft.generation.maxChaptersPerBatch ?? 25}
+              onChange={(event) =>
+                setGenerationField('maxChaptersPerBatch', Number(event.target.value))
+              }
+            />
+          </label>
+          <label className="field">
+            <span>Số lần thử lại</span>
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={draft.generation.maxRetries ?? 3}
+              onChange={(event) => setGenerationField('maxRetries', Number(event.target.value))}
+            />
+          </label>
+          <label className="field checkbox-field">
+            <span>Continuity tự động</span>
+            <input
+              type="checkbox"
+              checked={draft.generation.continuityChecksEnabled ?? false}
+              onChange={(event) =>
+                setGenerationField('continuityChecksEnabled', event.target.checked)
+              }
+            />
+          </label>
+          <label className="field">
+            <span>Ngân sách USD (trống = không giới hạn)</span>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={draft.generation.budgetUsd ?? ''}
+              onChange={(event) =>
+                setGenerationField(
+                  'budgetUsd',
+                  event.target.value === '' ? null : Number(event.target.value),
+                )
+              }
+            />
+          </label>
+          <label className="field">
+            <span>Token tối đa mỗi lượt</span>
+            <input
+              type="number"
+              min={1}
+              max={1_000_000}
+              value={draft.generation.maxEstimatedTokensPerOperation ?? ''}
+              onChange={(event) =>
+                setGenerationField(
+                  'maxEstimatedTokensPerOperation',
+                  event.target.value === '' ? null : Number(event.target.value),
+                )
+              }
+            />
+          </label>
+          <label className="field">
             <span>Model OMP (tuỳ chọn)</span>
             <input
               value={draft.generation.model ?? ''}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  generation: { ...current.generation, model: event.target.value || null },
-                }))
-              }
+              onChange={(event) => setGenerationField('model', event.target.value || null)}
             />
           </label>
         </div>
@@ -1310,6 +1502,905 @@ function StoryWorkspace({
         </div>
       )}
     </div>
+  );
+}
+
+type ChapterTableProps = {
+  chapters: ChapterDto[];
+  activeChapterId: string | null;
+  offset: number;
+  pageSize: number;
+  search: string;
+  status: ChapterStatusFilter;
+  onSearch: (value: string) => void;
+  onStatus: (value: ChapterStatusFilter) => void;
+  onPageChange: (offset: number) => void;
+  onSelect: (chapterId: string) => void;
+  onEdit: (chapterId: string, patch: Partial<Pick<ChapterDto, 'title' | 'content'>>) => void;
+  onSave: (chapter: ChapterDto) => void;
+  onSummary: (chapter: ChapterDto) => void;
+  onAdd: () => void;
+  onGenerate: (chapter: ChapterDto) => void;
+};
+function ChapterTable({
+  chapters,
+  activeChapterId,
+  offset,
+  pageSize,
+  search,
+  status,
+  onSearch,
+  onStatus,
+  onPageChange,
+  onSelect,
+  onEdit,
+  onSave,
+  onSummary,
+  onAdd,
+  onGenerate,
+}: ChapterTableProps) {
+  return (
+    <section className="chapter-browser">
+      <div className="section-head">
+        <div>
+          <h3>Chapters</h3>
+          <p className="muted">Chỉ tải nội dung của trang hiện tại để duyệt an toàn.</p>
+        </div>
+        <button onClick={onAdd}>+ Chương</button>
+      </div>
+      <div className="chapter-browser-controls">
+        <label className="field search-field">
+          <span>Tìm chương</span>
+          <input
+            value={search}
+            placeholder="Tìm theo tiêu đề hoặc nội dung"
+            onChange={(event) => onSearch(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Lọc trạng thái</span>
+          <select
+            value={status}
+            onChange={(event) => onStatus(event.target.value as ChapterStatusFilter)}
+          >
+            <option value="">Tất cả</option>
+            <option value="FAILED">Lỗi</option>
+            <option value="PENDING">Đang chờ</option>
+            <option value="CONTINUITY_STALE">Continuity stale</option>
+            <option value="WARN">Cảnh báo</option>
+          </select>
+        </label>
+        <div className="pagination" aria-label="Phân trang chương">
+          <button
+            className="secondary"
+            disabled={offset === 0}
+            onClick={() => onPageChange(Math.max(0, offset - pageSize))}
+          >
+            Trước
+          </button>
+          <span>
+            {chapters.length ? `${offset + 1}-${offset + chapters.length}` : 'Không có chương'}
+          </span>
+          <button
+            className="secondary"
+            disabled={chapters.length < pageSize}
+            onClick={() => onPageChange(offset + pageSize)}
+          >
+            Sau
+          </button>
+        </div>
+      </div>
+      {chapters.length === 0 ? (
+        <div className="story-empty">
+          <strong>Không có chương phù hợp</strong>
+          <span>Thử xóa bộ lọc hoặc tạo chương mới.</span>
+        </div>
+      ) : (
+        chapters.map((chapter) => {
+          const selected = chapter.id === activeChapterId;
+          return (
+            <article className={`chapter ${selected ? 'chapter-active' : ''}`} key={chapter.id}>
+              <div className="chapter-title-row">
+                <input
+                  aria-label={`Tiêu đề chương ${chapter.number}`}
+                  value={chapter.title}
+                  onChange={(event) => onEdit(chapter.id, { title: event.target.value })}
+                />
+                <span className="chapter-number">Chương {chapter.number}</span>
+              </div>
+              {selected ? (
+                <textarea
+                  aria-label={`Nội dung chương ${chapter.number}`}
+                  value={chapter.content}
+                  onChange={(event) => onEdit(chapter.id, { content: event.target.value })}
+                />
+              ) : (
+                <p className="chapter-preview">{chapter.content.slice(0, 320)}</p>
+              )}
+              <div className="chapter-foot">
+                <span>revision {chapter.revision}</span>
+                <span
+                  className={`origin-badge ${chapter.origin === 'GENERATED' ? 'generated' : ''}`}
+                >
+                  {chapter.origin === 'GENERATED' ? 'AI tạo - cần duyệt' : 'Thủ công'}
+                </span>
+                <span className="muted">
+                  Tóm tắt: {chapter.summaryStatus ?? 'MISSING'} · Liên tục:{' '}
+                  {chapter.continuityStatus ?? 'NOT_ANALYZED'} · Audio:{' '}
+                  {chapter.audioStatus ?? 'PENDING'} · Phụ đề: {chapter.subtitleStatus ?? 'PENDING'}
+                </span>
+                <button
+                  className="secondary"
+                  onClick={() => onSelect(chapter.id)}
+                  aria-pressed={selected}
+                >
+                  {selected ? 'Đang chọn' : 'Duyệt chương'}
+                </button>
+                <button onClick={() => onSave(chapter)}>Lưu nội dung</button>
+                <button
+                  className="secondary"
+                  disabled={!chapter.storyPlanItemId}
+                  onClick={() => onGenerate(chapter)}
+                >
+                  {chapter.origin === 'GENERATED' ? 'Tạo lại chương' : 'Tạo chương'}
+                </button>
+                <button className="secondary" onClick={() => onSummary(chapter)}>
+                  Tạo tóm tắt
+                </button>
+              </div>
+            </article>
+          );
+        })
+      )}
+    </section>
+  );
+}
+type ArcReviewCardProps = {
+  arc: StoryArc;
+  windowCount: number;
+  onSave: (arc: StoryArc) => Promise<void>;
+};
+
+function ArcReviewCard({ arc, windowCount, onSave }: ArcReviewCardProps) {
+  const [title, setTitle] = useState(arc.title);
+  const [goal, setGoal] = useState(arc.goal);
+  const [conflict, setConflict] = useState(arc.conflict);
+  const [plannedOutcome, setPlannedOutcome] = useState(arc.plannedOutcome);
+
+  useEffect(() => {
+    setTitle(arc.title);
+    setGoal(arc.goal);
+    setConflict(arc.conflict);
+    setPlannedOutcome(arc.plannedOutcome);
+  }, [arc.id, arc.title, arc.goal, arc.conflict, arc.plannedOutcome]);
+
+  const save = async (): Promise<void> => {
+    await onSave({ ...arc, title, goal, conflict, plannedOutcome });
+  };
+
+  return (
+    <article className="arc-card">
+      <div className="section-head">
+        <strong>{arc.ordinalIndex}. Duyệt arc</strong>
+        <span className={`status-chip status-${arc.status.toLowerCase()}`}>{arc.status}</span>
+      </div>
+      <small>
+        Chương {arc.startChapter}-{arc.endChapter} · {windowCount} cửa sổ
+      </small>
+      {arc.status === 'STALE' && (
+        <p className="warning">
+          Blueprint/settings đã thay đổi. Kiểm tra lại arc trước khi tạo tiếp.
+        </p>
+      )}
+      <label className="field">
+        <span>Tiêu đề arc</span>
+        <input value={title} onChange={(event) => setTitle(event.target.value)} />
+      </label>
+      <label className="field">
+        <span>Mục tiêu</span>
+        <textarea value={goal} onChange={(event) => setGoal(event.target.value)} />
+      </label>
+      <label className="field">
+        <span>Xung đột</span>
+        <textarea value={conflict} onChange={(event) => setConflict(event.target.value)} />
+      </label>
+      <label className="field">
+        <span>Kết quả dự kiến</span>
+        <textarea
+          value={plannedOutcome}
+          onChange={(event) => setPlannedOutcome(event.target.value)}
+        />
+      </label>
+      <button onClick={() => void save()}>Lưu chỉnh sửa arc</button>
+    </article>
+  );
+}
+type WindowReviewCardProps = {
+  projectId: string;
+  summary: StoryPlanWindowSummary;
+  onSave: (window: StoryPlanWindowResult) => Promise<void>;
+};
+
+type EditablePlanField =
+  'title' | 'purpose' | 'summary' | 'setting' | 'conflict' | 'resolution' | 'emotionalArc';
+
+function WindowReviewCard({ projectId, summary, onSave }: WindowReviewCardProps) {
+  const [draft, setDraft] = useState<StoryPlanWindowResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(null);
+    setError(null);
+  }, [summary.window.id, summary.window.inputFingerprint, summary.itemCount]);
+
+  const load = async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    try {
+      setDraft(await storyApi.getPlanWindow(projectId, summary.window.id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Không thể đọc cửa sổ kế hoạch');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const setItemField = (index: number, key: EditablePlanField, value: string): void => {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((item, itemIndex) =>
+              itemIndex === index ? { ...item, [key]: value } : item,
+            ),
+          }
+        : current,
+    );
+  };
+
+  return (
+    <article className="arc-card">
+      <div className="section-head">
+        <strong>
+          Cửa sổ {summary.window.startChapter}-{summary.window.endChapter}
+        </strong>
+        <span className={`status-chip status-${summary.window.status.toLowerCase()}`}>
+          {summary.window.status}
+        </span>
+      </div>
+      <small>
+        Arc {summary.window.arcId} · {summary.itemCount} dàn ý · ID {summary.window.id}
+      </small>
+      {error && <small className="warning">{error}</small>}
+      {!draft ? (
+        <button className="secondary" type="button" onClick={() => void load()} disabled={loading}>
+          {loading ? 'Đang tải...' : 'Mở chỉnh sửa cửa sổ'}
+        </button>
+      ) : (
+        <form
+          className="story-settings"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onSave(draft).then(() => setDraft(null));
+          }}
+        >
+          {draft.items.map((item, index) => (
+            <div className="window-item-editor" key={item.id}>
+              <strong>
+                Chương {item.chapterNumber} · ID {item.id}
+              </strong>
+              <label className="field">
+                <span>Tiêu đề</span>
+                <input
+                  required
+                  value={item.title}
+                  onChange={(event) => setItemField(index, 'title', event.target.value)}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>Tóm tắt</span>
+                <textarea
+                  required
+                  value={item.summary}
+                  onChange={(event) => setItemField(index, 'summary', event.target.value)}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>Xung đột</span>
+                <textarea
+                  required
+                  value={item.conflict}
+                  onChange={(event) => setItemField(index, 'conflict', event.target.value)}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>Hướng giải quyết</span>
+                <textarea
+                  required
+                  value={item.resolution}
+                  onChange={(event) => setItemField(index, 'resolution', event.target.value)}
+                />
+              </label>
+            </div>
+          ))}
+          <div className="actions">
+            <button type="submit">Lưu revision cửa sổ</button>
+            <button className="secondary" type="button" onClick={() => setDraft(null)}>
+              Hủy
+            </button>
+          </div>
+        </form>
+      )}
+    </article>
+  );
+}
+
+type LongStoryDashboardProps = {
+  projectId: string;
+  story: StorySnapshotDto;
+  chapters: ChapterDto[];
+  activeChapterId: string | null;
+  onChanged: () => void;
+  onError: (message: string) => void;
+};
+
+type BatchMode = 'NEXT' | 'RANGE' | 'UNTIL_END';
+type BatchRequestPayload = {
+  mode: BatchMode;
+  count?: number;
+  startChapter?: number;
+  endChapter?: number;
+};
+
+function formatUsage(usage: StoryUsageSummary): string {
+  return `${usage.operations} lượt · ${usage.knownInputTokens + usage.knownOutputTokens} token đã biết · $${usage.knownCostUsd.toFixed(4)}`;
+}
+
+function LongStoryDashboard({
+  projectId,
+  story,
+  chapters,
+  activeChapterId,
+  onChanged,
+  onError,
+}: LongStoryDashboardProps) {
+  const [mode, setMode] = useState<BatchMode>('NEXT');
+  const [count, setCount] = useState(5);
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(5);
+  const [arcId, setArcId] = useState('');
+  const [windowStart, setWindowStart] = useState(1);
+  const [windowEnd, setWindowEnd] = useState(20);
+  const [batchItems, setBatchItems] = useState<Record<string, StoryGenerationBatchItem[]>>({});
+  const [rebuildFrom, setRebuildFrom] = useState(1);
+
+  useEffect(() => {
+    const firstArc = story.arcs[0];
+    if (firstArc && !story.arcs.some((arc) => arc.id === arcId)) setArcId(firstArc.id);
+    const nextChapter = (story.state?.currentChapter ?? 0) + 1;
+    if (story.state?.revision) {
+      setRangeStart(nextChapter);
+      setRangeEnd(Math.min(story.longStoryCounts.targetChapterCount, nextChapter + 4));
+    }
+  }, [
+    story.arcs,
+    story.state?.revision,
+    story.state?.currentChapter,
+    arcId,
+    story.longStoryCounts.targetChapterCount,
+  ]);
+
+  useEffect(() => {
+    const arc = story.arcs.find((item) => item.id === arcId);
+    if (arc) {
+      setWindowStart(arc.startChapter);
+      setWindowEnd(Math.min(arc.endChapter, arc.startChapter + 19));
+    }
+  }, [arcId, story.arcs]);
+
+  const run = async (action: () => Promise<unknown>, fallback: string): Promise<void> => {
+    try {
+      await action();
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : fallback);
+    }
+  };
+
+  const startBatch = (): Promise<void> => {
+    const payload: BatchRequestPayload =
+      mode === 'NEXT'
+        ? { mode, count }
+        : mode === 'RANGE'
+          ? { mode, startChapter: rangeStart, endChapter: rangeEnd }
+          : { mode };
+    return run(
+      () => storyApi.generateBatch(projectId, payload),
+      'Không thể bắt đầu batch tạo chương',
+    );
+  };
+
+  const generateWindow = (): Promise<void> => {
+    if (!arcId) {
+      onError('Cần tạo hoặc chọn một arc trước khi lập kế hoạch cửa sổ.');
+      return Promise.resolve();
+    }
+    return run(
+      () =>
+        storyApi.generatePlanWindow(projectId, {
+          arcId,
+          startChapter: windowStart,
+          endChapter: windowEnd,
+        }),
+      'Không thể lập kế hoạch cửa sổ',
+    );
+  };
+
+  const toggleBatchItems = async (batchId: string): Promise<void> => {
+    if (batchItems[batchId]) {
+      setBatchItems((current) => {
+        const next = { ...current };
+        delete next[batchId];
+        return next;
+      });
+      return;
+    }
+    try {
+      const items = await storyApi.batchItems(projectId, batchId);
+      setBatchItems((current) => ({ ...current, [batchId]: items }));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể đọc chi tiết batch');
+    }
+  };
+
+  const retryItem = (batch: StoryGenerationBatch, item: StoryGenerationBatchItem): Promise<void> =>
+    run(async () => {
+      await storyApi.retryBatchItem(projectId, batch.id, item.chapterNumber);
+      setBatchItems((current) => {
+        const next = { ...current };
+        delete next[batch.id];
+        return next;
+      });
+    }, 'Không thể thử lại chương trong batch');
+
+  const skipItem = (batch: StoryGenerationBatch, item: StoryGenerationBatchItem): Promise<void> => {
+    const reason = window.prompt('Lý do bỏ qua chương này', item.error ?? 'Cần xem xét thủ công');
+    if (!reason?.trim()) return Promise.resolve();
+    return run(async () => {
+      await storyApi.skipBatchItem(projectId, batch.id, item.chapterNumber, reason.trim());
+      setBatchItems((current) => {
+        const next = { ...current };
+        delete next[batch.id];
+        return next;
+      });
+    }, 'Không thể bỏ qua chương trong batch');
+  };
+
+  const activeChapter = chapters.find((chapter) => chapter.id === activeChapterId);
+  const activeChecks = story.continuityChecks
+    .filter((check) => !activeChapter || check.chapterId === activeChapter.id)
+    .slice(0, 3);
+  const staleFrom =
+    chapters.find((chapter) => chapter.continuityStatus === 'CONTINUITY_STALE')?.number ??
+    activeChapter?.number ??
+    1;
+  const saveArc = (arc: StoryArc): Promise<void> =>
+    run(() => storyApi.updateArc(projectId, arc), 'Không thể lưu chỉnh sửa arc');
+  const saveWindow = (window: StoryPlanWindowResult): Promise<void> =>
+    run(() => storyApi.updatePlanWindow(projectId, window), 'Không thể lưu chỉnh sửa cửa sổ');
+
+  return (
+    <section className="long-story-dashboard">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">LONG STORY ENGINE</p>
+          <h3>Bảng điều khiển truyện dài</h3>
+          <p className="muted">
+            Lập kế hoạch trước, tạo theo batch, kiểm tra continuity trước khi nhận.
+          </p>
+        </div>
+        <div className="actions">
+          <button
+            onClick={() => void run(() => storyApi.generateArcs(projectId), 'Không thể tạo arc')}
+          >
+            Tạo arcs
+          </button>
+          <button
+            className="secondary"
+            onClick={() =>
+              void run(() => storyApi.compactSummary(projectId), 'Không thể nén tóm tắt')
+            }
+          >
+            Nén rolling summary
+          </button>
+        </div>
+      </div>
+
+      <div className="story-metric-grid">
+        <div className="metric-card">
+          <span>Mục tiêu</span>
+          <strong>{story.longStoryCounts.targetChapterCount} chương</strong>
+        </div>
+        <div className="metric-card">
+          <span>Đã lập kế hoạch</span>
+          <strong>{story.longStoryCounts.plannedChapterCount}</strong>
+        </div>
+        <div className="metric-card">
+          <span>Đã tạo</span>
+          <strong>{story.longStoryCounts.generatedChapterCount}</strong>
+        </div>
+        <div className="metric-card">
+          <span>Arc</span>
+          <strong>{story.longStoryCounts.arcCount}</strong>
+        </div>
+        <div className="metric-card">
+          <span>Cảnh báo continuity</span>
+          <strong>{story.longStoryCounts.continuityWarningCount}</strong>
+        </div>
+        <div className="metric-card">
+          <span>Chương stale</span>
+          <strong>{story.longStoryCounts.staleChapterCount}</strong>
+        </div>
+        <div className="metric-card">
+          <span>Đang chặn</span>
+          <strong>
+            {story.longStoryCounts.currentBlockingChapter
+              ? `Chương ${story.longStoryCounts.currentBlockingChapter}`
+              : 'Không'}
+          </strong>
+        </div>
+      </div>
+
+      <div className="long-story-grid">
+        <section className="panel">
+          <div className="section-head">
+            <h4>Điều phối tạo chương</h4>
+            <span className="provenance">Checkpoint {story.state?.currentChapter ?? 0}</span>
+          </div>
+          <div className="story-field-grid">
+            <label className="field">
+              <span>Chế độ</span>
+              <select value={mode} onChange={(event) => setMode(event.target.value as BatchMode)}>
+                <option value="NEXT">NEXT - tiếp theo</option>
+                <option value="RANGE">RANGE - khoảng chọn</option>
+                <option value="UNTIL_END">UNTIL_END - đến hết</option>
+              </select>
+            </label>
+            {mode === 'NEXT' && (
+              <label className="field">
+                <span>Số chương</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={count}
+                  onChange={(event) => setCount(Number(event.target.value))}
+                />
+              </label>
+            )}
+            {mode === 'RANGE' && (
+              <>
+                <label className="field">
+                  <span>Từ chương</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={rangeStart}
+                    onChange={(event) => setRangeStart(Number(event.target.value))}
+                  />
+                </label>
+                <label className="field">
+                  <span>Đến chương</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={rangeEnd}
+                    onChange={(event) => setRangeEnd(Number(event.target.value))}
+                  />
+                </label>
+              </>
+            )}
+          </div>
+          <div className="actions">
+            <button onClick={() => void startBatch()}>Bắt đầu batch</button>
+            <button
+              className="secondary"
+              onClick={() =>
+                void run(
+                  () => storyApi.analyzeChapter(activeChapterId ?? ''),
+                  'Không thể phân tích chương',
+                )
+              }
+              disabled={!activeChapterId}
+            >
+              Phân tích chương đang chọn
+            </button>
+            <button
+              className="secondary"
+              onClick={() =>
+                void run(
+                  () => storyApi.checkContinuity(activeChapterId ?? ''),
+                  'Không thể kiểm tra continuity',
+                )
+              }
+              disabled={!activeChapterId}
+            >
+              Kiểm tra continuity
+            </button>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="section-head">
+            <h4>Lập kế hoạch cửa sổ</h4>
+            <span className="provenance">Tối đa 25 chương</span>
+          </div>
+          <div className="story-field-grid">
+            <label className="field">
+              <span>Arc</span>
+              <select
+                value={arcId}
+                onChange={(event) => setArcId(event.target.value)}
+                disabled={!story.arcs.length}
+              >
+                {story.arcs.map((arc) => (
+                  <option key={arc.id} value={arc.id}>
+                    {arc.ordinalIndex}. {arc.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Từ</span>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={windowStart}
+                onChange={(event) => setWindowStart(Number(event.target.value))}
+              />
+            </label>
+            <label className="field">
+              <span>Đến</span>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={windowEnd}
+                onChange={(event) => setWindowEnd(Number(event.target.value))}
+              />
+            </label>
+          </div>
+          <button onClick={() => void generateWindow()} disabled={!story.arcs.length}>
+            Lập kế hoạch cửa sổ
+          </button>
+        </section>
+      </div>
+
+      <section className="panel">
+        <div className="section-head">
+          <h4>Story arcs</h4>
+          <span className="muted">{story.arcs.length} arc</span>
+        </div>
+        {story.arcs.length === 0 ? (
+          <p className="muted">Chưa có arc. Tạo arcs sau khi lưu settings và blueprint.</p>
+        ) : (
+          <div className="arc-grid">
+            {story.arcs.map((arc: StoryArc) => {
+              const windows = story.planWindows.filter((item) => item.window.arcId === arc.id);
+              return (
+                <ArcReviewCard
+                  key={arc.id}
+                  arc={arc}
+                  windowCount={windows.length}
+                  onSave={saveArc}
+                />
+              );
+            })}
+          </div>
+        )}
+      </section>
+      <section className="panel">
+        <div className="section-head">
+          <h4>Plan windows</h4>
+          <span className="muted">{story.planWindows.length} cửa sổ</span>
+        </div>
+        {story.planWindows.length === 0 ? (
+          <p className="muted">Chưa có cửa sổ kế hoạch để duyệt.</p>
+        ) : (
+          <div className="arc-grid">
+            {story.planWindows.map((summary) => (
+              <WindowReviewCard
+                key={summary.window.id}
+                projectId={projectId}
+                summary={summary}
+                onSave={saveWindow}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="section-head">
+          <h4>Batch gần đây</h4>
+          <span className="muted">{story.batches.length} batch</span>
+        </div>
+        {story.batches.length === 0 ? (
+          <p className="muted">Chưa có batch.</p>
+        ) : (
+          story.batches.slice(0, 10).map((batch) => (
+            <div className="batch-row" key={batch.id}>
+              <div>
+                <strong>
+                  {batch.mode} · chương {batch.startChapter}-{batch.endChapter}
+                </strong>
+                <small>
+                  {batch.completed}/{batch.total} hoàn tất · {batch.failed} lỗi · {batch.skipped} bỏ
+                  qua
+                </small>
+                {batch.error && <em>{batch.error}</em>}
+              </div>
+              <div className="actions">
+                <span className={`status-chip status-${batch.status.toLowerCase()}`}>
+                  {batch.status}
+                </span>
+                <button className="secondary" onClick={() => void toggleBatchItems(batch.id)}>
+                  {batchItems[batch.id] ? 'Ẩn chi tiết' : 'Chi tiết'}
+                </button>
+                {(batch.status === 'RUNNING' || batch.status === 'PENDING') && (
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      void run(
+                        () => storyApi.cancelBatch(projectId, batch.id),
+                        'Không thể hủy batch',
+                      )
+                    }
+                  >
+                    Hủy
+                  </button>
+                )}
+              </div>
+              {batchItems[batch.id]?.map((item) => (
+                <div className="batch-item" key={item.id}>
+                  <span>Chương {item.chapterNumber}</span>
+                  <strong>{item.outcome}</strong>
+                  {item.error && <em>{item.error}</em>}
+                  {item.outcome === 'FAILED' && (
+                    <>
+                      <button className="secondary" onClick={() => void retryItem(batch, item)}>
+                        Thử lại
+                      </button>
+                      <button className="secondary" onClick={() => void skipItem(batch, item)}>
+                        Bỏ qua có lý do
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))
+        )}
+      </section>
+
+      <div className="long-story-grid">
+        <section className="panel">
+          <div className="section-head">
+            <h4>Continuity của chương đang chọn</h4>
+            <span className="muted">{activeChapter?.title ?? 'Chưa chọn'}</span>
+          </div>
+          {activeChecks.length === 0 ? (
+            <p className="muted">
+              Chưa có kết quả. Chạy phân tích hoặc kiểm tra continuity sau khi chọn chương.
+            </p>
+          ) : (
+            activeChecks.map((check) => (
+              <article className="continuity-card" key={check.id}>
+                <div className="section-head">
+                  <strong>{check.result.status}</strong>
+                  <span>{check.result.issues.length} vấn đề</span>
+                </div>
+                {check.result.issues.map((issue, index) => (
+                  <p key={`${issue.type}-${index}`}>
+                    <b>{issue.severity}</b> · {issue.message}
+                  </p>
+                ))}
+                {check.stateDelta && check.summary && !check.acceptedAt && (
+                  <button
+                    onClick={() =>
+                      void run(
+                        () => storyApi.acceptAnalysis(check.chapterId, check.id),
+                        'Không thể nhận phân tích thủ công',
+                      )
+                    }
+                  >
+                    Nhận state delta
+                  </button>
+                )}
+                {check.acceptedAt && (
+                  <small className="muted">Đã nhận lúc {check.acceptedAt}</small>
+                )}
+              </article>
+            ))
+          )}
+        </section>
+        <section className="panel">
+          <div className="section-head">
+            <h4>Usage và rebuild</h4>
+            <span className="provenance">Chi phí đã biết</span>
+          </div>
+          <p className="usage-total">{formatUsage(story.usageSummary)}</p>
+          <p className="muted">
+            Không rõ chi phí: {story.usageSummary.unavailableCount} lượt. Usage không có dữ liệu sẽ
+            không bị đoán.
+          </p>
+          <div className="context-diagnostics">
+            <strong>Context gần đây</strong>
+            {story.contextDiagnostics
+              .filter((item) => item.contextDiagnostics)
+              .slice(0, 5)
+              .map((item) => {
+                const diagnostics = item.contextDiagnostics!;
+                return (
+                  <small key={item.id}>
+                    {item.operation} · {diagnostics.estimatedTokens}/{diagnostics.budget} token ·
+                    nhân vật {diagnostics.selectedCharacterCount} · thread{' '}
+                    {diagnostics.selectedThreadCount} · tóm tắt{' '}
+                    {diagnostics.recentSummariesIncluded}
+                    {diagnostics.omittedSections.length
+                      ? ` · bỏ qua: ${diagnostics.omittedSections.slice(0, 4).join(', ')}`
+                      : ''}
+                  </small>
+                );
+              })}
+            {!story.contextDiagnostics.some((item) => item.contextDiagnostics) && (
+              <small className="muted">Chưa có chẩn đoán context.</small>
+            )}
+          </div>
+          <label className="field">
+            <span>Rebuild continuity từ chương</span>
+            <input
+              type="number"
+              min={1}
+              max={story.longStoryCounts.targetChapterCount}
+              value={rebuildFrom}
+              onChange={(event) => setRebuildFrom(Number(event.target.value))}
+            />
+          </label>
+          <button
+            className="secondary"
+            onClick={() =>
+              void run(
+                () => storyApi.rebuildContinuity(projectId, rebuildFrom),
+                'Không thể rebuild continuity',
+              )
+            }
+          >
+            Rebuild state
+          </button>
+          <button
+            className="secondary"
+            onClick={() =>
+              void run(
+                () =>
+                  window.confirm(
+                    `Giữ các chương từ chương ${staleFrom} ở trạng thái stale và không thay đổi nội dung?`,
+                  )
+                    ? storyApi.keepStale(projectId, staleFrom)
+                    : Promise.resolve(),
+                'Không thể giữ suffix stale',
+              )
+            }
+          >
+            Giữ suffix stale
+          </button>
+        </section>
+      </div>
+    </section>
   );
 }
 

@@ -32,9 +32,10 @@ export type AiAgentResult = {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
+  costCurrency?: string | null;
+  finishReason?: string | null;
   durationMs: number;
 };
-
 export type AiAgentProgress = (event: Extract<OmpProtocolEvent, { kind: 'progress' }>) => void;
 
 export interface AiAgent {
@@ -154,7 +155,10 @@ export class OmpAgent implements AiAgent {
         const event = parseOmpProtocolLine(line);
         if (event.correlationId === correlationId && event.kind === 'progress') onProgress?.(event);
       }
-      return parseOutput(result.stdout, correlationId);
+      const parsed = parseOutput(result.stdout, correlationId);
+      if (parsed.operation !== request.operation)
+        throw protocolError('PROTOCOL_ERROR', 'OMP host operation mismatch', false);
+      return parsed;
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw protocolError('PROTOCOL_ERROR', 'OMP host response could not be parsed', false);

@@ -147,6 +147,54 @@ describe('OmpAgent', () => {
     expect(received?.arguments).toHaveLength(1);
   });
 
+  it('preserves nullable and available usage metadata from the protocol result', async () => {
+    const runner = {
+      run: async (options: { input?: string }) => {
+        const correlationId = JSON.parse(options.input!.trim()).correlationId;
+        return {
+          stdout: JSON.stringify({
+            ...result,
+            correlationId,
+            inputTokens: 12,
+            outputTokens: 34,
+            costUsd: 0.02,
+            costCurrency: 'USD',
+            finishReason: 'stop',
+          }),
+          stderr: '',
+          exitCode: 0,
+          signal: null,
+          durationMs: 1,
+        };
+      },
+    };
+    const agent = new OmpAgent(runner as unknown as ProcessRunner);
+    await expect(agent.generate(request)).resolves.toMatchObject({
+      inputTokens: 12,
+      outputTokens: 34,
+      costUsd: 0.02,
+      costCurrency: 'USD',
+      finishReason: 'stop',
+    });
+  });
+
+  it('rejects a terminal result for a different operation', async () => {
+    const runner = {
+      run: async (options: { input?: string }) => {
+        const correlationId = JSON.parse(options.input!.trim()).correlationId;
+        return {
+          stdout: JSON.stringify({ ...result, correlationId, operation: 'CHAPTER_PLANS' }),
+          stderr: '',
+          exitCode: 0,
+          signal: null,
+          durationMs: 1,
+        };
+      },
+    };
+    const agent = new OmpAgent(runner as unknown as ProcessRunner);
+    await expect(agent.generate(request)).rejects.toMatchObject({ code: 'PROTOCOL_ERROR' });
+  });
+
   it('returns safe readiness data without credential details', async () => {
     const runner = {
       run: async () => ({

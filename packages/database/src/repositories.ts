@@ -13,6 +13,7 @@ import type {
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value);
 const safeError = (value: string): string => value.slice(0, 2_000);
+export type ChapterStatusFilter = 'FAILED' | 'PENDING' | 'CONTINUITY_STALE' | 'WARN';
 
 export class ProjectRepository {
   constructor(private readonly database: DatabaseHandle) {}
@@ -91,18 +92,122 @@ export class ChapterRepository {
   list(projectId: Id): ChapterDto[] {
     return this.database.sqlite
       .prepare(
-        'SELECT id, project_id as projectId, number, title, content, revision, story_origin as origin, story_plan_item_id as storyPlanItemId, story_generation_id as storyGenerationId, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE project_id=? ORDER BY number',
+        `SELECT c.id,c.project_id as projectId,c.number,c.title,c.content,c.revision,
+          c.story_origin as origin,c.story_plan_item_id as storyPlanItemId,
+          c.story_generation_id as storyGenerationId,c.continuity_status as continuityStatus,
+          c.continuity_check_status as continuityCheckStatus,
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM story_summary_revisions s
+              WHERE s.chapter_id=c.id AND s.is_current=1 AND s.status='CURRENT'
+            ) THEN 'CURRENT'
+            WHEN EXISTS (SELECT 1 FROM story_summary_revisions s WHERE s.chapter_id=c.id)
+              THEN 'STALE'
+            ELSE 'MISSING'
+          END as summaryStatus,
+          COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='MERGE_AUDIO' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as audioStatus,
+          COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='SUBTITLE' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as subtitleStatus,
+          c.created_at as createdAt,c.updated_at as updatedAt
+         FROM chapters c WHERE c.project_id=? ORDER BY c.number`,
       )
       .all(projectId) as ChapterDto[];
+  }
+  listPage(
+    projectId: Id,
+    limit = 25,
+    offset = 0,
+    search = '',
+    status: ChapterStatusFilter | '' = '',
+  ): ChapterDto[] {
+    const normalizedSearch = search.trim();
+    const pattern = `%${normalizedSearch}%`;
+    const statusClause =
+      status === 'FAILED'
+        ? "AND (c.continuity_check_status='FAIL' OR EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.entity_id=c.id AND ws.status='FAILED'))"
+        : status === 'PENDING'
+          ? "AND (c.continuity_status='NOT_ANALYZED' OR NOT EXISTS (SELECT 1 FROM story_summary_revisions s WHERE s.chapter_id=c.id AND s.is_current=1 AND s.status='CURRENT') OR EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.entity_id=c.id AND ws.status IN ('PENDING','RUNNING')))"
+          : status === 'CONTINUITY_STALE'
+            ? "AND c.continuity_status='CONTINUITY_STALE'"
+            : status === 'WARN'
+              ? "AND c.continuity_check_status='WARN'"
+              : '';
+    return this.database.sqlite
+      .prepare(
+        `SELECT c.id,c.project_id as projectId,c.number,c.title,c.content,c.revision,
+          c.story_origin as origin,c.story_plan_item_id as storyPlanItemId,
+          c.story_generation_id as storyGenerationId,c.continuity_status as continuityStatus,
+          c.continuity_check_status as continuityCheckStatus,
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM story_summary_revisions s
+              WHERE s.chapter_id=c.id AND s.is_current=1 AND s.status='CURRENT'
+            ) THEN 'CURRENT'
+            WHEN EXISTS (SELECT 1 FROM story_summary_revisions s WHERE s.chapter_id=c.id)
+              THEN 'STALE'
+            ELSE 'MISSING'
+          END as summaryStatus,
+          COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='MERGE_AUDIO' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as audioStatus,
+          COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='SUBTITLE' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as subtitleStatus,
+          c.created_at as createdAt,c.updated_at as updatedAt
+         FROM chapters c
+         WHERE c.project_id=? AND (?='' OR c.title LIKE ? OR c.content LIKE ?) ${statusClause}
+         ORDER BY c.number LIMIT ? OFFSET ?`,
+      )
+      .all(
+        projectId,
+        normalizedSearch,
+        pattern,
+        pattern,
+        Math.max(1, Math.min(100, limit)),
+        Math.max(0, offset),
+      ) as ChapterDto[];
+  }
+  listMetadata(
+    projectId: Id,
+  ): Array<{ id: Id; number: number; revision: number; origin: 'MANUAL' | 'GENERATED' }> {
+    return this.database.sqlite
+      .prepare(
+        'SELECT id,number,revision,story_origin as origin FROM chapters WHERE project_id=? ORDER BY number',
+      )
+      .all(projectId) as Array<{
+      id: Id;
+      number: number;
+      revision: number;
+      origin: 'MANUAL' | 'GENERATED';
+    }>;
   }
   get(id: Id): ChapterDto | null {
     return (
       (this.database.sqlite
         .prepare(
-          'SELECT id, project_id as projectId, number, title, content, revision, story_origin as origin, story_plan_item_id as storyPlanItemId, story_generation_id as storyGenerationId, created_at as createdAt, updated_at as updatedAt FROM chapters WHERE id=?',
+          `SELECT c.id,c.project_id as projectId,c.number,c.title,c.content,c.revision,
+            c.story_origin as origin,c.story_plan_item_id as storyPlanItemId,
+            c.story_generation_id as storyGenerationId,c.continuity_status as continuityStatus,
+            c.continuity_check_status as continuityCheckStatus,
+            CASE
+              WHEN EXISTS (
+                SELECT 1 FROM story_summary_revisions s
+                WHERE s.chapter_id=c.id AND s.is_current=1 AND s.status='CURRENT'
+              ) THEN 'CURRENT'
+              WHEN EXISTS (SELECT 1 FROM story_summary_revisions s WHERE s.chapter_id=c.id)
+                THEN 'STALE'
+              ELSE 'MISSING'
+            END as summaryStatus,
+            COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='MERGE_AUDIO' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as audioStatus,
+            COALESCE((SELECT ws.status FROM workflow_steps ws WHERE ws.type='SUBTITLE' AND ws.entity_id=c.id ORDER BY ws.updated_at DESC LIMIT 1),'PENDING') as subtitleStatus,
+            c.created_at as createdAt,c.updated_at as updatedAt
+           FROM chapters c WHERE c.id=?`,
         )
         .get(id) as ChapterDto | undefined) ?? null
     );
+  }
+  getByPlanItem(projectId: Id, planItemId: string): ChapterDto | null {
+    const row = this.database.sqlite
+      .prepare(
+        'SELECT id FROM chapters WHERE project_id=? AND story_plan_item_id=? ORDER BY revision DESC LIMIT 1',
+      )
+      .get(projectId, planItemId) as { id: Id } | undefined;
+    return row ? this.get(row.id) : null;
   }
   create(projectId: Id, input: ChapterInput): ChapterDto {
     const max = this.database.sqlite
@@ -155,9 +260,18 @@ export class ChapterRepository {
     const stamp = now();
     this.database.sqlite
       .prepare(
-        "UPDATE chapters SET title=?, content=?, story_origin=CASE WHEN ? THEN 'MANUAL' ELSE story_origin END, revision=revision+?, row_version=row_version+1, updated_at=? WHERE id=?",
+        "UPDATE chapters SET title=?, content=?, story_origin=CASE WHEN ? THEN 'MANUAL' ELSE story_origin END, story_generation_id=CASE WHEN ? THEN NULL ELSE story_generation_id END, source_state_revision=CASE WHEN ? THEN NULL ELSE source_state_revision END, revision=revision+?, row_version=row_version+1, updated_at=? WHERE id=?",
       )
-      .run(input.title, input.content, changed ? 1 : 0, changed ? 1 : 0, stamp, id);
+      .run(
+        input.title,
+        input.content,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
+        stamp,
+        id,
+      );
     return this.get(id)!;
   }
   delete(id: Id): void {

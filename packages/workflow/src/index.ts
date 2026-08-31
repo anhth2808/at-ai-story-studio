@@ -7,9 +7,11 @@ import {
   AssetRepository,
   ChapterRepository,
   ProjectRepository,
+  StoryBatchRepository,
   StoryRepository,
   WorkflowRepository,
   type ClaimedStep,
+  type ChapterStatusFilter,
   type DatabaseHandle,
 } from '@studio/database';
 import {
@@ -25,6 +27,9 @@ import {
 } from '@studio/media';
 import {
   AppError,
+  storyArcSchema,
+  storyGenerationBatchRequestSchema,
+  storyPlanWindowResultSchema,
   type ChapterDto,
   type ChapterInput,
   type Id,
@@ -32,17 +37,30 @@ import {
   type ProjectDto,
   type ProjectInput,
   type StatusSummary,
+  type StoryArc,
+  type StoryGenerationBatch,
+  type StoryGenerationBatchItem,
+  type StoryGenerationBatchRequest,
+  type StoryPlanWindowResult,
   type WorkflowStatus,
   renderConfigSchema,
 } from '@studio/shared';
 import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
 import {
+  buildChapterGenerationContextV2,
+  planWindowBoundary,
   renderChapterGenerationPrompt,
   renderSummaryGenerationPrompt,
   type StoryEngine,
 } from './story-engine.js';
-import { renderBlueprintPrompt, renderChapterPlansPrompt } from './story-prompts.js';
-
+import {
+  renderArcPlanningPrompt,
+  renderBlueprintPrompt,
+  renderChapterGenerationV2Prompt,
+  renderChapterPlanWindowPrompt,
+  renderChapterPlansPrompt,
+  renderSummaryCompactionPrompt,
+} from './story-prompts.js';
 export type StudioContext = {
   database: DatabaseHandle;
   workspace: WorkspacePaths;
@@ -56,12 +74,14 @@ export class StudioService {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
   readonly story: StoryRepository;
+  readonly batches: StoryBatchRepository;
   readonly workflow: WorkflowRepository;
   readonly assets: AssetRepository;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.story = new StoryRepository(context.database);
+    this.batches = new StoryBatchRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
   }
@@ -94,6 +114,16 @@ export class StudioService {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     return this.chapters.create(projectId, input);
   }
+  listChapterPage(
+    projectId: Id,
+    limit = 25,
+    offset = 0,
+    search = '',
+    status: ChapterStatusFilter | '' = '',
+  ): ChapterDto[] {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    return this.chapters.listPage(projectId, limit, offset, search, status);
+  }
   updateChapter(id: Id, input: ChapterInput): ChapterDto {
     const current = this.chapters.get(id);
     if (!current) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
@@ -106,7 +136,10 @@ export class StudioService {
         throw new AppError('REVISION_CONFLICT', error.message, 409);
       throw error;
     }
-    if (contentChanged) this.invalidateChapterDescendants(chapter.projectId, chapter.id);
+    if (contentChanged) {
+      this.invalidateChapterDescendants(chapter.projectId, chapter.id);
+      this.story.markManualContinuityReview(chapter.projectId, chapter.number);
+    }
     return chapter;
   }
   deleteChapter(id: Id): void {
@@ -152,6 +185,12 @@ export class StudioService {
     const settings = this.story.getSettings(projectId);
     if (!settings || !blueprint)
       throw new AppError('PREREQUISITE_MISSING', 'Story settings and blueprint are required', 409);
+    if (settings.targetChapterCount > 20)
+      throw new AppError(
+        'INVALID_PLAN',
+        'Stories over 20 chapters require arcs and bounded planning windows',
+        422,
+      );
     const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
     const stepId = this.workflow.createStep(
       executionId,
@@ -177,21 +216,403 @@ export class StudioService {
       projectId,
       renderBlueprintPrompt(settings).inputFingerprint,
     );
-    const planStep = this.workflow.createStep(
+    const longStory = settings.targetChapterCount > 20;
+    const planningType = longStory ? 'GENERATE_STORY_ARCS' : 'GENERATE_CHAPTER_PLANS';
+    const planningStep = this.workflow.createStep(
       executionId,
-      `story-plans:${projectId}`,
-      'GENERATE_CHAPTER_PLANS',
+      longStory ? `story-arcs:${projectId}` : `story-plans:${projectId}`,
+      planningType,
       projectId,
-      fingerprint({ operation: 'CHAPTER_PLANS_DEFERRED', settingsRevision: settings.revision }),
+      fingerprint({
+        operation: longStory ? 'ARC_PLANNING_DEFERRED' : 'CHAPTER_PLANS_DEFERRED',
+        settingsRevision: settings.revision,
+      }),
     );
-    this.workflow.dependency(planStep, blueprintStep);
+    this.workflow.dependency(planningStep, blueprintStep);
     return {
       executionId,
       jobIds: [
         this.workflow.createJob('GENERATE_STORY_BLUEPRINT', projectId, blueprintStep),
-        this.workflow.createJob('GENERATE_CHAPTER_PLANS', projectId, planStep),
+        this.workflow.createJob(planningType, projectId, planningStep),
       ],
     };
+  }
+  scheduleStoryArcs(projectId: Id): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const settings = this.story.getSettings(projectId);
+    const blueprint = this.story.getBlueprint(projectId);
+    if (!settings || !blueprint)
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings and blueprint are required', 409);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-arcs:${projectId}:${blueprint.revision}`,
+      'GENERATE_STORY_ARCS',
+      projectId,
+      renderArcPlanningPrompt(settings, blueprint.blueprint).inputFingerprint,
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_STORY_ARCS', projectId, stepId),
+    };
+  }
+  updateArc(projectId: Id, arcId: string, input: unknown): StoryArc {
+    const current = this.story.getArc(projectId, arcId);
+    if (!current) throw new AppError('NOT_FOUND', 'Arc not found', 404);
+    const arc = storyArcSchema.parse(input);
+    if (arc.id !== arcId)
+      throw new AppError('INVALID_ARC_PLAN', 'Arc identifier cannot change', 400);
+    const saved = this.story.saveArc(
+      projectId,
+      arc,
+      null,
+      this.story.fingerprint({ operation: 'MANUAL_ARC', arcId, arc }),
+    );
+    const planItemIds = this.story.markArcDependentsStale(projectId, arcId);
+    for (const planItemId of planItemIds)
+      this.story.invalidateScope({ projectId, kind: 'PLAN_ITEM', stableId: planItemId });
+    return saved;
+  }
+
+  scheduleStoryPlanWindow(
+    projectId: Id,
+    arcId: string,
+    startChapter: number,
+    endChapter: number,
+  ): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const settings = this.story.getSettings(projectId);
+    const blueprint = this.story.getBlueprint(projectId);
+    const arc = this.story.getArc(projectId, arcId);
+    if (!settings || !blueprint || !arc)
+      throw new AppError(
+        'PREREQUISITE_MISSING',
+        'Story settings, blueprint, and arc are required',
+        409,
+      );
+    if (
+      !Number.isInteger(startChapter) ||
+      !Number.isInteger(endChapter) ||
+      startChapter < arc.startChapter ||
+      endChapter > arc.endChapter ||
+      startChapter > endChapter ||
+      endChapter - startChapter + 1 > (settings.generation.planningWindow ?? 20)
+    )
+      throw new AppError(
+        'INVALID_PLAN_WINDOW',
+        'Requested plan window is outside its configured bounds',
+        400,
+      );
+    const previousWindow =
+      this.story
+        .getPlanWindows(projectId)
+        .filter((window) => window.window.endChapter < startChapter)
+        .sort((left, right) => right.window.endChapter - left.window.endChapter)[0] ?? null;
+    const prompt = renderChapterPlanWindowPrompt(
+      settings,
+      blueprint.blueprint,
+      arc,
+      planWindowBoundary(previousWindow),
+      startChapter,
+      endChapter,
+    );
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-plan-window:${arcId}:${startChapter}:${endChapter}`,
+      'GENERATE_CHAPTER_PLAN_WINDOW',
+      projectId,
+      prompt.inputFingerprint,
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_CHAPTER_PLAN_WINDOW', projectId, stepId),
+    };
+  }
+  updatePlanWindow(projectId: Id, windowId: string, input: unknown): StoryPlanWindowResult {
+    const current = this.story.getPlanWindow(projectId, windowId);
+    if (!current) throw new AppError('NOT_FOUND', 'Plan window not found', 404);
+    const result = storyPlanWindowResultSchema.parse(input);
+    if (result.window.id !== windowId)
+      throw new AppError('INVALID_PLAN_WINDOW', 'Plan window identifier cannot change', 400);
+    const blueprint = this.story.getBlueprint(projectId);
+    if (!blueprint || result.window.sourceBlueprintRevision !== blueprint.revision)
+      throw new AppError('STALE_INPUT', 'Blueprint revision is no longer current', 409);
+    const normalized = {
+      ...result,
+      window: {
+        ...result.window,
+        status: 'CURRENT' as const,
+      },
+    };
+    const saved = this.story.savePlanWindow(
+      projectId,
+      normalized,
+      this.story.fingerprint({ operation: 'MANUAL_PLAN_WINDOW', windowId, result: normalized }),
+    );
+    const planItemIds = new Set([
+      ...current.items.map((item) => item.id),
+      ...saved.items.map((item) => item.id),
+    ]);
+    for (const planItemId of planItemIds)
+      this.story.invalidateScope({ projectId, kind: 'PLAN_ITEM', stableId: planItemId });
+    return saved;
+  }
+
+  scheduleStoryChapterV2(projectId: Id, planItemId: string): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const settings = this.story.getSettings(projectId);
+    const blueprint = this.story.getBlueprint(projectId);
+    const planItem = this.story.getPlanItem(projectId, planItemId)?.item;
+    if (!settings || !blueprint || !planItem)
+      throw new AppError(
+        'PREREQUISITE_MISSING',
+        'Long-story settings, blueprint, and plan item are required',
+        409,
+      );
+    if (planItem.chapterNumber > settings.targetChapterCount)
+      throw new AppError('INVALID_PLAN', 'Chapter plan is outside the configured target', 400);
+    const manual = this.context.database.sqlite
+      .prepare(
+        "SELECT id FROM chapters WHERE project_id=? AND number=? AND story_origin='MANUAL' LIMIT 1",
+      )
+      .get(projectId, planItem.chapterNumber) as { id: Id } | undefined;
+    if (manual)
+      throw new AppError(
+        'MANUAL_EDIT_CONFLICT',
+        'A manual chapter occupies the requested chapter number',
+        409,
+      );
+    const active = this.context.database.sqlite
+      .prepare(
+        `SELECT s.id FROM workflow_steps s
+         JOIN workflow_executions e ON e.id=s.execution_id
+         WHERE e.project_id=? AND s.type IN ('GENERATE_CHAPTER_V2','GENERATE_CHAPTER') AND s.entity_id=?
+           AND s.status IN ('PENDING','RUNNING') LIMIT 1`,
+      )
+      .get(projectId, planItemId) as { id: Id } | undefined;
+    if (active)
+      throw new AppError('WORKFLOW_CONFLICT', 'Chapter generation is already scheduled', 409);
+    const state = this.story.getStoryState(projectId);
+    const followsSkippedGap =
+      planItem.chapterNumber === state.currentChapter + 2 &&
+      state.gapMarkers.some((marker) => marker.chapterNumber === state.currentChapter + 1);
+    if (planItem.chapterNumber > state.currentChapter + 1 && !followsSkippedGap) {
+      const existing = this.context.database.sqlite
+        .prepare(
+          "SELECT id FROM chapters WHERE project_id=? AND number=? AND story_origin='GENERATED' LIMIT 1",
+        )
+        .get(projectId, planItem.chapterNumber) as { id: Id } | undefined;
+      if (!existing)
+        throw new AppError(
+          'CONTINUITY_ERROR',
+          `Chapter ${planItem.chapterNumber} must follow chapter ${state.currentChapter}`,
+          409,
+        );
+      throw new AppError(
+        'CONTINUITY_ERROR',
+        `Chapter ${planItem.chapterNumber} has no current checkpoint; rebuild continuity before regeneration`,
+        409,
+      );
+    }
+    const context = buildChapterGenerationContextV2(this.story, this.chapters, projectId, planItem);
+    const prompt = renderChapterGenerationV2Prompt(context, planItem, settings.generation.model);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-chapter-v2:${planItemId}:${planItem.chapterNumber}`,
+      'GENERATE_CHAPTER_V2',
+      planItemId,
+      prompt.inputFingerprint,
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('GENERATE_CHAPTER_V2', planItemId, stepId),
+    };
+  }
+
+  scheduleStoryStateAnalysis(chapterId: Id): { executionId: Id; jobId: Id } {
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const settings = this.story.getSettings(chapter.projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const executionId = this.workflow.createExecution(chapter.projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-state-analysis:${chapter.id}:${chapter.revision}`,
+      'ANALYZE_STORY_STATE',
+      chapter.id,
+      fingerprint({ operation: 'STATE_ANALYSIS_DEFERRED', chapterId, revision: chapter.revision }),
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('ANALYZE_STORY_STATE', chapter.id, stepId),
+    };
+  }
+
+  scheduleContinuityCheck(chapterId: Id): { executionId: Id; jobId: Id } {
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const settings = this.story.getSettings(chapter.projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const executionId = this.workflow.createExecution(chapter.projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `continuity:${chapter.id}:${chapter.revision}`,
+      'CHECK_CONTINUITY',
+      chapter.id,
+      fingerprint({
+        operation: 'CONTINUITY_CHECK_DEFERRED',
+        chapterId,
+        revision: chapter.revision,
+      }),
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('CHECK_CONTINUITY', chapter.id, stepId),
+    };
+  }
+
+  scheduleStorySummaryCompaction(projectId: Id): { executionId: Id; jobId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const settings = this.story.getSettings(projectId);
+    if (!settings) throw new AppError('PREREQUISITE_MISSING', 'Story settings are required', 409);
+    const state = this.story.getStoryState(projectId);
+    const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `story-summary-compaction:${projectId}:${state.revision}`,
+      'SUMMARY_COMPACTION',
+      projectId,
+      renderSummaryCompactionPrompt(state, settings.generation.model).inputFingerprint,
+      (settings.generation.maxRetries ?? 3) + 1,
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('SUMMARY_COMPACTION', projectId, stepId),
+    };
+  }
+
+  scheduleStoryBatch(
+    projectId: Id,
+    input: StoryGenerationBatchRequest,
+  ): { batch: StoryGenerationBatch; executionId: Id; jobIds: Id[] } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const request = storyGenerationBatchRequestSchema.parse(input);
+    const settings = this.story.getSettings(projectId);
+    const blueprint = this.story.getBlueprint(projectId);
+    if (!settings || !blueprint)
+      throw new AppError('PREREQUISITE_MISSING', 'Story settings and blueprint are required', 409);
+    const state = this.story.getStoryState(projectId);
+    const startChapter =
+      request.mode === 'RANGE' ? request.startChapter! : state.currentChapter + 1;
+    if (startChapter > state.currentChapter + 1)
+      throw new AppError(
+        'CONTINUITY_ERROR',
+        `Batch must start at chapter ${state.currentChapter + 1}`,
+        409,
+      );
+    const endChapter =
+      request.mode === 'RANGE'
+        ? request.endChapter!
+        : request.mode === 'NEXT'
+          ? startChapter + request.count! - 1
+          : settings.targetChapterCount;
+    if (startChapter > endChapter || startChapter > settings.targetChapterCount)
+      throw new AppError('INVALID_BATCH', 'No chapters remain in the configured target', 400);
+    if (endChapter > settings.targetChapterCount)
+      throw new AppError('INVALID_BATCH', 'Batch exceeds the configured target chapter count', 400);
+    const total = endChapter - startChapter + 1;
+    const maxChapters = settings.generation.maxChaptersPerBatch ?? 25;
+    if (total > maxChapters)
+      throw new AppError(
+        'INVALID_BATCH',
+        `Batch exceeds maxChaptersPerBatch (${maxChapters})`,
+        400,
+      );
+    const planItems: Array<{ chapterNumber: number; planItemId: string }> = [];
+    for (let chapterNumber = startChapter; chapterNumber <= endChapter; chapterNumber += 1) {
+      const planItem = this.story.getPlanItemForChapter(projectId, chapterNumber)?.item;
+      if (!planItem)
+        throw new AppError(
+          'PREREQUISITE_MISSING',
+          `A chapter plan item is required for chapter ${chapterNumber}`,
+          409,
+        );
+      const manual = this.context.database.sqlite
+        .prepare(
+          "SELECT id FROM chapters WHERE project_id=? AND number=? AND story_origin='MANUAL' LIMIT 1",
+        )
+        .get(projectId, chapterNumber) as { id: Id } | undefined;
+      if (manual)
+        throw new AppError(
+          'MANUAL_EDIT_CONFLICT',
+          `Manual chapter ${chapterNumber} requires continuity review`,
+          409,
+        );
+      const active = this.batches.activeChapter(projectId, chapterNumber);
+      if (active)
+        throw new AppError(
+          'BATCH_CONFLICT',
+          `Chapter ${chapterNumber} already has active work`,
+          409,
+        );
+      planItems.push({ chapterNumber, planItemId: planItem.id });
+    }
+    const schedule = this.context.database.sqlite.transaction(() => {
+      const executionId = this.workflow.createExecution(projectId, 'STORY_GENERATION');
+      const jobIds: Id[] = [];
+      const seeds: Array<{ chapterNumber: number; planItemId: string; workflowStepId: Id }> = [];
+      let previousStepId: Id | null = null;
+      for (const item of planItems) {
+        const stepId = this.workflow.createStep(
+          executionId,
+          `story-batch:${executionId}:${item.chapterNumber}:${item.planItemId}`,
+          'GENERATE_CHAPTER_V2',
+          item.planItemId,
+          fingerprint({
+            operation: 'CHAPTER_GENERATION_V2_DEFERRED',
+            projectId,
+            chapterNumber: item.chapterNumber,
+            planItemId: item.planItemId,
+          }),
+          (settings.generation.maxRetries ?? 3) + 1,
+        );
+        if (previousStepId) this.workflow.dependency(stepId, previousStepId);
+        jobIds.push(this.workflow.createJob('GENERATE_CHAPTER_V2', item.planItemId, stepId));
+        seeds.push({ ...item, workflowStepId: stepId });
+        previousStepId = stepId;
+      }
+      const batch = this.batches.create({
+        projectId,
+        startChapter,
+        endChapter,
+        mode: request.mode,
+        items: seeds,
+      });
+      return { batch, executionId, jobIds };
+    });
+    return schedule();
+  }
+
+  retryStoryBatchItem(batchId: Id, chapterNumber: number): StoryGenerationBatchItem {
+    return this.batches.retry(batchId, chapterNumber);
+  }
+
+  skipStoryBatchItem(batchId: Id, chapterNumber: number, reason: string): StoryGenerationBatchItem {
+    const item = this.batches.skip(batchId, chapterNumber, reason);
+    this.story.recordGapMarker(item.projectId, chapterNumber, reason);
+    return item;
+  }
+
+  cancelStoryBatch(batchId: Id): StoryGenerationBatch {
+    return this.batches.cancel(batchId);
   }
   scheduleStoryChapter(projectId: Id, planItemId: string): { executionId: Id; jobId: Id } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
@@ -261,6 +682,7 @@ export class StudioService {
       background: background ? 'COMPLETED' : 'PENDING',
       render: latestStep('RENDER', projectId),
       jobs,
+      story: this.story.getLongStoryCounts(projectId),
     };
   }
   scheduleChapterTts(chapterId: Id): { executionId: Id; jobIds: Id[] } {
@@ -414,7 +836,6 @@ export class EdgeTtsProvider implements TtsProvider {
     else await this.runner.run(options);
   }
 }
-
 export class WorkerExecutor {
   private readonly workflow: WorkflowRepository;
   constructor(
@@ -426,12 +847,17 @@ export class WorkerExecutor {
     this.workflow = new WorkflowRepository(context.database);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new AppError('CANCELLED', 'Work was cancelled', 409);
     if (
       step.type === 'GENERATE_STORY_BLUEPRINT' ||
       step.type === 'GENERATE_CHAPTER_PLANS' ||
       step.type === 'GENERATE_CHAPTER' ||
-      step.type === 'GENERATE_CHAPTER_SUMMARY'
+      step.type === 'GENERATE_CHAPTER_SUMMARY' ||
+      step.type === 'GENERATE_STORY_ARCS' ||
+      step.type === 'GENERATE_CHAPTER_PLAN_WINDOW' ||
+      step.type === 'GENERATE_CHAPTER_V2' ||
+      step.type === 'ANALYZE_STORY_STATE' ||
+      step.type === 'CHECK_CONTINUITY' ||
+      step.type === 'SUMMARY_COMPACTION'
     ) {
       if (!this.storyEngine)
         throw new AppError('CONFIGURATION_ERROR', 'Story Engine worker is not configured', 500);
@@ -889,3 +1315,4 @@ export * from './omp-agent.js';
 export * from './story-context.js';
 export * from './story-prompts.js';
 export * from './story-engine.js';
+export * from './story-state.js';

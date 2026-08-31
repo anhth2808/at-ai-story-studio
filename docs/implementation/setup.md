@@ -2,10 +2,12 @@
 
 ## Prerequisites
 
-- Node.js LTS, currently tested with Node 22
-- pnpm 11
-- FFmpeg and ffprobe on `PATH`, or `FFMPEG_PATH` and `FFPROBE_PATH`
-- Internet access for Edge TTS synthesis
+- Node.js LTS, currently tested with Node 22.
+- pnpm 11.
+- Bun 1.3.14 or newer for the isolated OMP host.
+- FFmpeg and ffprobe on `PATH`, or `FFMPEG_PATH` and `FFPROBE_PATH`.
+- Internet access for Edge TTS synthesis and for the selected OMP provider.
+- An authenticated OMP model for Story generation.
 
 Windows example:
 
@@ -13,35 +15,26 @@ Windows example:
 $env:PATH = "C:\ffmpeg\bin;$env:PATH"
 node --version
 pnpm --version
+bun --version
 ffmpeg -version
 ffprobe -version
 ```
 
-## OMP Story Engine
+## OMP readiness
 
-Story generation runs through the isolated Bun host in `apps/omp-agent`. The Node API and worker never import the OMP SDK. Use Bun 1.3.14 or newer and verify the installed OMP CLI:
+Story generation runs through `apps/omp-agent`, not through a Node provider SDK. The host discovers the normal OMP authentication store, creates one in-memory session, disables tools/MCP/LSP/extensions, and exits after one request.
 
-```powershell
-bun --version
-omp --version
-omp models
-```
-
-The host uses OMP's supported local authentication discovery. Configure a provider through the normal OMP environment variables or OAuth/auth-broker flow; do not put API keys or OAuth tokens in Story settings:
+Check the actual host used by Studio:
 
 ```powershell
-# OAuth/auth-broker setup, when supported by the provider
-omp auth-broker status
-omp auth-broker login <provider>
-
-# Refresh and inspect the available model catalog
-omp models refresh
-omp models
+bun apps/omp-agent/src/index.ts --readiness
 ```
 
-Story settings may select a model using `provider/model`, for example `openai-codex/gpt-5.6-luna`. The API and UI expose only safe readiness fields through `/api/projects/:projectId/story/readiness`: Bun runtime, selected model, readiness, and setup guidance. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host.
+Readiness returns only `ready`, Bun runtime, selected provider/model, and safe guidance. Configure authentication through the normal OMP OAuth/auth-broker flow or provider environment. Never put API keys, OAuth tokens, or credentials in Story settings.
 
-## Install and build
+Story settings may select `provider/model`, for example `zai/glm-4.5`. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host. The API exposes the same bounded readiness result at `/api/projects/:projectId/story/readiness`.
+
+## Install, migrate, and verify
 
 ```powershell
 pnpm install
@@ -52,11 +45,13 @@ pnpm test
 pnpm lint
 ```
 
-Approve the `better-sqlite3` and `esbuild` native/postinstall builds when pnpm asks. The migration is applied automatically by API and worker startup. To run it explicitly:
+Approve the `better-sqlite3` and `esbuild` native/postinstall builds when pnpm asks. API and worker startup apply additive migrations automatically. To run migration explicitly:
 
 ```powershell
 pnpm db:migrate
 ```
+
+The database uses SQLite foreign keys, WAL mode, a busy timeout, and normal synchronous mode. Do not reset the database to apply the long-story migration.
 
 ## Run locally
 
@@ -81,4 +76,8 @@ $env:FFMPEG_PATH = "C:\ffmpeg\bin\ffmpeg.exe"
 $env:FFPROBE_PATH = "C:\ffmpeg\bin\ffprobe.exe"
 ```
 
-`GET /api/health` reports API, SQLite, worker heartbeat, workspace, FFmpeg, and ffprobe independently.
+`GET /api/health` reports API, SQLite, worker heartbeat, workspace, FFmpeg, and ffprobe independently. The Story dashboard reports OMP readiness separately, so a media-ready installation can still show Story provider setup as unavailable.
+
+## Long-story first run
+
+For a target over 20 chapters, save settings, generate the blueprint, generate and review arcs, generate bounded plan windows, then create a contiguous batch. The batch is resumable and sequential. Generate narration, subtitles, and rendering only from explicit reviewed chapter actions.

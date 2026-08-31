@@ -1,6 +1,6 @@
 # Workflow
 
-SQLite is the source of truth. A scheduled execution materializes named steps and dependencies:
+SQLite is the source of truth. A scheduled execution materializes named steps and dependencies. The existing media path remains explicit:
 
 ```text
 CLEAN_TEXT -> TTS_SEGMENT 0 -> TTS_SEGMENT 1 -> ... -> MERGE_AUDIO
@@ -8,27 +8,42 @@ CLEAN_TEXT -> TTS_SEGMENT 0 -> TTS_SEGMENT 1 -> ... -> MERGE_AUDIO
 MERGE_AUDIO + current background + current subtitle + optional music -> RENDER
 ```
 
-Each step has a persisted status, fingerprint, progress, attempts, lease owner, lease expiry, and bounded error. Jobs reference steps and expose status through `GET /api/jobs/:id`.
+Each step has a persisted status, fingerprint, progress, attempts, lease owner, lease expiry, and bounded error. The worker claims one eligible step transactionally, creates an attempt, leases it, updates progress, and conditionally completes or fails it. Expired leases are recovered on startup. Failed work retries up to the step limit.
 
-The worker claims one eligible step transactionally, creates an attempt, leases it, updates progress, and conditionally completes or fails it. Expired leases are recovered on startup. Failed work retries up to the step limit; the retry endpoint resets the failed step without regenerating completed TTS assets. Completed TTS segments with the same text hash and an existing audio asset are reused.
+## Story workflow
 
-Chapter edits create a new revision and invalidate dependent current outputs. Asset registration first clears the prior current pointer for a role, then commits a validated READY asset. Historical rows and files remain available for diagnosis.
-
-Story generation uses the same durable workflow tables:
+Small stories retain the existing path:
 
 ```text
 GENERATE_STORY_BLUEPRINT -> GENERATE_CHAPTER_PLANS -> GENERATE_CHAPTER
-                                                    `-> GENERATE_CHAPTER_SUMMARY
 ```
 
-Blueprint, plan, chapter, and summary jobs are independently retryable and report progress from the isolated OMP host. A completed Story step does not enqueue media. Generating a chapter promotes a validated envelope into the ordinary chapter revision only when the plan-item fingerprint is still current; a newer manual chapter revision produces `MANUAL_EDIT_CONFLICT` instead of being overwritten. Changing settings, blueprint, a plan item, or a chapter invalidates only dependent Story records and media descendants.
+Long stories use hierarchical planning and sequential V2 generation:
 
-Manual flow:
+```text
+GENERATE_STORY_BLUEPRINT -> GENERATE_STORY_ARCS
+GENERATE_STORY_ARCS -> GENERATE_CHAPTER_PLAN_WINDOW
+GENERATE_CHAPTER_PLAN_WINDOW -> GENERATE_CHAPTER_V2 1 -> GENERATE_CHAPTER_V2 2 -> ...
+```
+
+Arcs cover the target without gaps. Windows are bounded to 10-25 chapters, default 20. A batch materializes only the requested range and uses a required predecessor dependency for each chapter.
+
+When a worker claims a V2 chapter, it compiles deterministic bounded context from the current StoryState, current plan item/window and arc, stable blueprint essentials, relevant dynamic state, prior/recent summaries, threads, facts, events, and gap markers. It updates the running fingerprint before calling the isolated OMP host. Full historical prose is not loaded for normal V2 generation.
+
+Accepted V2 output is schema-validated and reduced before one SQLite finalization transaction writes the chapter revision, summary, StateDelta, StoryState checkpoint, normalized records, lineage, usage, and generation completion. The worker marks the workflow step complete only after finalization returns. A recovered finalized checkpoint is reused idempotently instead of calling OMP again.
+
+## Batch outcomes
+
+Batch items are independently `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED`, or `CANCELLED`. Failure pauses later work. Retry resets only the failed item. Skip records a visible gap marker and makes only the immediate successor dependency optional; it is never counted as generated content. Cancel stops future claims and propagates cancellation to the active step.
+
+Changing settings, blueprint, an arc, a plan window, or a chapter invalidates only dependent Story records and media descendants. Historical regeneration and manual edits preserve later chapter content and media, mark later generated narrative lineage `CONTINUITY_STALE`, and require an explicit rebuild, analysis acceptance, or regeneration choice. A completed Story step never enqueues TTS or rendering.
+
+## Manual media flow
 
 1. Create a project.
-2. Add and save chapter text.
+2. Add and save chapter text, or generate and review Story text.
 3. Upload a background image or video.
-4. Generate narration.
-5. Generate subtitles.
-6. Render MP4.
+4. Generate narration explicitly.
+5. Generate subtitles explicitly.
+6. Render MP4 explicitly.
 7. Poll the job until `COMPLETED`; retry a failed job from its job endpoint.

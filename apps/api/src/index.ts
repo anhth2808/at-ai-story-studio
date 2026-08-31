@@ -20,11 +20,16 @@ import {
   chapterPlanItemSchema,
   idSchema,
   projectInputSchema,
-  projectUpdateSchema,
   reorderSchema,
   renderConfigSchema,
   storyBlueprintSchema,
+  storyArcSchema,
+  storyContinuityRebuildRequestSchema,
+  storyGenerationBatchRequestSchema,
+  storyGenerationBatchSkipRequestSchema,
   storyGenerationRequestSchema,
+  storyPlanWindowRequestSchema,
+  storyPlanWindowResultSchema,
   storySettingsSchema,
   storyStableIdSchema,
   subtitleReplacementSchema,
@@ -72,6 +77,21 @@ const getOmpReadiness = async (): Promise<OmpReadiness> => {
   }
   return ompReadinessRequest;
 };
+function parsePageValue(value: string | undefined, fallback: number, maximum: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > maximum)
+    throw new AppError('INVALID_INPUT', 'Pagination value is invalid', 400);
+  return parsed;
+}
+function parseChapterStatus(
+  value: string | undefined,
+): 'FAILED' | 'PENDING' | 'CONTINUITY_STALE' | 'WARN' | '' {
+  if (value === undefined || value === '') return '';
+  if (value === 'FAILED' || value === 'PENDING' || value === 'CONTINUITY_STALE' || value === 'WARN')
+    return value;
+  throw new AppError('INVALID_INPUT', 'Chapter status filter is invalid', 400);
+}
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -98,19 +118,50 @@ app.get('/api/health', async () => {
     checks,
   };
 });
-async function storySnapshot(projectId: string) {
+async function storySnapshot(
+  projectId: string,
+  summaryLimit = 50,
+  summaryOffset = 0,
+  planLimit = 20,
+  planOffset = 0,
+  windowLimit = 100,
+  windowOffset = 0,
+) {
   if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
-  const snapshot = service.story.snapshot(projectId);
+  const snapshot = service.story.snapshot(projectId, {
+    summaryLimit,
+    summaryOffset,
+    planLimit,
+    planOffset,
+    windowLimit,
+    windowOffset,
+  });
   const jobs = database.sqlite
     .prepare(
-      'SELECT j.id,j.type,j.entity_id as entityId,j.status,j.progress,j.error,j.attempts FROM jobs j JOIN workflow_steps s ON s.id=j.step_id JOIN workflow_executions e ON e.id=s.execution_id WHERE e.project_id=? ORDER BY j.created_at DESC',
+      'SELECT j.id,j.type,j.entity_id as entityId,j.status,j.progress,j.error,j.attempts FROM jobs j JOIN workflow_steps s ON s.id=j.step_id JOIN workflow_executions e ON e.id=s.execution_id WHERE e.project_id=? ORDER BY j.created_at DESC LIMIT 200',
     )
     .all(projectId);
   return { ...snapshot, jobs, omp: await getOmpReadiness() };
 }
 app.get('/api/projects/:projectId/story', async (request) => {
   const params = request.params as { projectId: string };
-  return storySnapshot(idSchema.parse(params.projectId));
+  const query = request.query as {
+    summaryLimit?: string;
+    summaryOffset?: string;
+    planLimit?: string;
+    planOffset?: string;
+    windowLimit?: string;
+    windowOffset?: string;
+  };
+  return storySnapshot(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.summaryLimit, 50, 200),
+    parsePageValue(query.summaryOffset, 0, Number.MAX_SAFE_INTEGER),
+    parsePageValue(query.planLimit, 20, 200),
+    parsePageValue(query.planOffset, 0, Number.MAX_SAFE_INTEGER),
+    parsePageValue(query.windowLimit, 100, 200),
+    parsePageValue(query.windowOffset, 0, Number.MAX_SAFE_INTEGER),
+  );
 });
 app.get('/api/projects/:projectId/story/readiness', async (request) => {
   const params = request.params as { projectId: string };
@@ -128,7 +179,79 @@ app.get('/api/projects/:projectId/story/blueprint', async (request) => {
 });
 app.get('/api/projects/:projectId/story/plan', async (request) => {
   const params = request.params as { projectId: string };
-  return storyEngine.getPlan(idSchema.parse(params.projectId));
+  const query = request.query as { limit?: string; offset?: string };
+  return storyEngine.getPlan(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 20, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/story/arcs', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return service.story.getArcs(projectId);
+});
+app.post('/api/projects/:projectId/story/arcs/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply.code(202).send(service.scheduleStoryArcs(idSchema.parse(params.projectId)));
+});
+app.put('/api/projects/:projectId/story/arcs/:arcId', async (request) => {
+  const params = request.params as { projectId: string; arcId: string };
+  return service.updateArc(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.arcId),
+    storyArcSchema.parse(request.body),
+  );
+});
+
+app.get('/api/projects/:projectId/story/plan-windows', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const query = request.query as { limit?: string; offset?: string };
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return service.story.getPlanWindowSummaries(
+    projectId,
+    parsePageValue(query.limit, 100, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/story/plan-windows/:windowId', async (request) => {
+  const params = request.params as { projectId: string; windowId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const window = service.story.getPlanWindow(projectId, storyStableIdSchema.parse(params.windowId));
+  if (!window) throw new AppError('NOT_FOUND', 'Plan window not found', 404);
+  return window;
+});
+app.post('/api/projects/:projectId/story/plan-windows/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  const body = storyPlanWindowRequestSchema.parse(request.body);
+  return reply
+    .code(202)
+    .send(
+      service.scheduleStoryPlanWindow(
+        idSchema.parse(params.projectId),
+        body.arcId,
+        body.startChapter,
+        body.endChapter,
+      ),
+    );
+});
+app.put('/api/projects/:projectId/story/plan-windows/:windowId', async (request) => {
+  const params = request.params as { projectId: string; windowId: string };
+  return service.updatePlanWindow(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.windowId),
+    storyPlanWindowResultSchema.parse(request.body),
+  );
+});
+
+app.get('/api/projects/:projectId/story/state', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return service.story.getStoryState(projectId);
 });
 app.put('/api/projects/:projectId/story/blueprint', async (request) => {
   const params = request.params as { projectId: string };
@@ -147,7 +270,14 @@ app.put('/api/projects/:projectId/story/plan/items/:planItemId', async (request)
 });
 app.get('/api/projects/:projectId/story/summaries', async (request) => {
   const params = request.params as { projectId: string };
-  return service.story.getSummaries(idSchema.parse(params.projectId));
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return service.story.getSummaries(
+    projectId,
+    parsePageValue(query.limit, 50, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
 });
 app.put('/api/projects/:projectId/story/settings', async (request) => {
   const params = request.params as { projectId: string };
@@ -174,17 +304,191 @@ app.post('/api/projects/:projectId/story/chapters/:planItemId/generate', async (
   const planItemId = storyStableIdSchema.parse(params.planItemId);
   const body = storyGenerationRequestSchema.parse(request.body ?? {});
   const plan = service.story.getPlan(projectId);
-  if (body.expectedPlanRevision !== undefined && plan?.revision !== body.expectedPlanRevision)
+  if (
+    body.expectedPlanRevision !== undefined &&
+    body.expectedPlanRevision !== null &&
+    plan?.revision !== body.expectedPlanRevision
+  )
     throw new AppError('REVISION_CONFLICT', 'Chapter plan revision is stale', 409);
-  const chapter = service
-    .listChapters(projectId)
-    .find((item) => item.storyPlanItemId === planItemId);
+  const chapter = service.chapters.getByPlanItem(projectId, planItemId);
   if (
     body.expectedChapterRevision !== undefined &&
     chapter?.revision !== body.expectedChapterRevision
   )
     throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
   return reply.code(202).send(service.scheduleStoryChapter(projectId, planItemId));
+});
+app.post(
+  '/api/projects/:projectId/story/chapters/:planItemId/generate-v2',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; planItemId: string };
+    const projectId = idSchema.parse(params.projectId);
+    const planItemId = storyStableIdSchema.parse(params.planItemId);
+    const body = storyGenerationRequestSchema.parse(request.body ?? {});
+    const plan = service.story.getPlan(projectId);
+    if (
+      body.expectedPlanRevision !== undefined &&
+      body.expectedPlanRevision !== null &&
+      plan?.revision !== body.expectedPlanRevision
+    )
+      throw new AppError('REVISION_CONFLICT', 'Chapter plan revision is stale', 409);
+    const chapter = service.chapters.getByPlanItem(projectId, planItemId);
+    if (
+      body.expectedChapterRevision !== undefined &&
+      chapter?.revision !== body.expectedChapterRevision
+    )
+      throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
+    return reply.code(202).send(service.scheduleStoryChapterV2(projectId, planItemId));
+  },
+);
+app.post('/api/projects/:projectId/story/batches', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleStoryBatch(
+        idSchema.parse(params.projectId),
+        storyGenerationBatchRequestSchema.parse(request.body),
+      ),
+    );
+});
+app.get('/api/projects/:projectId/story/batches', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return service.batches.list(
+    projectId,
+    parsePageValue(query.limit, 20, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/story/batches/:batchId/items', async (request) => {
+  const params = request.params as { projectId: string; batchId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const batchId = idSchema.parse(params.batchId);
+  const batch = service.batches.get(batchId);
+  if (!batch || batch.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Story generation batch not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return service.batches.items(
+    batchId,
+    parsePageValue(query.limit, 200, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.post(
+  '/api/projects/:projectId/story/batches/:batchId/items/:chapterNumber/retry',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; batchId: string; chapterNumber: string };
+    const projectId = idSchema.parse(params.projectId);
+    const batchId = idSchema.parse(params.batchId);
+    const batch = service.batches.get(batchId);
+    if (!batch || batch.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Story generation batch not found', 404);
+    const chapterNumber = Number(params.chapterNumber);
+    if (!Number.isInteger(chapterNumber))
+      throw new AppError('INVALID_BATCH_ITEM', 'Chapter number is invalid', 400);
+    return reply.code(202).send(service.retryStoryBatchItem(batchId, chapterNumber));
+  },
+);
+app.post(
+  '/api/projects/:projectId/story/batches/:batchId/items/:chapterNumber/skip',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; batchId: string; chapterNumber: string };
+    const projectId = idSchema.parse(params.projectId);
+    const batchId = idSchema.parse(params.batchId);
+    const batch = service.batches.get(batchId);
+    if (!batch || batch.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Story generation batch not found', 404);
+    const chapterNumber = Number(params.chapterNumber);
+    if (!Number.isInteger(chapterNumber))
+      throw new AppError('INVALID_BATCH_ITEM', 'Chapter number is invalid', 400);
+    const body = storyGenerationBatchSkipRequestSchema.parse(request.body);
+    return reply.code(200).send(service.skipStoryBatchItem(batchId, chapterNumber, body.reason));
+  },
+);
+app.post('/api/projects/:projectId/story/batches/:batchId/cancel', async (request, reply) => {
+  const params = request.params as { projectId: string; batchId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const batchId = idSchema.parse(params.batchId);
+  const batch = service.batches.get(batchId);
+  if (!batch || batch.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Story generation batch not found', 404);
+  return reply.code(202).send(service.cancelStoryBatch(batchId));
+});
+app.get('/api/projects/:projectId/story/continuity-checks', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return service.story.getContinuityChecks(
+    projectId,
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.post('/api/chapters/:id/story/analyze', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.code(202).send(service.scheduleStoryStateAnalysis(idSchema.parse(params.id)));
+});
+app.post('/api/chapters/:id/story/continuity', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.code(202).send(service.scheduleContinuityCheck(idSchema.parse(params.id)));
+});
+app.post('/api/chapters/:id/story/continuity/:checkId/accept', async (request) => {
+  const params = request.params as { id: string; checkId: string };
+  return storyEngine.acceptManualAnalysis(
+    idSchema.parse(params.id),
+    idSchema.parse(params.checkId),
+  );
+});
+app.post('/api/projects/:projectId/story/rebuild-continuity', async (request) => {
+  const params = request.params as { projectId: string };
+  return storyEngine.rebuildContinuity(
+    idSchema.parse(params.projectId),
+    storyContinuityRebuildRequestSchema.parse(request.body).fromChapter,
+  );
+});
+app.post('/api/projects/:projectId/story/continuity/keep-stale', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const fromChapter = storyContinuityRebuildRequestSchema.parse(request.body).fromChapter;
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return {
+    disposition: 'KEEP_STALE' as const,
+    fromChapter,
+    updated: service.story.markContinuityStale(
+      projectId,
+      fromChapter - 1,
+      'User kept the continuity suffix stale',
+    ),
+  };
+});
+app.get('/api/projects/:projectId/story/usage', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return {
+    summary: service.story.getUsageSummary(projectId),
+    recent: service.story.getUsage(
+      projectId,
+      parsePageValue(query.limit, 100, 200),
+      parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    ),
+  };
+});
+app.get('/api/projects/:projectId/story/context-diagnostics', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const query = request.query as { limit?: string; offset?: string };
+  return service.story.getContextDiagnostics(
+    projectId,
+    parsePageValue(query.limit, 20, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
 });
 app.post('/api/chapters/:id/story/summary', async (request, reply) => {
   const params = request.params as { id: string };
@@ -197,6 +501,12 @@ app.post('/api/chapters/:id/story/summary', async (request, reply) => {
   )
     throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
   return reply.code(202).send(service.scheduleStorySummary(chapter.id));
+});
+app.post('/api/projects/:projectId/story/summary/compact', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply
+    .code(202)
+    .send(service.scheduleStorySummaryCompaction(idSchema.parse(params.projectId)));
 });
 app.get('/api/projects/:id/render', async (request) => {
   const params = request.params as { id: string };
@@ -212,15 +522,40 @@ app.get('/api/projects/:id/render', async (request) => {
   return { ...row, url: `/api/assets/${row.id}` };
 });
 
+const errorCategoryByCode: Record<
+  string,
+  | 'INFRASTRUCTURE'
+  | 'PROVIDER'
+  | 'STRUCTURED_OUTPUT'
+  | 'CONTEXT'
+  | 'CONTINUITY'
+  | 'CANCELLED'
+  | 'BUDGET'
+> = {
+  INFRASTRUCTURE_ERROR: 'INFRASTRUCTURE',
+  HOST_ERROR: 'INFRASTRUCTURE',
+  PROVIDER_ERROR: 'PROVIDER',
+  STRUCTURED_OUTPUT_ERROR: 'STRUCTURED_OUTPUT',
+  CONTEXT_ERROR: 'CONTEXT',
+  CONTINUITY_ERROR: 'CONTINUITY',
+  INVALID_CONTINUITY: 'CONTINUITY',
+  CANCELLED: 'CANCELLED',
+  BUDGET_ERROR: 'BUDGET',
+};
+
 app.setErrorHandler((error, _request, reply) => {
-  if (error instanceof AppError)
+  if (error instanceof AppError) {
+    const category = errorCategoryByCode[error.code];
     return reply.code(error.statusCode).send({
       error: {
         code: error.code,
         message: error.message,
         retryable: error.retryable,
+        ...(category ? { category } : {}),
+        ...(error.diagnostics ? { diagnostics: error.diagnostics } : {}),
       },
     });
+  }
   if (error instanceof Error && error.name === 'ZodError')
     return reply
       .code(400)
@@ -309,11 +644,10 @@ app.get('/api/projects/:id', async (request) => {
   const id = idSchema.parse(params.id);
   const project = service.getProject(id);
   if (!project) throw new AppError('NOT_FOUND', 'Project not found', 404);
-  return { project, chapters: service.listChapters(id) };
-});
-app.patch('/api/projects/:id', async (request) => {
-  const params = request.params as { id: string };
-  return service.updateProject(idSchema.parse(params.id), projectUpdateSchema.parse(request.body));
+  const query = request.query as { includeChapters?: string };
+  return query.includeChapters === 'false'
+    ? { project }
+    : { project, chapters: service.listChapters(id) };
 });
 app.delete('/api/projects/:id', async (request, reply) => {
   const params = request.params as { id: string };
@@ -332,7 +666,28 @@ app.get('/api/chapters/:id/status', async (request) => {
 });
 app.get('/api/projects/:projectId/chapters', async (request) => {
   const params = request.params as { projectId: string };
-  return service.listChapters(idSchema.parse(params.projectId));
+  const projectId = idSchema.parse(params.projectId);
+  const query = request.query as {
+    limit?: string;
+    offset?: string;
+    search?: string;
+    status?: string;
+  };
+  const status = parseChapterStatus(query.status);
+  if (
+    query.limit !== undefined ||
+    query.offset !== undefined ||
+    query.search !== undefined ||
+    query.status !== undefined
+  )
+    return service.listChapterPage(
+      projectId,
+      parsePageValue(query.limit, 25, 100),
+      parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+      query.search ?? '',
+      status,
+    );
+  return service.listChapters(projectId);
 });
 app.post('/api/projects/:projectId/chapters', async (request, reply) => {
   const params = request.params as { projectId: string };
