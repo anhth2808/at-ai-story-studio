@@ -39,6 +39,15 @@ import {
   sceneRegenerationRequestSchema,
   sceneStatusSchema,
   visualStyleUpdateSchema,
+  visualProfileGenerateRequestSchema,
+  visualProfileUpdateSchema,
+  visualProfileApprovalSchema,
+  visualPromptRefinementRequestSchema,
+  sceneObjectResolutionUpdateSchema,
+  visualObjectKeySchema,
+  visualProfileReferenceUpdateSchema,
+  visualStylePresets,
+  visualStylePresetSchema,
   locationSchema,
   locationUpdateSchema,
   subtitleReplacementSchema,
@@ -436,6 +445,354 @@ app.put('/api/projects/:projectId/locations/:locationId', async (request) => {
   );
 });
 
+app.get('/api/projects/:projectId/visual-bible', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const query = request.query as { limit?: string; offset?: string };
+  const limit = parsePageValue(query.limit, 50, 100);
+  const offset = parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER);
+  return {
+    style: service.visual.getStyleBible(projectId),
+    characters: service.visual.listCharacterProfiles(projectId, limit, offset),
+    locations: service.visual.listLocationProfiles(projectId, limit, offset),
+    objects: service.visual.listObjectProfiles(projectId, limit, offset),
+  };
+});
+app.get('/api/projects/:projectId/visual-bible/style/revisions', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listStyleBibleRevisions(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 100, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.post('/api/projects/:projectId/visual-bible/style/preset', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const body = request.body as { preset?: unknown };
+  const preset = visualStylePresetSchema.parse(body?.preset);
+  const current = service.getVisualStyle(projectId);
+  return service.saveVisualStyle(projectId, {
+    ...visualStylePresets[preset],
+    ...(current ? { expectedRevision: current.revision } : {}),
+  });
+});
+app.get('/api/projects/:projectId/visual-bible/characters', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listCharacterProfiles(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/visual-bible/characters/:characterId', async (request) => {
+  const params = request.params as { projectId: string; characterId: string };
+  const profile = service.visual.getCharacterProfile(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.characterId),
+  );
+  if (!profile) throw new AppError('NOT_FOUND', 'Character visual profile not found', 404);
+  return profile;
+});
+app.get(
+  '/api/projects/:projectId/visual-bible/characters/:characterId/revisions',
+  async (request) => {
+    const params = request.params as { projectId: string; characterId: string };
+    const query = request.query as { limit?: string; offset?: string };
+    return service.visual.listCharacterProfileRevisions(
+      idSchema.parse(params.projectId),
+      storyStableIdSchema.parse(params.characterId),
+      parsePageValue(query.limit, 50, 100),
+      parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/visual-bible/characters/:characterId/generate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; characterId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualProfileGeneration(
+          idSchema.parse(params.projectId),
+          'CHARACTER',
+          storyStableIdSchema.parse(params.characterId),
+          visualProfileGenerateRequestSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put('/api/projects/:projectId/visual-bible/characters/:characterId', async (request) => {
+  const params = request.params as { projectId: string; characterId: string };
+  return service.visual.updateCharacterProfile(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.characterId),
+    visualProfileUpdateSchema.parse(request.body),
+  );
+});
+app.put(
+  '/api/projects/:projectId/visual-bible/characters/:characterId/references',
+  async (request) => {
+    const params = request.params as { projectId: string; characterId: string };
+    return service.visual.updateCharacterProfileReferences(
+      idSchema.parse(params.projectId),
+      storyStableIdSchema.parse(params.characterId),
+      visualProfileReferenceUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/visual-bible/characters/:characterId/approve',
+  async (request) => {
+    const params = request.params as { projectId: string; characterId: string };
+    const body = visualProfileApprovalSchema.parse(request.body);
+    return service.visual.approveCharacterProfile(
+      idSchema.parse(params.projectId),
+      storyStableIdSchema.parse(params.characterId),
+      body.expectedRevision,
+    );
+  },
+);
+app.get('/api/projects/:projectId/visual-bible/locations', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listLocationProfiles(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/visual-bible/locations/:locationId', async (request) => {
+  const params = request.params as { projectId: string; locationId: string };
+  const profile = service.visual.getLocationProfile(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.locationId),
+  );
+  if (!profile) throw new AppError('NOT_FOUND', 'Location visual profile not found', 404);
+  return profile;
+});
+app.get(
+  '/api/projects/:projectId/visual-bible/locations/:locationId/revisions',
+  async (request) => {
+    const params = request.params as { projectId: string; locationId: string };
+    const query = request.query as { limit?: string; offset?: string };
+    return service.visual.listLocationProfileRevisions(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.locationId),
+      parsePageValue(query.limit, 50, 100),
+      parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/visual-bible/locations/:locationId/generate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; locationId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualProfileGeneration(
+          idSchema.parse(params.projectId),
+          'LOCATION',
+          idSchema.parse(params.locationId),
+          visualProfileGenerateRequestSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put('/api/projects/:projectId/visual-bible/locations/:locationId', async (request) => {
+  const params = request.params as { projectId: string; locationId: string };
+  return service.visual.updateLocationProfile(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.locationId),
+    visualProfileUpdateSchema.parse(request.body),
+  );
+});
+app.put(
+  '/api/projects/:projectId/visual-bible/locations/:locationId/references',
+  async (request) => {
+    const params = request.params as { projectId: string; locationId: string };
+    return service.visual.updateLocationProfileReferences(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.locationId),
+      visualProfileReferenceUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.post('/api/projects/:projectId/visual-bible/locations/:locationId/approve', async (request) => {
+  const params = request.params as { projectId: string; locationId: string };
+  const body = visualProfileApprovalSchema.parse(request.body);
+  return service.visual.approveLocationProfile(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.locationId),
+    body.expectedRevision,
+  );
+});
+app.get('/api/projects/:projectId/visual-bible/objects', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listObjectProfiles(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/visual-bible/objects/:objectKey/revisions', async (request) => {
+  const params = request.params as { projectId: string; objectKey: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listObjectProfileRevisions(
+    idSchema.parse(params.projectId),
+    visualObjectKeySchema.parse(params.objectKey),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/visual-bible/objects/:objectKey', async (request) => {
+  const params = request.params as { projectId: string; objectKey: string };
+  const profile = service.visual.getObjectProfile(
+    idSchema.parse(params.projectId),
+    visualObjectKeySchema.parse(params.objectKey),
+  );
+  if (!profile) throw new AppError('NOT_FOUND', 'Object visual profile not found', 404);
+  return profile;
+});
+app.post(
+  '/api/projects/:projectId/visual-bible/objects/:objectKey/generate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; objectKey: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualProfileGeneration(
+          idSchema.parse(params.projectId),
+          'OBJECT',
+          visualObjectKeySchema.parse(params.objectKey),
+          visualProfileGenerateRequestSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put('/api/projects/:projectId/visual-bible/objects/:objectKey', async (request) => {
+  const params = request.params as { projectId: string; objectKey: string };
+  return service.visual.updateObjectProfile(
+    idSchema.parse(params.projectId),
+    visualObjectKeySchema.parse(params.objectKey),
+    visualProfileUpdateSchema.parse(request.body),
+  );
+});
+app.put('/api/projects/:projectId/visual-bible/objects/:objectKey/references', async (request) => {
+  const params = request.params as { projectId: string; objectKey: string };
+  return service.visual.updateObjectProfileReferences(
+    idSchema.parse(params.projectId),
+    visualObjectKeySchema.parse(params.objectKey),
+    visualProfileReferenceUpdateSchema.parse(request.body),
+  );
+});
+app.post('/api/projects/:projectId/visual-bible/objects/:objectKey/approve', async (request) => {
+  const params = request.params as { projectId: string; objectKey: string };
+  const body = visualProfileApprovalSchema.parse(request.body);
+  return service.visual.approveObjectProfile(
+    idSchema.parse(params.projectId),
+    visualObjectKeySchema.parse(params.objectKey),
+    body.expectedRevision,
+  );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/visual-prompt-package', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const packageDto = service.visual.getCurrentPromptPackage(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+  );
+  if (!packageDto) throw new AppError('NOT_FOUND', 'Visual prompt package not found', 404);
+  return packageDto;
+});
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/visual-prompt-package/rebuild',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualPromptBuild(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+        ),
+      );
+  },
+);
+app.get('/api/projects/:projectId/scenes/:sceneId/visual-object-resolutions', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return service.visual.listSceneObjectResolutions(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+  );
+});
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/visual-object-resolutions/:sourceLabel',
+  async (request) => {
+    const params = request.params as { projectId: string; sceneId: string; sourceLabel: string };
+    return service.visual.saveSceneObjectResolution(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      params.sourceLabel,
+      sceneObjectResolutionUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.get('/api/projects/:projectId/chapters/:chapterId/visual-prompt-packages', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.visual.listChapterPromptPackages(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.chapterId),
+    parsePageValue(query.limit, 100, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.post(
+  '/api/projects/:projectId/chapters/:chapterId/visual-prompt-packages/rebuild',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; chapterId: string };
+    const query = request.query as { limit?: string; offset?: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualPromptBatch(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.chapterId),
+          parsePageValue(query.limit, 200, 200),
+          parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+        ),
+      );
+  },
+);
+app.get('/api/projects/:projectId/visual-prompt-packages/:packageId', async (request) => {
+  const params = request.params as { projectId: string; packageId: string };
+  const packageDto = service.visual.getPromptPackage(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.packageId),
+  );
+  if (!packageDto) throw new AppError('NOT_FOUND', 'Visual prompt package not found', 404);
+  return packageDto;
+});
+app.post(
+  '/api/projects/:projectId/visual-prompt-packages/:packageId/refine',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; packageId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleVisualPromptRefinement(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.packageId),
+          visualPromptRefinementRequestSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
 app.get('/api/projects/:projectId/story/state', async (request) => {
   const params = request.params as { projectId: string };
   const projectId = idSchema.parse(params.projectId);

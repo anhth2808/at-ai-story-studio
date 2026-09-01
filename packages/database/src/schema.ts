@@ -1,5 +1,13 @@
 import { sql } from 'drizzle-orm';
-import { integer, real, sqliteTable, text, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
+import {
+  integer,
+  index,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core';
 
 const timestamps = {
   createdAt: text('created_at').notNull(),
@@ -793,10 +801,22 @@ export const visualStyleSettings = sqliteTable(
     styleDescription: text('style_description').notNull().default(''),
     medium: text('medium').notNull().default(''),
     realism: text('realism').notNull().default(''),
+    overallStyle: text('overall_style').notNull().default(''),
     colorPalette: text('color_palette').notNull().default(''),
     cinematicStyle: text('cinematic_style').notNull().default(''),
+    cinematicLanguage: text('cinematic_language').notNull().default(''),
+    lightingStyle: text('lighting_style').notNull().default(''),
+    textureStyle: text('texture_style').notNull().default(''),
+    environmentStyle: text('environment_style').notNull().default(''),
+    characterRenderingStyle: text('character_rendering_style').notNull().default(''),
+    cameraStyle: text('camera_style').notNull().default(''),
+    compositionStyle: text('composition_style').notNull().default(''),
+    moodKeywords: text('mood_keywords').notNull().default('[]'),
     aspectRatio: text('aspect_ratio').notNull().default('16:9'),
     promptSuffix: text('prompt_suffix').notNull().default(''),
+    positivePromptSuffix: text('positive_prompt_suffix').notNull().default(''),
+    negativePrompt: text('negative_prompt').notNull().default(''),
+    referenceAssetIds: text('reference_asset_ids').notNull().default('[]'),
     inputFingerprint: text('input_fingerprint').notNull(),
     rowVersion: integer('row_version').notNull().default(1),
     isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
@@ -962,5 +982,225 @@ export const sceneCharacters = sqliteTable(
   (table) => ({
     scene: index('scene_characters_scene_idx').on(table.sceneRevisionId),
     character: index('scene_characters_character_idx').on(table.characterId, table.sceneRevisionId),
+  }),
+);
+export const characterVisualProfiles = sqliteTable(
+  'character_visual_profiles',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    characterId: text('character_id').notNull(),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull().default('DRAFT'),
+    payload: text('payload').notNull(),
+    promptFragment: text('prompt_fragment').notNull().default(''),
+    referenceAssetIds: text('reference_asset_ids').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    rowVersion: integer('row_version').notNull().default(1),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('character_visual_profiles_revision_idx').on(
+      table.projectId,
+      table.characterId,
+      table.revision,
+    ),
+    current: uniqueIndex('character_visual_profiles_current_idx')
+      .on(table.projectId, table.characterId)
+      .where(sql`${table.isCurrent} = 1`),
+    projectStatus: index('character_visual_profiles_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.characterId,
+    ),
+  }),
+);
+
+export const locationVisualProfiles = sqliteTable(
+  'location_visual_profiles',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    locationId: text('location_id')
+      .notNull()
+      .references(() => locations.id, { onDelete: 'cascade' }),
+    locationName: text('location_name').notNull(),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull().default('DRAFT'),
+    payload: text('payload').notNull(),
+    promptFragment: text('prompt_fragment').notNull().default(''),
+    referenceAssetIds: text('reference_asset_ids').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    rowVersion: integer('row_version').notNull().default(1),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('location_visual_profiles_revision_idx').on(
+      table.projectId,
+      table.locationId,
+      table.revision,
+    ),
+    current: uniqueIndex('location_visual_profiles_current_idx')
+      .on(table.projectId, table.locationId)
+      .where(sql`${table.isCurrent} = 1`),
+    projectStatus: index('location_visual_profiles_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.locationId,
+    ),
+  }),
+);
+
+export const visualObjectProfiles = sqliteTable(
+  'visual_object_profiles',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    objectKey: text('object_key').notNull(),
+    name: text('name').notNull(),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull().default('DRAFT'),
+    payload: text('payload').notNull(),
+    promptFragment: text('prompt_fragment').notNull().default(''),
+    referenceAssetIds: text('reference_asset_ids').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    rowVersion: integer('row_version').notNull().default(1),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('visual_object_profiles_revision_idx').on(
+      table.projectId,
+      table.objectKey,
+      table.revision,
+    ),
+    current: uniqueIndex('visual_object_profiles_current_idx')
+      .on(table.projectId, table.objectKey)
+      .where(sql`${table.isCurrent} = 1`),
+    projectStatus: index('visual_object_profiles_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.objectKey,
+    ),
+  }),
+);
+
+export const sceneObjectResolutions = sqliteTable(
+  'scene_object_resolutions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    sourceLabel: text('source_label').notNull(),
+    normalizedKey: text('normalized_key').notNull(),
+    visualObjectProfileId: text('visual_object_profile_id').references(
+      () => visualObjectProfiles.id,
+      {
+        onDelete: 'set null',
+      },
+    ),
+    resolutionStatus: text('resolution_status').notNull().default('UNRESOLVED'),
+    ...timestamps,
+  },
+  (table) => ({
+    sceneKey: uniqueIndex('scene_object_resolutions_scene_key_idx').on(
+      table.sceneRevisionId,
+      table.normalizedKey,
+    ),
+    scene: index('scene_object_resolutions_scene_idx').on(
+      table.sceneRevisionId,
+      table.resolutionStatus,
+    ),
+    profile: index('scene_object_resolutions_profile_idx').on(
+      table.visualObjectProfileId,
+      table.sceneRevisionId,
+    ),
+  }),
+);
+
+export const visualPromptPackages = sqliteTable(
+  'visual_prompt_packages',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull().default('CURRENT'),
+    payload: text('payload').notNull(),
+    consistencyStatus: text('consistency_status').notNull(),
+    consistencyIssues: text('consistency_issues').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    promptTemplateVersion: text('prompt_template_version').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    rowVersion: integer('row_version').notNull().default(1),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('visual_prompt_packages_revision_idx').on(
+      table.sceneRevisionId,
+      table.revision,
+    ),
+    current: uniqueIndex('visual_prompt_packages_current_idx')
+      .on(table.sceneRevisionId)
+      .where(sql`${table.isCurrent} = 1`),
+    projectStatus: index('visual_prompt_packages_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.sceneRevisionId,
+    ),
+  }),
+);
+
+export const visualPromptPackageDependencies = sqliteTable(
+  'visual_prompt_package_dependencies',
+  {
+    packageId: text('package_id')
+      .notNull()
+      .references(() => visualPromptPackages.id, { onDelete: 'cascade' }),
+    dependencyKind: text('dependency_kind').notNull(),
+    dependencyKey: text('dependency_key').notNull(),
+    dependencyRevisionId: text('dependency_revision_id').notNull(),
+    dependencyRevision: integer('dependency_revision').notNull(),
+    dependencyFingerprint: text('dependency_fingerprint').notNull(),
+  },
+  (table) => ({
+    primary: primaryKey({
+      columns: [table.packageId, table.dependencyKind, table.dependencyKey],
+      name: 'visual_prompt_package_dependencies_primary',
+    }),
+    lookup: index('visual_prompt_package_dependencies_lookup_idx').on(
+      table.dependencyKind,
+      table.dependencyKey,
+      table.dependencyRevisionId,
+    ),
+    package: index('visual_prompt_package_dependencies_package_idx').on(table.packageId),
   }),
 );

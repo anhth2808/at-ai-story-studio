@@ -70,6 +70,28 @@
   scene smoke requires configured OMP authentication and an existing generated
   chapter.
 
+## Visual Consistency limits
+
+- The Visual Consistency Layer produces structured profiles and deterministic
+  prompt packages only. It does not generate pixels, call an image/video
+  provider, upload generated media, or hand off to rendering automatically.
+- Generated profile candidates require explicit review and approval. Provider
+  output quality, identity stability, and visual continuity still require
+  human inspection.
+- Profile and package payloads are intentionally bounded. Context compilation
+  uses Story definitions, compact StoryState, selected locations, relevant
+  Scenes, and the Style Bible; it does not load full novel prose.
+- Object normalization is conservative. Ambiguous names remain unresolved
+  until a reviewer selects an approved profile explicitly.
+- Reference image slots accept only existing project-owned `READY` assets with
+  the matching reference role. The Visual Bible does not add a duplicate
+  upload path.
+- Optional prompt refinement is fingerprint-checked and schema-validated, but
+  an OMP model can still return unusable creative text. Canonical package text
+  remains the deterministic source of truth.
+- Real visual quality cannot be judged from rendered pixels because image
+  generation is outside this change.
+
 ## Verification record
 
 The supported Bun OMP host passed:
@@ -115,6 +137,15 @@ cannot be judged from rendered pixels because pixel generation is outside
 this change. Earlier real attempts also demonstrated strict-contract
 failures for out-of-bounds source ranges and copied DTO metadata; those
 results were rejected before persistence.
+
+The Visual Consistency live smoke also passed OMP readiness, persisted valid
+character and location candidates as `DRAFT`, and built a `CURRENT` package
+after explicit approval. The package correctly returned `FAIL` with bounded
+warnings for the intentionally missing Style Bible and unresolved recurring
+object. Manual inspection found concise canonical profile payloads, visible
+Scene action, and deterministic dependency fingerprints. Several earlier
+attempts returned scalar values for array fields, so strict validation rejected
+them without profile persistence; this remains a provider adherence weakness.
 
 These limits are deliberate boundaries for the first working video and the
 bounded long-story authoring workflow. They do not enable character-memory

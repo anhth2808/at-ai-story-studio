@@ -10,6 +10,9 @@ import {
   StoryBatchRepository,
   StoryRepository,
   SceneRepository,
+  SceneObjectResolutionRepository,
+  VisualProfileRepository,
+  VisualPromptPackageRepository,
   WorkflowRepository,
   type ClaimedStep,
   type ChapterStatusFilter,
@@ -35,7 +38,9 @@ import {
   sceneGenerationRequestSchema,
   scenePromptRequestSchema,
   sceneRegenerationRequestSchema,
-  visualStyleUpdateSchema,
+  visualProfileGenerateRequestSchema,
+  visualObjectKeySchema,
+  visualPromptRefinementRequestSchema,
   storyArcSchema,
   storyGenerationBatchRequestSchema,
   storyPlanWindowResultSchema,
@@ -53,6 +58,7 @@ import {
   type StoryGenerationBatchItem,
   type StoryGenerationBatchRequest,
   type StoryPlanWindowResult,
+  type VisualProfileGenerationKind,
   type WorkflowStatus,
   renderConfigSchema,
 } from '@studio/shared';
@@ -65,8 +71,10 @@ import {
   type StoryEngine,
 } from './story-engine.js';
 import { buildSceneGenerationContext, buildSceneRegenerationContext } from './scene-context.js';
+import type { AiAgentProgress } from './omp-agent.js';
 import { SceneEngine } from './scene-engine.js';
-export { SceneEngine };
+import { VisualConsistencyService, createVisualConsistencyService } from './visual-service.js';
+export { SceneEngine, VisualConsistencyService, createVisualConsistencyService };
 import {
   renderArcPlanningPrompt,
   renderBlueprintPrompt,
@@ -86,7 +94,6 @@ export type StudioContext = {
 };
 const fingerprint = (value: unknown): string =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
-
 export class StudioService {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
@@ -95,6 +102,10 @@ export class StudioService {
   readonly batches: StoryBatchRepository;
   readonly workflow: WorkflowRepository;
   readonly assets: AssetRepository;
+  readonly visualProfiles: VisualProfileRepository;
+  readonly sceneObjectResolutions: SceneObjectResolutionRepository;
+  readonly visualPackages: VisualPromptPackageRepository;
+  readonly visual: VisualConsistencyService;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
@@ -103,6 +114,18 @@ export class StudioService {
     this.batches = new StoryBatchRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
+    this.visualProfiles = new VisualProfileRepository(context.database);
+    this.sceneObjectResolutions = new SceneObjectResolutionRepository(context.database);
+    this.visualPackages = new VisualPromptPackageRepository(context.database);
+    this.visual = new VisualConsistencyService(
+      this.scenes,
+      this.chapters,
+      this.story,
+      this.visualProfiles,
+      this.sceneObjectResolutions,
+      this.visualPackages,
+      this.assets,
+    );
   }
   createProject(input: ProjectInput): ProjectDto {
     return this.projects.create(input);
@@ -218,21 +241,13 @@ export class StudioService {
   }
   getVisualStyle(projectId: Id) {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
-    return this.scenes.getVisualStyle(projectId);
+    return this.visual.getStyleBible(projectId);
   }
   saveVisualStyle(projectId: Id, input: unknown) {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
-    const value = visualStyleUpdateSchema.parse(input);
-    const { expectedRevision, ...style } = value;
-    try {
-      const saved = this.scenes.saveVisualStyle(projectId, style, expectedRevision);
-      this.invalidateSceneWorkflowForProject(projectId, 'Visual style changed');
-      return saved;
-    } catch (error) {
-      if (error instanceof Error && error.message === 'Revision conflict')
-        throw new AppError('REVISION_CONFLICT', error.message, 409);
-      throw error;
-    }
+    const saved = this.visual.saveStyleBible(projectId, input);
+    this.invalidateSceneVisualWorkflowForProject(projectId, 'Visual style changed');
+    return saved;
   }
 
   listLocations(projectId: Id, limit = 100, offset = 0) {
@@ -266,7 +281,7 @@ export class StudioService {
       const sceneIds = this.scenes.listCurrentSceneIds(null, projectId, locationId);
       this.workflow.invalidateEntities(
         sceneIds,
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
         'Location changed',
       );
       return saved;
@@ -290,7 +305,7 @@ export class StudioService {
       const saved = this.scenes.updateScene(scene.id, sceneEditSchema.parse(input));
       this.workflow.invalidateEntities(
         [scene.id],
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
         'Scene changed',
       );
       return saved;
@@ -323,19 +338,16 @@ export class StudioService {
     const sceneIds = this.scenes.listCurrentSceneIds(chapterId);
     this.workflow.invalidateEntities(
       sceneIds,
-      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
       error,
     );
   }
 
-  private invalidateSceneWorkflowForProject(projectId: Id, error = 'Scene input changed'): void {
-    for (const chapter of this.chapters.listMetadata(projectId)) {
-      this.workflow.invalidateSteps(chapter.id, ['GENERATE_SCENES'], error);
-    }
+  private invalidateSceneVisualWorkflowForProject(projectId: Id, error: string): void {
     const sceneIds = this.scenes.listProjectCurrentSceneIds(projectId);
     this.workflow.invalidateEntities(
       sceneIds,
-      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
       error,
     );
   }
@@ -517,6 +529,155 @@ export class StudioService {
     }
     return { executionId, jobIds, skippedChapterIds };
   }
+  scheduleVisualProfileGeneration(
+    projectId: Id,
+    kind: VisualProfileGenerationKind,
+    subjectId: string,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    if (!['CHARACTER', 'LOCATION', 'OBJECT'].includes(kind))
+      throw new AppError('INVALID_INPUT', 'Unknown visual profile kind', 400);
+    const request = visualProfileGenerateRequestSchema.parse(requestInput);
+    const visualSubjectId = kind === 'OBJECT' ? visualObjectKeySchema.parse(subjectId) : subjectId;
+    if (
+      kind === 'CHARACTER' &&
+      !this.story
+        .getBlueprint(projectId)
+        ?.blueprint.characters.some((item) => item.id === visualSubjectId)
+    )
+      throw new AppError('NOT_FOUND', 'Story character not found', 404);
+    if (kind === 'LOCATION' && !this.scenes.getLocation(projectId, visualSubjectId))
+      throw new AppError('NOT_FOUND', 'Location not found', 404);
+    if (kind === 'OBJECT' && !visualSubjectId)
+      throw new AppError('INVALID_INPUT', 'Object key is required', 400);
+    const settings = this.story.getSettings(projectId);
+    const executionId = this.workflow.createExecution(projectId, 'VISUAL_CONSISTENCY');
+    const operation = `${kind}_VISUAL_PROFILE`;
+    const stepType = `GENERATE_${operation}`;
+    const stepId = this.workflow.createStep(
+      executionId,
+      `visual-profile:${kind.toLocaleLowerCase('en-US')}:${visualSubjectId}`,
+      stepType,
+      visualSubjectId,
+      fingerprint({ operation, projectId, subjectId: visualSubjectId, request }),
+      settings?.generation.maxRetries ?? 3,
+      { projectId, kind, subjectId: visualSubjectId, instructions: request.instructions },
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob(stepType, visualSubjectId, stepId),
+    };
+  }
+
+  scheduleVisualPromptBuild(
+    projectId: Id,
+    sceneId: Id,
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const scene = this.getScene(projectId, sceneId);
+    const executionId = this.workflow.createExecution(projectId, 'VISUAL_CONSISTENCY');
+    const inputFingerprint = fingerprint({
+      operation: 'BUILD_VISUAL_PROMPT',
+      projectId,
+      sceneId: scene.id,
+      sceneRevision: scene.revision,
+    });
+    const stepId = this.workflow.createStep(
+      executionId,
+      `visual-prompt:${scene.id}:${scene.revision}`,
+      'BUILD_VISUAL_PROMPT',
+      scene.id,
+      inputFingerprint,
+      3,
+      { projectId, sceneId: scene.id, sceneRevision: scene.revision },
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('BUILD_VISUAL_PROMPT', scene.id, stepId),
+    };
+  }
+
+  scheduleVisualPromptBatch(
+    projectId: Id,
+    chapterId: Id,
+    limit = 200,
+    offset = 0,
+  ): { executionId: Id; jobIds: Id[]; stepIds: Id[] } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter || chapter.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const scenes = this.scenes.listScenes(
+      chapterId,
+      Math.min(200, Math.max(1, limit)),
+      Math.max(0, offset),
+    );
+    const executionId = this.workflow.createExecution(projectId, 'VISUAL_CONSISTENCY');
+    const jobIds: Id[] = [];
+    const stepIds: Id[] = [];
+    for (const scene of scenes) {
+      const inputFingerprint = fingerprint({
+        operation: 'BUILD_VISUAL_PROMPT',
+        projectId,
+        sceneId: scene.id,
+        sceneRevision: scene.revision,
+      });
+      const stepId = this.workflow.createStep(
+        executionId,
+        `visual-prompt:${scene.id}:${scene.revision}`,
+        'BUILD_VISUAL_PROMPT',
+        scene.id,
+        inputFingerprint,
+        3,
+        { projectId, sceneId: scene.id, sceneRevision: scene.revision },
+      );
+      stepIds.push(stepId);
+      jobIds.push(this.workflow.createJob('BUILD_VISUAL_PROMPT', scene.id, stepId));
+    }
+    return { executionId, jobIds, stepIds };
+  }
+
+  scheduleVisualPromptRefinement(
+    projectId: Id,
+    packageId: Id,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const request = visualPromptRefinementRequestSchema.parse(requestInput);
+    const packageDto = this.visualPackages.get(projectId, packageId);
+    if (!packageDto) throw new AppError('NOT_FOUND', 'Visual prompt package not found', 404);
+    if (packageDto.status !== 'CURRENT')
+      throw new AppError('STALE_INPUT', 'Visual prompt package is stale', 409);
+    if (
+      request.expectedPackageRevision !== undefined &&
+      request.expectedPackageRevision !== packageDto.revision
+    )
+      throw new AppError('REVISION_CONFLICT', 'Visual prompt package revision is stale', 409);
+    const executionId = this.workflow.createExecution(projectId, 'VISUAL_CONSISTENCY');
+    const inputFingerprint = fingerprint({
+      operation: 'VISUAL_PROMPT_REFINEMENT',
+      projectId,
+      packageId,
+      packageRevision: packageDto.revision,
+      instructions: request.instructions,
+    });
+    const stepId = this.workflow.createStep(
+      executionId,
+      `visual-prompt-refinement:${packageId}:${packageDto.revision}`,
+      'REFINE_VISUAL_PROMPT',
+      packageId,
+      inputFingerprint,
+      3,
+      { projectId, packageId, request },
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('REFINE_VISUAL_PROMPT', packageId, stepId),
+    };
+  }
+
   scheduleStoryBlueprint(projectId: Id): { executionId: Id; jobId: Id } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     const settings = this.story.getSettings(projectId);
@@ -1199,10 +1360,111 @@ export class WorkerExecutor {
     private readonly tts: TtsProvider = new EdgeTtsProvider(context.runner),
     private readonly storyEngine?: StoryEngine,
     private readonly sceneEngine?: SceneEngine,
+    private readonly visualService?: VisualConsistencyService,
   ) {
     this.workflow = new WorkflowRepository(context.database);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    if (
+      step.type === 'GENERATE_CHARACTER_VISUAL_PROFILE' ||
+      step.type === 'GENERATE_LOCATION_VISUAL_PROFILE' ||
+      step.type === 'GENERATE_OBJECT_VISUAL_PROFILE'
+    ) {
+      if (!this.visualService)
+        throw new AppError(
+          'CONFIGURATION_ERROR',
+          'Visual Consistency worker is not configured',
+          500,
+        );
+      const payload = this.parseStepPayload(step);
+      const projectId = this.stepString(payload, 'projectId');
+      const subjectId = this.stepString(payload, 'subjectId');
+      const options = {
+        projectId,
+        subjectId,
+        instructions: typeof payload.instructions === 'string' ? payload.instructions : '',
+        workflowStepId: step.id,
+        signal,
+        isCurrent: () => this.stepIsCurrent(step),
+        onProgress: (event: Parameters<AiAgentProgress>[0]) => {
+          const progress = { STARTING: 0.05, AUTHENTICATING: 0.1, GENERATING: 0.5, PARSING: 0.9 }[
+            event.stage
+          ];
+          this.workflow.progress(step, progress, event.message);
+        },
+      };
+      if (step.type === 'GENERATE_CHARACTER_VISUAL_PROFILE')
+        await this.visualService.generateCharacterProfile({ ...options, characterId: subjectId });
+      else if (step.type === 'GENERATE_LOCATION_VISUAL_PROFILE')
+        await this.visualService.generateLocationProfile({ ...options, locationId: subjectId });
+      else
+        await this.visualService.generateObjectProfile({
+          ...options,
+          objectKey: subjectId,
+          objectName: subjectId,
+        });
+      return;
+    }
+    if (step.type === 'BUILD_VISUAL_PROMPT') {
+      if (!this.visualService)
+        throw new AppError(
+          'CONFIGURATION_ERROR',
+          'Visual Consistency worker is not configured',
+          500,
+        );
+      if (!this.stepIsCurrent(step))
+        throw new AppError('STALE_INPUT', 'Visual prompt build input is stale', 409);
+      const payload = this.parseStepPayload(step);
+      const projectId = this.stepString(payload, 'projectId');
+      const sceneId = this.stepString(payload, 'sceneId');
+      const expectedSceneRevision =
+        payload.sceneRevision === undefined ? undefined : this.stepNumber(payload, 'sceneRevision');
+      this.visualService.buildPromptPackage({
+        projectId,
+        sceneId,
+        expectedSceneRevision,
+        generationId: step.id,
+      });
+      this.workflow.progress(step, 1, 'Visual prompt package is current');
+      return;
+    }
+    if (step.type === 'REFINE_VISUAL_PROMPT') {
+      if (!this.visualService)
+        throw new AppError(
+          'CONFIGURATION_ERROR',
+          'Visual Consistency worker is not configured',
+          500,
+        );
+      const payload = this.parseStepPayload(step);
+      const projectId = this.stepString(payload, 'projectId');
+      const packageId = this.stepString(payload, 'packageId');
+      const requestValue: Record<string, unknown> =
+        payload.request && typeof payload.request === 'object' && !Array.isArray(payload.request)
+          ? (payload.request as Record<string, unknown>)
+          : {};
+      const request = {
+        instructions:
+          typeof requestValue.instructions === 'string' ? requestValue.instructions : '',
+        ...(typeof requestValue.expectedPackageRevision === 'number'
+          ? { expectedPackageRevision: requestValue.expectedPackageRevision }
+          : {}),
+      };
+      await this.visualService.refinePromptPackage(
+        projectId,
+        packageId,
+        request,
+        step.id,
+        signal,
+        (event) => {
+          const progress = { STARTING: 0.05, AUTHENTICATING: 0.1, GENERATING: 0.5, PARSING: 0.9 }[
+            event.stage
+          ];
+          this.workflow.progress(step, progress, event.message);
+        },
+        () => this.stepIsCurrent(step),
+      );
+      return;
+    }
     if (
       step.type === 'GENERATE_SCENES' ||
       step.type === 'REGENERATE_SCENE' ||
@@ -1267,6 +1529,30 @@ export class WorkerExecutor {
       .get(step.id, step.attemptId, this.workerId, step.input_fingerprint);
     return Boolean(current);
   }
+  private parseStepPayload(step: ClaimedStep): Record<string, unknown> {
+    try {
+      const payload = JSON.parse(step.payload || '{}') as unknown;
+      if (payload && typeof payload === 'object' && !Array.isArray(payload))
+        return payload as Record<string, unknown>;
+    } catch {
+      // Fall through to the typed workflow error below.
+    }
+    throw new AppError('INVALID_INPUT', 'Workflow step payload is invalid', 400);
+  }
+  private stepNumber(payload: Record<string, unknown>, key: string): number {
+    const value = payload[key];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1)
+      throw new AppError('INVALID_INPUT', `Workflow step ${key} must be a positive integer`, 400);
+    return value;
+  }
+
+  private stepString(payload: Record<string, unknown>, key: string): string {
+    const value = payload[key];
+    if (typeof value !== 'string' || !value.trim())
+      throw new AppError('INVALID_INPUT', `Workflow step ${key} is required`, 400);
+    return value;
+  }
+
   private async executeTts(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     const segment = this.context.database.sqlite
       .prepare(

@@ -257,9 +257,12 @@ export const sceneCharacterVisualStateSchema = z
     action: boundedString(500).default(''),
     position: boundedString(240).default(''),
     heldObjects: boundedStringArray(20, 300).default([]),
+    variantKey: boundedString(120).optional(),
+    appearanceOverride: boundedString(500).optional(),
   })
   .strict();
 export type SceneCharacterVisualState = z.infer<typeof sceneCharacterVisualStateSchema>;
+export type SceneCharacterVisualStateInput = z.input<typeof sceneCharacterVisualStateSchema>;
 
 export const sceneCharacterSchema = z
   .object({
@@ -430,17 +433,31 @@ export const visualStyleSettingsSchema = z
     styleDescription: z.string().max(2_000).default(''),
     medium: boundedString(120).default(''),
     realism: boundedString(120).default(''),
+    overallStyle: boundedString(500).default(''),
     colorPalette: boundedString(500).default(''),
     cinematicStyle: boundedString(500).default(''),
+    cinematicLanguage: boundedString(500).default(''),
+    lightingStyle: boundedString(500).default(''),
+    textureStyle: boundedString(500).default(''),
+    environmentStyle: boundedString(500).default(''),
+    characterRenderingStyle: boundedString(500).default(''),
+    cameraStyle: boundedString(500).default(''),
+    compositionStyle: boundedString(500).default(''),
+    moodKeywords: boundedStringArray(20, 120).default([]),
     aspectRatio: z
       .string()
       .trim()
       .regex(/^[1-9][0-9]{0,3}:[1-9][0-9]{0,3}$/)
       .default('16:9'),
     promptSuffix: boundedString(1_000).default(''),
+    positivePromptSuffix: boundedString(1_000).default(''),
+    negativePrompt: boundedString(2_000).default(''),
+    referenceAssetIds: z.array(z.string().trim().min(1).max(120)).max(12).default([]),
   })
   .strict();
-export type VisualStyleSettings = z.infer<typeof visualStyleSettingsSchema>;
+type VisualStyleSettingsSchemaOutput = z.infer<typeof visualStyleSettingsSchema>;
+export type VisualStyleSettings = VisualStyleSettingsSchemaOutput;
+export type VisualStyleSettingsInput = z.input<typeof visualStyleSettingsSchema>;
 
 export const visualStyleUpdateSchema = visualStyleSettingsSchema
   .extend({ expectedRevision: z.number().int().positive().optional() })
@@ -479,7 +496,6 @@ export type ScenePromptStatus = z.infer<typeof scenePromptStatusSchema>;
 
 export const sceneCharacterResolutionStatusSchema = z.enum(['RESOLVED', 'UNRESOLVED']);
 export type SceneCharacterResolutionStatus = z.infer<typeof sceneCharacterResolutionStatusSchema>;
-
 export const generationOperationSchema = z.enum([
   'BLUEPRINT',
   'CHAPTER_PLANS',
@@ -494,6 +510,10 @@ export const generationOperationSchema = z.enum([
   'SCENE_PLANNING',
   'SCENE_REGENERATION',
   'SCENE_PROMPT',
+  'CHARACTER_VISUAL_PROFILE',
+  'LOCATION_VISUAL_PROFILE',
+  'OBJECT_VISUAL_PROFILE',
+  'VISUAL_PROMPT_REFINEMENT',
 ]);
 export type GenerationOperation = z.infer<typeof generationOperationSchema>;
 export const storyGenerationRequestSchema = z

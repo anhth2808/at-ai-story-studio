@@ -6,11 +6,11 @@ AI Story Studio is a local-first modular monolith with three connected layers:
 
 `Idea -> blueprint -> arcs/windows -> chapter generation -> StoryState -> review`
 
-`Reviewed chapter -> Scene Engine -> scene metadata/prompts -> explicit media handoff`
+`Reviewed chapter -> Scene Engine -> Visual Bible -> deterministic prompt package`
 
-The Story and Scene Engines are authoring workflows. Neither automatically
-creates narration, images, or video assets; media remains an explicit handoff
-after review.
+The Story, Scene, and Visual Consistency Engines are authoring workflows.
+Neither automatically creates narration, images, or video assets; media
+remains an explicit handoff after review.
 
 ## Implementation guides
 
@@ -24,6 +24,12 @@ after review.
 - [AI usage](ai-usage.md)
 - [Filesystem](filesystem.md)
 - [Scene Engine](scene-engine.md)
+- [Visual consistency](visual-consistency.md)
+- [Character visuals](character-visuals.md)
+- [Location visuals](location-visuals.md)
+- [Visual objects](visual-objects.md)
+- [Style Bible](style-bible.md)
+- [Visual Prompt Package](visual-prompt-package.md)
 - [Visual style](visual-style.md)
 - [Locations](locations.md)
 - [Scene prompts](scene-prompts.md)

@@ -6,7 +6,13 @@ import { describe, expect, it } from 'vitest';
 import { createDatabase, migrateDatabase, WorkflowRepository } from '@studio/database';
 import { FfmpegTools, ProcessRunner, initializeWorkspace } from '@studio/media';
 import { chapterInputSchema } from '@studio/shared';
-import { StudioService, WorkerExecutor, type StudioContext, type TtsProvider } from './index.js';
+import {
+  StudioService,
+  WorkerExecutor,
+  type StudioContext,
+  type TtsProvider,
+  type VisualConsistencyService,
+} from './index.js';
 
 async function setup(content = 'Một. Hai. Ba.') {
   const root = await mkdtemp(join(tmpdir(), 'studio-workflow-'));
@@ -147,6 +153,58 @@ describe('V1 workflow hardening', () => {
     expect(
       fixture.service.assets.current(fixture.project.id, `chapter:${fixture.chapter.id}:audio`),
     ).not.toBeNull();
+    await close(fixture.database);
+  });
+
+  it('persists project identity in visual profile workflow payloads', async () => {
+    const fixture = await setup();
+    const scheduled = fixture.service.scheduleVisualProfileGeneration(
+      fixture.project.id,
+      'OBJECT',
+      'old wooden door',
+    );
+    const step = new WorkflowRepository(fixture.database).getStep(scheduled.stepId);
+    expect(JSON.parse(step!.payload)).toMatchObject({
+      projectId: fixture.project.id,
+      kind: 'OBJECT',
+      subjectId: 'old wooden door',
+    });
+    await close(fixture.database);
+  });
+  it('dispatches visual profile jobs with project-scoped payloads', async () => {
+    const fixture = await setup();
+    const calls: unknown[] = [];
+    const visualService = {
+      generateObjectProfile: async (input: unknown) => {
+        calls.push(input);
+        return null;
+      },
+    } as unknown as VisualConsistencyService;
+    const scheduled = fixture.service.scheduleVisualProfileGeneration(
+      fixture.project.id,
+      'OBJECT',
+      'old wooden door',
+      { instructions: 'Keep the silhouette simple.' },
+    );
+    const workflow = new WorkflowRepository(fixture.database);
+    const claim = workflow.claim('visual-worker');
+    await new WorkerExecutor(
+      fixture.context,
+      'visual-worker',
+      undefined,
+      undefined,
+      undefined,
+      visualService,
+    ).execute(claim!);
+    expect(calls).toEqual([
+      expect.objectContaining({
+        projectId: fixture.project.id,
+        objectKey: 'old wooden door',
+        objectName: 'old wooden door',
+        instructions: 'Keep the silhouette simple.',
+      }),
+    ]);
+    expect(workflow.getStep(scheduled.stepId)?.progress).toBe(0);
     await close(fixture.database);
   });
 

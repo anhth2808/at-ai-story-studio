@@ -87,6 +87,18 @@ function parseRequest(line: string): OmpProtocolRequest {
     throw new Error('Protocol request is too large');
   return ompProtocolRequestSchema.parse(JSON.parse(line));
 }
+function operationLabel(operation: OmpProtocolRequest['operation']): string {
+  switch (operation) {
+    case 'CHARACTER_VISUAL_PROFILE':
+    case 'LOCATION_VISUAL_PROFILE':
+    case 'OBJECT_VISUAL_PROFILE':
+      return 'visual profile candidate';
+    case 'VISUAL_PROMPT_REFINEMENT':
+      return 'visual prompt refinement';
+    default:
+      return 'story result';
+  }
+}
 
 async function run(request: OmpProtocolRequest): Promise<void> {
   const startedAt = Date.now();
@@ -184,7 +196,7 @@ async function run(request: OmpProtocolRequest): Promise<void> {
       version: 1,
       correlationId: request.correlationId,
       stage: 'GENERATING',
-      message: 'Generating structured story result',
+      message: `Generating structured ${operationLabel(request.operation)}`,
     });
     await session.prompt(request.userPrompt);
     if (eventError) throw new Error(eventError);
@@ -198,7 +210,7 @@ async function run(request: OmpProtocolRequest): Promise<void> {
       version: 1,
       correlationId: request.correlationId,
       stage: 'PARSING',
-      message: 'Validating structured story result',
+      message: `Validating structured ${operationLabel(request.operation)}`,
     });
     const usage = telemetry?.usage;
     const cost = telemetry?.cost;

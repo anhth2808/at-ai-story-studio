@@ -43,6 +43,22 @@ REGENERATE_SCENE (one selected scene revision)
 GENERATE_SCENE_PROMPT (one selected scene prompt revision)
 ```
 
+Visual consistency uses the same worker and durable execution records:
+
+```text
+GENERATE_*_VISUAL_PROFILE -> DRAFT candidate -> explicit approval
+BUILD_VISUAL_PROMPT -> CURRENT Visual Prompt Package
+REFINE_VISUAL_PROMPT -> optional revision against package fingerprint
+```
+
+Profile generation compiles bounded Story, StoryState, location, Scene, and
+Style Bible context before calling the isolated OMP host. Valid output is
+persisted with provenance before the step completes. Invalid output records a
+failed generation and never overwrites an approved profile. Package builds are
+deterministic and idempotent for the same Scene revision and dependency
+fingerprints. A package or object mapping change stales only the affected
+visual package.
+
 The planner receives exact chapter text plus bounded blueprint, selected
 characters, summaries, StoryState, current style, and diagnostics. A plan is
 accepted only after strict scene schema, contiguous order, UTF-16 range, and

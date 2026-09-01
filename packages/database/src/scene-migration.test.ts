@@ -45,6 +45,16 @@ describe('Scene Engine migrations', () => {
         .get(),
     ).toEqual({ 1: 1 });
     expect(
+      database.sqlite
+        .prepare("SELECT 1 FROM _studio_migrations WHERE id='0009_visual_consistency'")
+        .get(),
+    ).toEqual({ 1: 1 });
+    expect(
+      database.sqlite.prepare('SELECT COUNT(*) as count FROM character_visual_profiles').get(),
+    ).toEqual({
+      count: 0,
+    });
+    expect(
       (
         database.sqlite.prepare('PRAGMA table_info(scene_revisions)').all() as Array<{
           name: string;

@@ -45,21 +45,28 @@ const schemaContracts: Record<StoryPrompt['operation'], string> = {
     'Top-level key exactly: scene object. Use the exact ScenePlanItem fields and controlled values from the SCENE_PLANNING contract, preserve the requested stable scene identity and sourceRange, and return no extra keys or aliases. Characters and composition.characterPositions must use only their input schema fields; never copy DTO or persistence fields such as id, stableId, revision, status, promptStatus, resolutionStatus, dependencyFingerprint, locationId, promptVersion, or schemaVersion.',
   SCENE_PROMPT:
     'Top-level keys exactly: imagePrompt string and negativePrompt string or null. Return only image-generation prompt text; do not return scene planning, prose, or camera metadata.',
+  CHARACTER_VISUAL_PROFILE:
+    'Top-level key exactly: profile object using only the bounded canonical character visual profile fields. Do not include image-provider settings or scene-specific state.',
+  LOCATION_VISUAL_PROFILE:
+    'Top-level key exactly: profile object using only the bounded canonical location visual profile fields. Do not include image-provider settings or scene-specific state.',
+  OBJECT_VISUAL_PROFILE:
+    'Top-level key exactly: profile object using only the bounded recurring-object visual profile fields. Do not include image-provider settings or scene-specific state.',
+  VISUAL_PROMPT_REFINEMENT:
+    'Top-level keys exactly: packageFingerprint string, fullPrompt string, and negativePrompt string or null. Preserve canonical identity constraints and do not add provider settings.',
 };
-
-function stableValue(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`;
+export function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.entries(value as Record<string, unknown>)
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, nested]) => `${JSON.stringify(key)}:${stableValue(nested)}`)
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableSerialize(nested)}`)
       .join(',')}}`;
   }
   return JSON.stringify(value);
 }
 
-function fingerprint(value: unknown): string {
-  return createHash('sha256').update(stableValue(value)).digest('hex');
+export function fingerprintValue(value: unknown): string {
+  return createHash('sha256').update(stableSerialize(value)).digest('hex');
 }
 
 function render(
@@ -83,14 +90,14 @@ function render(
     '[/TRUSTED_INSTRUCTIONS]',
     '',
     '[UNTRUSTED_STORY_DATA]',
-    ...userSections.flatMap(([name, value]) => [`<${name}>`, stableValue(value), `</${name}>`]),
+    ...userSections.flatMap(([name, value]) => [`<${name}>`, stableSerialize(value), `</${name}>`]),
     '[/UNTRUSTED_STORY_DATA]',
   ].join('\n');
   return {
     operation,
     promptVersion,
     schemaVersion,
-    inputFingerprint: fingerprint({ operation, promptVersion, schemaVersion, payload }),
+    inputFingerprint: fingerprintValue({ operation, promptVersion, schemaVersion, payload }),
     systemPrompt,
     userPrompt,
   };

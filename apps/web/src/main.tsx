@@ -21,12 +21,25 @@ import type {
   StorySettingsDto,
   StorySnapshotDto,
   StoryUsageSummary,
-  SceneDto,
   VisualStyleSettingsDto,
+  SceneDto,
   LocationDto,
+  CharacterVisualProfileDto,
+  LocationVisualProfileDto,
+  VisualObjectProfileDto,
+  VisualPromptPackageDto,
+  SceneObjectResolution,
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+const normalizeVisualObjectKey = (value: string): string =>
+  value
+    .trim()
+    .replace(/\s+/gu, ' ')
+    .normalize('NFKC')
+    .toLocaleLowerCase('en-US')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 type ProjectDetail = { project: ProjectDto; chapters?: ChapterDto[] };
 type RenderAsset = { id: string; url: string; mediaType: string };
 const defaultStorySettings: StorySettings = {
@@ -243,6 +256,121 @@ const sceneApi = {
       method: 'PUT',
       body: JSON.stringify(input),
     }),
+};
+type VisualProfilePage<T> = { items: T[]; limit: number; offset: number };
+const visualApi = {
+  overview: (projectId: string) =>
+    api<{
+      style: VisualStyleSettingsDto | null;
+      characters: VisualProfilePage<CharacterVisualProfileDto>;
+      locations: VisualProfilePage<LocationVisualProfileDto>;
+      objects: VisualProfilePage<VisualObjectProfileDto>;
+    }>(`/api/projects/${projectId}/visual-bible?limit=100&offset=0`),
+  characterRevisions: (projectId: string, characterId: string) =>
+    api<CharacterVisualProfileDto[]>(
+      `/api/projects/${projectId}/visual-bible/characters/${encodeURIComponent(characterId)}/revisions`,
+    ),
+  locationRevisions: (projectId: string, locationId: string) =>
+    api<LocationVisualProfileDto[]>(
+      `/api/projects/${projectId}/visual-bible/locations/${locationId}/revisions`,
+    ),
+  objectRevisions: (projectId: string, objectKey: string) =>
+    api<VisualObjectProfileDto[]>(
+      `/api/projects/${projectId}/visual-bible/objects/${encodeURIComponent(objectKey)}/revisions`,
+    ),
+  generate: (
+    projectId: string,
+    kind: 'CHARACTER' | 'LOCATION' | 'OBJECT',
+    id: string,
+    instructions = '',
+  ) =>
+    api<StoryJobScheduleDto>(
+      `/api/projects/${projectId}/visual-bible/${kind.toLocaleLowerCase('en-US')}s/${encodeURIComponent(id)}/generate`,
+      { method: 'POST', body: JSON.stringify({ instructions }) },
+    ),
+  update: (projectId: string, kind: string, id: string, body: Record<string, unknown>) =>
+    api<CharacterVisualProfileDto | LocationVisualProfileDto | VisualObjectProfileDto>(
+      `/api/projects/${projectId}/visual-bible/${kind}/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+  approve: (
+    projectId: string,
+    kind: 'characters' | 'locations' | 'objects',
+    id: string,
+    revision: number,
+  ) =>
+    api<CharacterVisualProfileDto | LocationVisualProfileDto | VisualObjectProfileDto>(
+      `/api/projects/${projectId}/visual-bible/${kind}/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ expectedRevision: revision }) },
+    ),
+  saveStyle: (projectId: string, style: VisualStyleSettingsDto) => {
+    const payload = {
+      styleName: style.styleName,
+      styleDescription: style.styleDescription,
+      medium: style.medium,
+      realism: style.realism,
+      overallStyle: style.overallStyle,
+      colorPalette: style.colorPalette,
+      cinematicStyle: style.cinematicStyle,
+      cinematicLanguage: style.cinematicLanguage,
+      lightingStyle: style.lightingStyle,
+      textureStyle: style.textureStyle,
+      environmentStyle: style.environmentStyle,
+      characterRenderingStyle: style.characterRenderingStyle,
+      cameraStyle: style.cameraStyle,
+      compositionStyle: style.compositionStyle,
+      moodKeywords: style.moodKeywords,
+      aspectRatio: style.aspectRatio,
+      promptSuffix: style.promptSuffix,
+      positivePromptSuffix: style.positivePromptSuffix,
+      negativePrompt: style.negativePrompt,
+      referenceAssetIds: style.referenceAssetIds,
+      expectedRevision: style.revision,
+    };
+    return api<VisualStyleSettingsDto>(`/api/projects/${projectId}/visual-style`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+  preset: (projectId: string, preset: string) =>
+    api<VisualStyleSettingsDto>(`/api/projects/${projectId}/visual-bible/style/preset`, {
+      method: 'POST',
+      body: JSON.stringify({ preset }),
+    }),
+  scenePackage: (projectId: string, sceneId: string) =>
+    api<VisualPromptPackageDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/visual-prompt-package`,
+    ),
+  rebuildScenePackage: (projectId: string, sceneId: string) =>
+    api<StoryJobScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/visual-prompt-package/rebuild`,
+      { method: 'POST' },
+    ),
+  refine: (projectId: string, packageId: string, instructions: string, revision: number) =>
+    api<StoryJobScheduleDto>(
+      `/api/projects/${projectId}/visual-prompt-packages/${packageId}/refine`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ instructions, expectedPackageRevision: revision }),
+      },
+    ),
+  resolutions: (projectId: string, sceneId: string) =>
+    api<SceneObjectResolution[]>(
+      `/api/projects/${projectId}/scenes/${sceneId}/visual-object-resolutions`,
+    ),
+  saveResolution: (
+    projectId: string,
+    sceneId: string,
+    sourceLabel: string,
+    visualObjectProfileId: string | null,
+  ) =>
+    api<SceneObjectResolution>(
+      `/api/projects/${projectId}/scenes/${sceneId}/visual-object-resolutions/${encodeURIComponent(sourceLabel)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ visualObjectProfileId }),
+      },
+    ),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
   const asset = await api<RenderAsset>(`/api/projects/${projectId}/render`).catch(() => null);
@@ -571,7 +699,7 @@ function App() {
                 </button>
               </div>
               <div className="tabs">
-                {['Story', 'Scenes', 'Audio', 'Video', 'Render'].map((item) => (
+                {['Story', 'Scenes', 'Visual Bible', 'Audio', 'Video', 'Render'].map((item) => (
                   <button
                     className={tab === item ? 'selected' : ''}
                     key={item}
@@ -643,6 +771,15 @@ function App() {
                 activeChapterId={activeChapter?.id ?? null}
                 onChanged={() => void refresh()}
                 onError={setError}
+              />
+            )}
+            {tab === 'Visual Bible' && (
+              <VisualBibleWorkspace
+                projectId={selected.id}
+                story={story}
+                activeChapterId={activeChapter?.id ?? null}
+                onError={setError}
+                onChanged={() => void refresh()}
               />
             )}
             {tab === 'Audio' && (
@@ -809,6 +946,603 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+type VisualBibleProps = {
+  projectId: string;
+  story: StorySnapshotDto | null;
+  activeChapterId: string | null;
+  onError: (message: string) => void;
+  onChanged: () => void;
+};
+type VisualProfileRecord =
+  CharacterVisualProfileDto | LocationVisualProfileDto | VisualObjectProfileDto;
+
+function VisualBibleWorkspace({
+  projectId,
+  story,
+  activeChapterId,
+  onError,
+  onChanged,
+}: VisualBibleProps) {
+  const [overview, setOverview] = useState<{
+    style: VisualStyleSettingsDto | null;
+    characters: VisualProfilePage<CharacterVisualProfileDto>;
+    locations: VisualProfilePage<LocationVisualProfileDto>;
+    objects: VisualProfilePage<VisualObjectProfileDto>;
+  } | null>(null);
+  const [profileCandidates, setProfileCandidates] = useState<Record<string, VisualProfileRecord>>(
+    {},
+  );
+  const [styleDraft, setStyleDraft] = useState<VisualStyleSettingsDto | null>(null);
+  const [locations, setLocations] = useState<LocationDto[]>([]);
+  const [sceneList, setSceneList] = useState<SceneDto[]>([]);
+  const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
+  const [scenePackage, setScenePackage] = useState<VisualPromptPackageDto | null>(null);
+  const [objectResolutions, setObjectResolutions] = useState<SceneObjectResolution[]>([]);
+  const [refinement, setRefinement] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const load = async (): Promise<void> => {
+    try {
+      const [nextOverview, nextLocations] = await Promise.all([
+        visualApi.overview(projectId),
+        sceneApi.locations(projectId).catch(() => []),
+      ]);
+      setOverview(nextOverview);
+      setStyleDraft(nextOverview.style);
+      setLocations(nextLocations);
+      let nextScenes: SceneDto[] = [];
+      if (activeChapterId) {
+        nextScenes = await sceneApi.list(projectId, activeChapterId);
+        setSceneList(nextScenes);
+        const nextSceneId =
+          selectedSceneId && nextScenes.some((scene) => scene.id === selectedSceneId)
+            ? selectedSceneId
+            : (nextScenes[0]?.id ?? null);
+        setSelectedSceneId(nextSceneId);
+        if (nextSceneId) {
+          const [nextPackage, nextResolutions] = await Promise.all([
+            visualApi.scenePackage(projectId, nextSceneId).catch(() => null),
+            visualApi.resolutions(projectId, nextSceneId).catch(() => []),
+          ]);
+          setScenePackage(nextPackage);
+          setObjectResolutions(nextResolutions);
+        } else {
+          setScenePackage(null);
+          setObjectResolutions([]);
+        }
+      } else {
+        setSceneList([]);
+        setSelectedSceneId(null);
+        setScenePackage(null);
+        setObjectResolutions([]);
+      }
+      const objectKeys = new Set([
+        ...nextOverview.objects.items.map((profile) => profile.objectKey),
+        ...nextScenes
+          .flatMap((scene) => scene.importantObjects.map(normalizeVisualObjectKey))
+          .filter(Boolean),
+      ]);
+      const revisionResults = await Promise.all([
+        ...(story?.blueprint?.blueprint.characters ?? []).map(
+          async (character) =>
+            [
+              `CHARACTER:${character.id}`,
+              (await visualApi.characterRevisions(projectId, character.id).catch(() => []))[0] ??
+                null,
+            ] as const,
+        ),
+        ...nextLocations.map(
+          async (location) =>
+            [
+              `LOCATION:${location.id}`,
+              (await visualApi.locationRevisions(projectId, location.id).catch(() => []))[0] ??
+                null,
+            ] as const,
+        ),
+        ...[...objectKeys].map(
+          async (objectKey) =>
+            [
+              `OBJECT:${objectKey}`,
+              (await visualApi.objectRevisions(projectId, objectKey).catch(() => []))[0] ?? null,
+            ] as const,
+        ),
+      ]);
+      const candidates: Record<string, VisualProfileRecord> = {};
+      for (const [key, profile] of revisionResults) if (profile) candidates[key] = profile;
+      setProfileCandidates(candidates);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tải Visual Bible');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 3000);
+    return () => clearInterval(timer);
+  }, [projectId, activeChapterId, selectedSceneId]);
+
+  const run = async (operation: () => Promise<unknown>): Promise<void> => {
+    try {
+      await operation();
+      onChanged();
+      await load();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Thao tác Visual Bible thất bại');
+    }
+  };
+  const saveStyle = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (styleDraft) await run(() => visualApi.saveStyle(projectId, styleDraft));
+  };
+  const choosePreset = (preset: string): void => {
+    void run(async () => {
+      const saved = await visualApi.preset(projectId, preset);
+      setStyleDraft(saved);
+    });
+  };
+  if (loading && !overview)
+    return (
+      <div className="panel">
+        <p>Đang tải Visual Bible...</p>
+      </div>
+    );
+  const blueprintCharacters = story?.blueprint?.blueprint.characters ?? [];
+  const characterProfiles = overview?.characters.items ?? [];
+  const locationCandidates = locations.map((location) => ({
+    id: location.id,
+    title: location.name,
+    profile:
+      profileCandidates[`LOCATION:${location.id}`] ??
+      overview?.locations.items.find((item) => item.locationId === location.id) ??
+      null,
+  }));
+  const objectCandidates = Array.from(
+    new Map(
+      [
+        ...(overview?.objects.items ?? []).map((profile) => {
+          const candidate = profileCandidates[`OBJECT:${profile.objectKey}`];
+          return [
+            profile.objectKey,
+            candidate && 'objectKey' in candidate ? candidate : profile,
+          ] as const;
+        }),
+        ...sceneList.flatMap((scene) =>
+          scene.importantObjects.map((name) => {
+            const objectKey = normalizeVisualObjectKey(name);
+            const candidate = profileCandidates[`OBJECT:${objectKey}`];
+            const existing = overview?.objects.items.find(
+              (profile) => profile.objectKey === objectKey,
+            );
+            return [
+              objectKey,
+              candidate && 'objectKey' in candidate
+                ? candidate
+                : (existing ??
+                  ({
+                    id: objectKey,
+                    projectId,
+                    objectKey,
+                    name,
+                    revision: 0,
+                    status: 'DRAFT',
+                    payload: {
+                      name,
+                      description: '',
+                      referenceAssetIds: [],
+                      shape: '',
+                      distinctiveFeatures: [],
+                      visualKeywords: [],
+                      negativeTraits: [],
+                      styleNotes: '',
+                      materials: [],
+                      colors: [],
+                      condition: '',
+                    },
+                    promptFragment: '',
+                    inputFingerprint: '',
+                    generationId: null,
+                    rowVersion: 0,
+                    createdAt: '',
+                    updatedAt: '',
+                  } satisfies VisualObjectProfileDto)),
+            ] as const;
+          }),
+        ),
+      ].filter(([key]) => key.length > 0),
+    ).values(),
+  );
+  const approvedObjectProfiles = Array.from(
+    new Map(
+      [
+        ...(overview?.objects.items ?? []).filter((profile) => profile.status === 'APPROVED'),
+        ...Array.from(objectCandidates).filter((profile) => profile.status === 'APPROVED'),
+      ].map((profile) => [profile.id, profile] as const),
+    ).values(),
+  );
+  return (
+    <div className="visual-bible">
+      <div className="panel">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">VISUAL CONSISTENCY</p>
+            <h3>Visual Bible</h3>
+            <p className="muted">
+              Hồ sơ hình ảnh là bản nháp trước, chỉ hồ sơ được duyệt mới trở thành ràng buộc chính
+              thức.
+            </p>
+          </div>
+          <span className="status-chip status-current">
+            {overview?.style ? `Style v${overview.style.revision}` : 'Chưa có Style Bible'}
+          </span>
+        </div>
+        <div className="actions">
+          {[
+            'CINEMATIC_REALISTIC',
+            'ANIME',
+            'CHINESE_FANTASY_PAINTING',
+            'STORYBOOK',
+            '3D_ANIMATION',
+          ].map((preset) => (
+            <button className="secondary" key={preset} onClick={() => choosePreset(preset)}>
+              {preset.replaceAll('_', ' ')}
+            </button>
+          ))}
+        </div>
+        {styleDraft && (
+          <form className="scene-style" onSubmit={(event) => void saveStyle(event)}>
+            <div className="scene-form-grid">
+              {[
+                ['styleName', 'Tên Style Bible'],
+                ['styleDescription', 'Mô tả phong cách'],
+                ['medium', 'Chất liệu'],
+                ['realism', 'Độ chân thực'],
+                ['overallStyle', 'Ngôn ngữ tổng thể'],
+                ['colorPalette', 'Bảng màu'],
+                ['cinematicStyle', 'Phong cách điện ảnh'],
+                ['cinematicLanguage', 'Ngôn ngữ điện ảnh'],
+                ['lightingStyle', 'Phong cách ánh sáng'],
+                ['textureStyle', 'Kết cấu'],
+                ['environmentStyle', 'Phong cách môi trường'],
+                ['characterRenderingStyle', 'Cách dựng nhân vật'],
+                ['cameraStyle', 'Phong cách camera'],
+                ['compositionStyle', 'Phong cách bố cục'],
+                ['aspectRatio', 'Tỷ lệ khung hình'],
+                ['positivePromptSuffix', 'Hậu tố tích cực'],
+                ['negativePrompt', 'Điều cần tránh'],
+              ].map(([key, label]) => (
+                <label className="field" key={key}>
+                  <span>{label}</span>
+                  <input
+                    value={String(styleDraft[key as keyof VisualStyleSettingsDto] ?? '')}
+                    onChange={(event) =>
+                      setStyleDraft((current) =>
+                        current ? { ...current, [key]: event.target.value } : current,
+                      )
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+            <button type="submit">Lưu Style Bible</button>
+          </form>
+        )}
+      </div>
+      <div className="visual-profile-grid">
+        <VisualProfileCard
+          title="Nhân vật"
+          candidates={blueprintCharacters.map((character) => ({
+            id: character.id,
+            title: character.name,
+            profile:
+              profileCandidates[`CHARACTER:${character.id}`] ??
+              characterProfiles.find((item) => item.characterId === character.id) ??
+              null,
+          }))}
+          onGenerate={(id, instructions) =>
+            run(() => visualApi.generate(projectId, 'CHARACTER', id, instructions))
+          }
+          onSave={(id, profile) =>
+            run(() => visualApi.update(projectId, 'characters', id, profile))
+          }
+          onApprove={(id, revision) =>
+            run(() => visualApi.approve(projectId, 'characters', id, revision))
+          }
+        />
+        <VisualProfileCard
+          title="Địa điểm"
+          candidates={locationCandidates}
+          onGenerate={(id, instructions) =>
+            run(() => visualApi.generate(projectId, 'LOCATION', id, instructions))
+          }
+          onSave={(id, profile) => run(() => visualApi.update(projectId, 'locations', id, profile))}
+          onApprove={(id, revision) =>
+            run(() => visualApi.approve(projectId, 'locations', id, revision))
+          }
+        />
+        <VisualProfileCard
+          title="Vật thể"
+          candidates={Array.from(objectCandidates).map((profile) => ({
+            id: profile.objectKey,
+            title: profile.name,
+            profile: profile.revision > 0 ? profile : null,
+          }))}
+          onGenerate={(id, instructions) =>
+            run(() => visualApi.generate(projectId, 'OBJECT', id, instructions))
+          }
+          onSave={(id, profile) => run(() => visualApi.update(projectId, 'objects', id, profile))}
+          onApprove={(id, revision) =>
+            run(() => visualApi.approve(projectId, 'objects', id, revision))
+          }
+        />
+      </div>
+      <div className="panel">
+        <div className="section-head">
+          <div>
+            <h3>Visual Prompt Package</h3>
+            <p className="muted">
+              Prompt deterministic của scene, có thể rebuild mà không chạm vào narration hay render.
+            </p>
+          </div>
+          <select
+            value={selectedSceneId ?? ''}
+            onChange={(event) => {
+              const sceneId = event.target.value || null;
+              setSelectedSceneId(sceneId);
+              if (sceneId) {
+                void Promise.all([
+                  visualApi.scenePackage(projectId, sceneId).catch(() => null),
+                  visualApi.resolutions(projectId, sceneId).catch(() => []),
+                ]).then(([nextPackage, nextResolutions]) => {
+                  setScenePackage(nextPackage);
+                  setObjectResolutions(nextResolutions);
+                });
+              } else {
+                setScenePackage(null);
+                setObjectResolutions([]);
+              }
+            }}
+          >
+            <option value="">Chọn scene</option>
+            {sceneList.map((scene) => (
+              <option key={scene.id} value={scene.id}>
+                Scene {scene.sceneNumber}: {scene.title}
+              </option>
+            ))}
+          </select>
+        </div>
+        {selectedSceneId && (
+          <div className="actions">
+            <button
+              onClick={() =>
+                void run(() => visualApi.rebuildScenePackage(projectId, selectedSceneId))
+              }
+            >
+              Rebuild package
+            </button>
+            {scenePackage && (
+              <button
+                className="secondary"
+                onClick={() => {
+                  const instructions = window.prompt('Yêu cầu refine prompt', refinement);
+                  if (instructions !== null) {
+                    setRefinement(instructions);
+                    void run(() =>
+                      visualApi.refine(
+                        projectId,
+                        scenePackage.id,
+                        instructions,
+                        scenePackage.revision,
+                      ),
+                    );
+                  }
+                }}
+              >
+                Refine tùy chọn
+              </button>
+            )}
+          </div>
+        )}
+        {scenePackage ? (
+          <div className="prompt-package">
+            <div className="status-grid">
+              <span>Trạng thái: {scenePackage.status}</span>
+              <span>Consistency: {scenePackage.payload.consistencyStatus}</span>
+              <span>Revision: {scenePackage.revision}</span>
+            </div>
+            <label className="field field-wide">
+              <span>Prompt canonical</span>
+              <textarea readOnly value={scenePackage.payload.fullPrompt} />
+            </label>
+            {scenePackage.payload.refinedPrompt && (
+              <label className="field field-wide">
+                <span>Prompt refined</span>
+                <textarea readOnly value={scenePackage.payload.refinedPrompt} />
+              </label>
+            )}
+            <p className="muted">Negative: {scenePackage.payload.negativePrompt ?? 'Không có'}</p>
+            {scenePackage.payload.objects.length > 0 && (
+              <div className="resolution-controls">
+                <strong>Liên kết vật thể lặp lại</strong>
+                {scenePackage.payload.objects.map((object) => {
+                  const resolution = objectResolutions.find(
+                    (item) => item.sourceLabel === object.sourceLabel,
+                  );
+                  return (
+                    <label className="field" key={object.sourceLabel}>
+                      <span>{object.sourceLabel}</span>
+                      <select
+                        value={
+                          resolution
+                            ? (resolution.visualObjectProfileId ?? '')
+                            : (object.profileId ?? '')
+                        }
+                        onChange={(event) => {
+                          void run(async () => {
+                            await visualApi.saveResolution(
+                              projectId,
+                              selectedSceneId!,
+                              object.sourceLabel,
+                              event.target.value || null,
+                            );
+                            await visualApi.rebuildScenePackage(projectId, selectedSceneId!);
+                          });
+                        }}
+                      >
+                        <option value="">Chưa liên kết</option>
+                        {approvedObjectProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name} (v{profile.revision})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {scenePackage.payload.consistencyIssues.length > 0 && (
+              <ul className="warning-list">
+                {scenePackage.payload.consistencyIssues.map((issue, index) => (
+                  <li key={`${issue.type}-${index}`}>
+                    {issue.severity}: {issue.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : (
+          <p className="muted">
+            Chưa có package cho scene này. Rebuild để tạo prompt deterministic.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VisualProfileCard({
+  title,
+  candidates,
+  onGenerate,
+  onSave,
+  onApprove,
+}: {
+  title: string;
+  candidates: Array<{ id: string; title: string; profile: VisualProfileRecord | null }>;
+  onGenerate: (id: string, instructions: string) => Promise<void>;
+  onSave: (id: string, profile: Record<string, unknown>) => Promise<void>;
+  onApprove: (id: string, revision: number) => Promise<void>;
+}) {
+  return (
+    <div className="panel visual-profile-panel">
+      <div className="section-head">
+        <div>
+          <h3>{title}</h3>
+          <p className="muted">{candidates.length} mục trong phạm vi hiện tại</p>
+        </div>
+      </div>
+      {candidates.length === 0 ? (
+        <p className="muted">Chưa có dữ liệu nguồn để tạo hồ sơ.</p>
+      ) : (
+        candidates.map((candidate) => (
+          <VisualProfileEditor
+            key={candidate.id}
+            id={candidate.id}
+            title={candidate.title}
+            profile={candidate.profile}
+            onGenerate={onGenerate}
+            onSave={onSave}
+            onApprove={onApprove}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function VisualProfileEditor({
+  id,
+  title,
+  profile,
+  onGenerate,
+  onSave,
+  onApprove,
+}: {
+  id: string;
+  title: string;
+  profile: VisualProfileRecord | null;
+  onGenerate: (id: string, instructions: string) => Promise<void>;
+  onSave: (id: string, profile: Record<string, unknown>) => Promise<void>;
+  onApprove: (id: string, revision: number) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(JSON.stringify(profile?.payload ?? {}, null, 2));
+  const [instructions, setInstructions] = useState('');
+  useEffect(() => {
+    setDraft(JSON.stringify(profile?.payload ?? {}, null, 2));
+  }, [profile?.id, profile?.revision]);
+  const save = (): void => {
+    try {
+      const payload = JSON.parse(draft) as Record<string, unknown>;
+      void onSave(id, {
+        expectedRevision: profile?.revision,
+        payload,
+      });
+    } catch {
+      window.alert('Payload phải là JSON hợp lệ.');
+    }
+  };
+  return (
+    <article className="visual-profile-editor">
+      <div className="section-head">
+        <strong>{title}</strong>
+        <span
+          className={`status-chip ${profile?.status === 'APPROVED' ? 'status-current' : 'status-warn'}`}
+        >
+          {profile ? `${profile.status} v${profile.revision}` : 'MISSING'}
+        </span>
+      </div>
+      <textarea
+        aria-label={`Payload ${title}`}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="Tạo candidate hoặc nhập payload JSON bounded."
+      />
+      {profile && (
+        <div className="profile-metadata">
+          <span>Prompt fragment: {profile.promptFragment || 'Chưa có prompt fragment'}</span>
+          <span>
+            References:{' '}
+            {profile.payload.referenceAssetIds.length
+              ? profile.payload.referenceAssetIds.join(', ')
+              : 'Không có'}
+          </span>
+        </div>
+      )}
+      <label className="field">
+        <span>Yêu cầu tạo lại (tuỳ chọn)</span>
+        <input
+          aria-label={`Yêu cầu tạo lại ${title}`}
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          placeholder="Ví dụ: đổi bảng màu, giữ nguyên nhận diện"
+        />
+      </label>
+      <div className="actions">
+        <button className="secondary" onClick={() => void onGenerate(id, instructions)}>
+          {profile ? 'Tạo lại candidate' : 'Tạo candidate'}
+        </button>
+        {profile && <button onClick={save}>Lưu bản chỉnh sửa</button>}
+        {profile?.status === 'DRAFT' && (
+          <button className="secondary" onClick={() => void onApprove(id, profile.revision)}>
+            Duyệt hồ sơ
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -1657,6 +2391,7 @@ function ScenesWorkspace({
   const [sceneList, setSceneList] = useState<SceneDto[]>([]);
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [draft, setDraft] = useState<SceneDto | null>(null);
+  const [scenePackage, setScenePackage] = useState<VisualPromptPackageDto | null>(null);
   const [density, setDensity] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('MEDIUM');
   const [targetMin, setTargetMin] = useState('');
   const [targetMax, setTargetMax] = useState('');
@@ -1728,13 +2463,19 @@ function ScenesWorkspace({
   useEffect(() => {
     if (!selectedSceneId) {
       setDraft(null);
+      setScenePackage(null);
       return;
     }
     const selectedScene = sceneList.find((scene) => scene.id === selectedSceneId);
     if (selectedScene) {
-      void sceneApi
-        .get(projectId, selectedScene.id)
-        .then(setDraft)
+      void Promise.all([
+        sceneApi.get(projectId, selectedScene.id),
+        visualApi.scenePackage(projectId, selectedScene.id).catch(() => null),
+      ])
+        .then(([nextDraft, nextPackage]) => {
+          setDraft(nextDraft);
+          setScenePackage(nextPackage);
+        })
         .catch((cause) =>
           onError(cause instanceof Error ? cause.message : 'Không thể tải chi tiết cảnh'),
         );
@@ -1920,6 +2661,16 @@ function ScenesWorkspace({
       onChanged();
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể làm mới prompt');
+    }
+  };
+  const rebuildVisualPackage = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      setScenePackage(null);
+      queueSceneJobs(await visualApi.rebuildScenePackage(projectId, draft.id));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể rebuild Visual Prompt Package');
     }
   };
   const updateDraft = <K extends keyof SceneDto>(key: K, value: SceneDto[K]): void => {
@@ -2237,6 +2988,95 @@ function ScenesWorkspace({
                     <span key={reference}>Chưa resolve: {reference}</span>
                   ))}
                 </div>
+              )}
+              {scenePackage && (
+                <section className="visual-package-summary field-wide">
+                  <div className="section-head">
+                    <div>
+                      <span className="field-label">Visual Prompt Package</span>
+                      <p className="muted">
+                        Prompt canonical/refined đọc từ gói đã lưu, không tạo lại Scene structure.
+                      </p>
+                    </div>
+                    <div className="chip-row">
+                      <span
+                        className={`status-chip status-${scenePackage.payload.consistencyStatus.toLowerCase()}`}
+                      >
+                        {scenePackage.payload.consistencyStatus}
+                      </span>
+                      <span className="status-chip">
+                        Package v{scenePackage.revision} · Scene v
+                        {scenePackage.payload.sceneRevision}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="scene-composition-grid">
+                    <span>
+                      <strong>Style Bible:</strong> v
+                      {scenePackage.payload.styleRevision ?? 'chưa có'}
+                    </span>
+                    <span>
+                      <strong>Phụ thuộc:</strong>{' '}
+                      {scenePackage.payload.dependencies
+                        .map((dependency) => `${dependency.kind} v${dependency.revision}`)
+                        .join(' · ') || 'Không có'}
+                    </span>
+                    <span>
+                      <strong>Canonical:</strong>{' '}
+                      {scenePackage.payload.characters
+                        .map(
+                          (character) =>
+                            `${character.displayName}: ${character.profileId ? 'đã duyệt' : 'thiếu'}`,
+                        )
+                        .join(' · ') || 'Không có nhân vật'}
+                    </span>
+                    <span>
+                      <strong>State cảnh:</strong>{' '}
+                      {scenePackage.payload.characters
+                        .map(
+                          (character) =>
+                            `${character.displayName}: ${
+                              [
+                                character.sceneVisualState.expression,
+                                character.sceneVisualState.pose,
+                                character.sceneVisualState.action,
+                              ]
+                                .filter(Boolean)
+                                .join(', ') || 'không có'
+                            }`,
+                        )
+                        .join(' · ') || 'Không có state'}
+                    </span>
+                  </div>
+                  <label className="field field-wide">
+                    <span>
+                      {scenePackage.payload.refinedPrompt ? 'Prompt refined' : 'Prompt canonical'}
+                    </span>
+                    <textarea
+                      readOnly
+                      value={scenePackage.payload.refinedPrompt ?? scenePackage.payload.fullPrompt}
+                    />
+                  </label>
+                  <p className="muted">
+                    Negative: {scenePackage.payload.negativePrompt ?? 'Không có'}
+                  </p>
+                  {scenePackage.payload.consistencyIssues.length > 0 && (
+                    <ul className="warning-list">
+                      {scenePackage.payload.consistencyIssues.map((issue, index) => (
+                        <li key={`${issue.type}-${index}`}>
+                          {issue.severity}: {issue.message}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void rebuildVisualPackage()}
+                  >
+                    Rebuild Visual Prompt Package
+                  </button>
+                </section>
               )}
               {draft.characters.length > 0 && (
                 <div className="scene-character-snapshots field-wide">

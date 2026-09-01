@@ -23,8 +23,8 @@ import {
   type Id,
   type Location,
   type LocationDto,
-  type SceneCharacter,
   type SceneCharacterDto,
+  type SceneCharacterVisualStateInput,
   type SceneCountRange,
   type SceneDensity,
   type SceneDto,
@@ -34,13 +34,28 @@ import {
   type ScenePlanItem,
   type ScenePromptStatus,
   type SceneStatus,
-  type VisualStyleSettings,
+  type VisualStyleSettingsInput,
   type VisualStyleSettingsDto,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value);
 const parseJson = (value: string): unknown => JSON.parse(value);
+const parseStringArray = (value: string): string[] => {
+  const parsed = parseJson(value);
+  return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed : [];
+};
+type VisualStyleRow = Omit<VisualStyleSettingsDto, 'moodKeywords' | 'referenceAssetIds'> & {
+  moodKeywords: string;
+  referenceAssetIds: string;
+};
+function parseVisualStyleRow(row: VisualStyleRow): VisualStyleSettingsDto {
+  return {
+    ...row,
+    moodKeywords: parseStringArray(row.moodKeywords),
+    referenceAssetIds: parseStringArray(row.referenceAssetIds),
+  };
+}
 
 export function normalizeLocationName(value: string): string {
   return value
@@ -65,7 +80,7 @@ export type SceneCharacterPersistence = {
   characterId: string | null;
   displayName: string;
   roleInScene: string;
-  visualState: SceneCharacter['visualState'];
+  visualState: SceneCharacterVisualStateInput;
   resolutionStatus: 'RESOLVED' | 'UNRESOLVED';
   dependencyFingerprint: string | null;
 };
@@ -227,18 +242,44 @@ export class SceneRepository {
     const row = this.database.sqlite
       .prepare(
         `SELECT id,project_id as projectId,revision,style_name as styleName,
-          style_description as styleDescription,medium,realism,color_palette as colorPalette,
-          cinematic_style as cinematicStyle,aspect_ratio as aspectRatio,prompt_suffix as promptSuffix,
-          input_fingerprint as inputFingerprint,created_at as createdAt,updated_at as updatedAt
+          style_description as styleDescription,medium,realism,overall_style as overallStyle,
+          color_palette as colorPalette,cinematic_style as cinematicStyle,
+          cinematic_language as cinematicLanguage,lighting_style as lightingStyle,
+          texture_style as textureStyle,environment_style as environmentStyle,
+          character_rendering_style as characterRenderingStyle,camera_style as cameraStyle,
+          composition_style as compositionStyle,mood_keywords as moodKeywords,
+          aspect_ratio as aspectRatio,prompt_suffix as promptSuffix,
+          positive_prompt_suffix as positivePromptSuffix,negative_prompt as negativePrompt,
+          reference_asset_ids as referenceAssetIds,input_fingerprint as inputFingerprint,
+          created_at as createdAt,updated_at as updatedAt
          FROM visual_style_settings WHERE project_id=? AND is_current=1`,
       )
-      .get(projectId) as VisualStyleSettingsDto | undefined;
-    return row ? row : null;
+      .get(projectId) as VisualStyleRow | undefined;
+    return row ? parseVisualStyleRow(row) : null;
+  }
+  listVisualStyles(projectId: Id, limit = 100, offset = 0): VisualStyleSettingsDto[] {
+    const rows = this.database.sqlite
+      .prepare(
+        `SELECT id,project_id as projectId,revision,style_name as styleName,
+          style_description as styleDescription,medium,realism,overall_style as overallStyle,
+          color_palette as colorPalette,cinematic_style as cinematicStyle,
+          cinematic_language as cinematicLanguage,lighting_style as lightingStyle,
+          texture_style as textureStyle,environment_style as environmentStyle,
+          character_rendering_style as characterRenderingStyle,camera_style as cameraStyle,
+          composition_style as compositionStyle,mood_keywords as moodKeywords,
+          aspect_ratio as aspectRatio,prompt_suffix as promptSuffix,
+          positive_prompt_suffix as positivePromptSuffix,negative_prompt as negativePrompt,
+          reference_asset_ids as referenceAssetIds,input_fingerprint as inputFingerprint,
+          created_at as createdAt,updated_at as updatedAt
+         FROM visual_style_settings WHERE project_id=? ORDER BY revision DESC LIMIT ? OFFSET ?`,
+      )
+      .all(projectId, Math.max(1, Math.min(100, limit)), Math.max(0, offset)) as VisualStyleRow[];
+    return rows.map(parseVisualStyleRow);
   }
 
   saveVisualStyle(
     projectId: Id,
-    input: VisualStyleSettings,
+    input: VisualStyleSettingsInput,
     expectedRevision?: number,
   ): VisualStyleSettingsDto {
     const style = visualStyleSettingsSchema.parse(input);
@@ -256,10 +297,12 @@ export class SceneRepository {
       this.database.sqlite
         .prepare(
           `INSERT INTO visual_style_settings(
-            id,project_id,revision,style_name,style_description,medium,realism,color_palette,
-            cinematic_style,aspect_ratio,prompt_suffix,input_fingerprint,row_version,is_current,
-            created_at,updated_at
-          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)`,
+            id,project_id,revision,style_name,style_description,medium,realism,overall_style,color_palette,
+            cinematic_style,cinematic_language,lighting_style,texture_style,environment_style,
+            character_rendering_style,camera_style,composition_style,mood_keywords,aspect_ratio,
+            prompt_suffix,positive_prompt_suffix,negative_prompt,reference_asset_ids,input_fingerprint,
+            row_version,is_current,created_at,updated_at
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)`,
         )
         .run(
           id,
@@ -269,10 +312,22 @@ export class SceneRepository {
           style.styleDescription,
           style.medium,
           style.realism,
+          style.overallStyle,
           style.colorPalette,
           style.cinematicStyle,
+          style.cinematicLanguage,
+          style.lightingStyle,
+          style.textureStyle,
+          style.environmentStyle,
+          style.characterRenderingStyle,
+          style.cameraStyle,
+          style.compositionStyle,
+          json(style.moodKeywords),
           style.aspectRatio,
           style.promptSuffix,
+          style.positivePromptSuffix,
+          style.negativePrompt,
+          json(style.referenceAssetIds),
           inputFingerprint,
           stamp,
           stamp,
@@ -423,6 +478,13 @@ export class SceneRepository {
       createdDraft: true,
     };
   }
+  listLocationMatches(projectId: Id, name: string): LocationDto[] {
+    const normalizedName = normalizeLocationName(name);
+    if (!normalizedName) return [];
+    return this.findLocations(projectId, normalizedName)
+      .map((row) => this.getLocation(projectId, row.id))
+      .filter((row): row is LocationDto => row !== null);
+  }
 
   getScenePlan(chapterId: Id): ScenePlanDto | null {
     const row = this.database.sqlite
@@ -535,6 +597,66 @@ export class SceneRepository {
     return rows.map((row) => ({
       ...row,
       planStatus: row.planStatus ? sceneStatusSchema.parse(row.planStatus) : null,
+    }));
+  }
+  listVisualContextScenes(
+    projectId: Id,
+    filter: { characterId?: string; locationId?: Id; objectName?: string } = {},
+    limit = 12,
+  ): Array<{
+    sceneId: Id;
+    sceneNumber: number;
+    title: string;
+    summary: string;
+    visualDescription: string;
+    locationId: Id | null;
+    importantObjects: string[];
+    timeOfDay: string;
+    weather: string;
+    mood: string;
+  }> {
+    const filters = ['s.project_id=?', 's.is_current=1'];
+    const parameters: Array<string | number> = [projectId];
+    if (filter.characterId) {
+      filters.push(
+        'EXISTS (SELECT 1 FROM scene_characters sc WHERE sc.scene_revision_id=s.id AND sc.character_id=?)',
+      );
+      parameters.push(filter.characterId);
+    }
+    if (filter.locationId) {
+      filters.push('s.location_id=?');
+      parameters.push(filter.locationId);
+    }
+    if (filter.objectName) {
+      filters.push(
+        'EXISTS (SELECT 1 FROM json_each(s.important_objects) object WHERE lower(object.value)=lower(?))',
+      );
+      parameters.push(filter.objectName);
+    }
+    const rows = this.database.sqlite
+      .prepare(
+        `SELECT s.id as sceneId,s.scene_number as sceneNumber,s.title,s.summary,
+          s.visual_description as visualDescription,s.location_id as locationId,
+          s.important_objects as importantObjects,s.time_of_day as timeOfDay,s.weather,s.mood
+         FROM scene_revisions s
+         WHERE ${filters.join(' AND ')}
+         ORDER BY s.scene_number LIMIT ?`,
+      )
+      .all(...parameters, Math.max(1, Math.min(50, limit))) as Array<{
+      sceneId: Id;
+      sceneNumber: number;
+      title: string;
+      summary: string;
+      visualDescription: string;
+      locationId: Id | null;
+      importantObjects: string;
+      timeOfDay: string;
+      weather: string;
+      mood: string;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      importantObjects: parseStringArray(row.importantObjects),
     }));
   }
   getScene(sceneId: Id, includeExcerpt = false): SceneDto | null {
