@@ -32,6 +32,7 @@ import type {
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+const SELECTED_PROJECT_STORAGE_KEY = 'studio.selectedProjectId';
 const normalizeVisualObjectKey = (value: string): string =>
   value
     .trim()
@@ -407,6 +408,17 @@ function App() {
       ]);
       setHealth(nextHealth);
       setProjects(nextProjects);
+      const savedProjectId = window.localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY);
+      if (!selected) {
+        const restored = savedProjectId
+          ? nextProjects.find((project) => project.id === savedProjectId)
+          : null;
+        if (restored) {
+          setSelected(restored);
+          return;
+        }
+        if (savedProjectId) window.localStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY);
+      }
       if (selected) {
         const chapterQuery = new URLSearchParams({
           limit: String(chapterPageSize),
@@ -506,6 +518,7 @@ function App() {
     if (!selected || !window.confirm(`Xóa dự án "${selected.title}"?`)) return;
     await api(`/api/projects/${selected.id}`, { method: 'DELETE' });
     setSelected(null);
+    window.localStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY);
     setChapters([]);
     setJobs([]);
     setStatus(null);
@@ -520,6 +533,7 @@ function App() {
       api<ProjectDetail>(`/api/projects/${project.id}?includeChapters=false`),
       api<ChapterDto[]>(`/api/projects/${project.id}/chapters?${query.toString()}`),
     ]);
+    window.localStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, detail.project.id);
     setSelected(detail.project);
     setChapters(firstPage);
     setChapterOffset(0);
