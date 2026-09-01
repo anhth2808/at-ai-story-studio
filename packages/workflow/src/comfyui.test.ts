@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { imageGenerationRequestSchema, type ImageProviderSettings } from '@studio/shared';
 import {
@@ -18,6 +21,8 @@ const settings: ImageProviderSettings = {
   connectionTimeoutMs: 1_000,
   generationTimeoutMs: 10_000,
 };
+
+const stagingRoot = mkdtempSync(join(tmpdir(), 'comfyui-test-'));
 
 const request = imageGenerationRequestSchema.parse({
   projectId: '11111111-1111-4111-8111-111111111111',
@@ -110,7 +115,7 @@ describe('ComfyUI image provider', () => {
   it('checks readiness, submits once, polls history, and downloads outputs', async () => {
     const fake = fakeFetchFactory();
     const provider = new ComfyUiImageProvider(
-      'staging',
+      stagingRoot,
       fake.fetchImpl,
       async () => undefined,
       () => 1_000,
@@ -126,14 +131,14 @@ describe('ComfyUI image provider', () => {
 
   it('reports unconfigured model components before contacting ComfyUI', async () => {
     const fake = fakeFetchFactory();
-    const provider = new ComfyUiImageProvider('staging', fake.fetchImpl);
+    const provider = new ComfyUiImageProvider(stagingRoot, fake.fetchImpl);
     const readiness = await provider.readiness({ ...settings, vaeName: '' });
     expect(readiness.status).toBe('NOT_CONFIGURED');
     expect(fake.calls).toHaveLength(0);
   });
 
   it('reports a missing controlled node as an invalid workflow', async () => {
-    const provider = new ComfyUiImageProvider('staging', async (input) => {
+    const provider = new ComfyUiImageProvider(stagingRoot, async (input) => {
       const pathname = new URL(String(input)).pathname;
       if (pathname === '/system_stats') return Response.json({ devices: [] });
       if (pathname === '/object_info') {
@@ -150,7 +155,7 @@ describe('ComfyUI image provider', () => {
 
   it('cancels only the addressed provider job when supported', async () => {
     const fake = fakeFetchFactory();
-    const provider = new ComfyUiImageProvider('staging', fake.fetchImpl);
+    const provider = new ComfyUiImageProvider(stagingRoot, fake.fetchImpl);
     expect((await provider.readiness(settings)).supportsCancellation).toBe(true);
     await provider.cancel(request.providerJobId, settings);
     expect(fake.calls).toContain(
