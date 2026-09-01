@@ -34,6 +34,7 @@ export function migrateDatabase(database: DatabaseHandle): string {
     '0007_scene_engine',
     '0008_scene_source_snapshot',
     '0009_visual_consistency',
+    '0010_image_generation',
   ];
   database.sqlite.exec(readFileSync(join(migrationDirectory, '0000_initial.sql'), 'utf8'));
   database.sqlite.exec(

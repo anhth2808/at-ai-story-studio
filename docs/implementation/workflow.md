@@ -72,6 +72,31 @@ and future canonical character edits stale only dependent prompts. Scene
 planning never starts image generation, media upload, narration, subtitle, or
 render work.
 
+## Image workflow
+
+Image generation is another persisted step on the same one-worker queue:
+
+```text
+CURRENT Visual Prompt Package -> GENERATE_SCENE_IMAGE -> validate -> promote -> SCENE_IMAGE Asset
+```
+
+Scheduling resolves a concrete seed and persists the generation revision,
+provider prompt UUID, settings/package fingerprints, workflow step, and job.
+The worker checks ComfyUI history and queue state before submission, polls for
+terminal evidence, downloads only the controlled output node, validates the
+file, and commits the Asset under the active lease. Restart recovery therefore
+resumes the same provider prompt instead of blindly submitting another one.
+
+Technical retry keeps the logical generation and seed. Same-seed or new-seed
+regeneration creates a separate immutable revision. If package or settings
+inputs change while ComfyUI runs, a validated result may remain historical but
+cannot become current. Manual uploads enter the same revision/current model
+without a provider job.
+
+Chapter and selected-Scene batches materialize bounded independent one-step
+jobs. With one worker, effective ComfyUI generation concurrency remains one.
+Image completion never schedules rendering or video generation.
+
 ## Batch outcomes
 
 Batch items are independently `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED`, or `CANCELLED`. Failure pauses later work. Retry resets only the failed item. Skip records a visible gap marker and makes only the immediate successor dependency optional; it is never counted as generated content. Cancel stops future claims and propagates cancellation to the active step.

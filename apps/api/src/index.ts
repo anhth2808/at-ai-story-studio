@@ -51,6 +51,14 @@ import {
   locationSchema,
   locationUpdateSchema,
   subtitleReplacementSchema,
+  imageGenerationBatchSchema,
+  imageGenerationChapterBatchSchema,
+  imageGenerationSettingsUpdateSchema,
+  sceneImageCurrentSelectionSchema,
+  sceneImageGenerationScheduleSchema,
+  sceneImageRegenerationSchema,
+  sceneImageManualUploadSchema,
+  sceneImageReviewUpdateSchema,
 } from '@studio/shared';
 import type { OmpReadiness } from '@studio/shared';
 import { StudioService, createOmpAgent, createStoryEngine, parseSrt } from '@studio/workflow';
@@ -793,6 +801,169 @@ app.post(
       );
   },
 );
+app.get('/api/projects/:projectId/image-settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.images.getSettings(idSchema.parse(params.projectId));
+});
+app.put('/api/projects/:projectId/image-settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.images.updateSettings(
+    idSchema.parse(params.projectId),
+    imageGenerationSettingsUpdateSchema.parse(request.body),
+  );
+});
+app.post('/api/projects/:projectId/image-settings/readiness', async (request) => {
+  const params = request.params as { projectId: string };
+  return await service.images.readiness(idSchema.parse(params.projectId), request.signal);
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/images', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.images.listGenerations(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/images/current', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const image = service.images.getCurrentGeneration(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+  );
+  if (!image) throw new AppError('NOT_FOUND', 'Current Scene image not found', 404);
+  return image;
+});
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/images/:generationId',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.images.getGeneration(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+    );
+  },
+);
+app.post('/api/projects/:projectId/scenes/:sceneId/images/generate', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return reply.code(202).send(
+    service.images.schedule(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      sceneImageGenerationScheduleSchema.parse(request.body ?? {}),
+    ),
+  );
+});
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/images/:generationId/regenerate',
+  async (request, reply) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return reply.code(202).send(
+      service.images.regenerate(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        idSchema.parse(params.generationId),
+        sceneImageRegenerationSchema.parse(request.body ?? {}),
+      ),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/images/:generationId/review',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.images.updateReview(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneImageReviewUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/images/:generationId/current',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.images.setCurrent(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneImageCurrentSelectionSchema.parse(request.body ?? {}),
+    );
+  },
+);
+app.post('/api/projects/:projectId/scenes/:sceneId/images/manual', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const query = request.query as { notes?: string };
+  const projectId = idSchema.parse(params.projectId);
+  const sceneId = idSchema.parse(params.sceneId);
+  const input = sceneImageManualUploadSchema.parse({ notes: query.notes ?? '' });
+  const part = await request.file();
+  if (!part) throw new AppError('INVALID_UPLOAD', 'Image file is required', 400);
+  const extensionByMime: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+  };
+  const extension = extensionByMime[part.mimetype];
+  if (!extension) throw new AppError('INVALID_UPLOAD', 'Only PNG, JPEG, and WEBP images are supported', 400);
+  const stagingPath = join(workspace.staging, `manual-image-${randomUUID()}${extension}`);
+  try {
+    await pipeline(part.file, createWriteStream(stagingPath));
+    if (part.file.truncated || statSync(stagingPath).size > 50_000_000)
+      throw new AppError('INVALID_UPLOAD', 'Scene image exceeds the 50 MB limit', 413);
+    const image = await service.images.registerManual(
+      projectId,
+      sceneId,
+      stagingPath,
+      input.notes,
+    );
+    return reply.code(201).send(image);
+  } catch (error) {
+    await rm(stagingPath, { force: true });
+    throw error;
+  }
+});
+app.post('/api/projects/:projectId/images/generate-batch', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply.code(202).send(
+    service.images.scheduleBatch(
+      idSchema.parse(params.projectId),
+      imageGenerationBatchSchema.parse(request.body),
+    ),
+  );
+});
+app.post(
+  '/api/projects/:projectId/chapters/:chapterId/images/generate-batch',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; chapterId: string };
+    return reply.code(202).send(
+      service.images.scheduleChapterBatch(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.chapterId),
+        imageGenerationChapterBatchSchema.parse(request.body ?? {}),
+      ),
+    );
+  },
+);
 app.get('/api/projects/:projectId/story/state', async (request) => {
   const params = request.params as { projectId: string };
   const projectId = idSchema.parse(params.projectId);
@@ -1108,6 +1279,16 @@ app.setErrorHandler((error, _request, reply) => {
     return reply
       .code(400)
       .send({ error: { code: 'VALIDATION_ERROR', message: 'Invalid request' } });
+  if (
+    error instanceof Error &&
+    'statusCode' in error &&
+    typeof error.statusCode === 'number' &&
+    error.statusCode >= 400 &&
+    error.statusCode < 500
+  )
+    return reply
+      .code(error.statusCode)
+      .send({ error: { code: 'INVALID_REQUEST', message: 'Invalid request' } });
   app.log.error(error);
   return reply
     .code(500)

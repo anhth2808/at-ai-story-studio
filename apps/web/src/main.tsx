@@ -1,5 +1,5 @@
 import { StrictMode, useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { DEFAULT_OMP_MODEL } from '@studio/shared';
 
@@ -29,6 +29,9 @@ import type {
   VisualObjectProfileDto,
   VisualPromptPackageDto,
   SceneObjectResolution,
+  ImageGenerationSettingsDto,
+  ImageReadiness,
+  SceneImageGenerationDto,
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -69,9 +72,10 @@ type SubtitleAsset = { srt: string; url: string };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const isMultipart = init?.body instanceof FormData;
-  const headers = isMultipart
-    ? { ...(init?.headers ?? {}) }
-    : { 'Content-Type': 'application/json', ...(init?.headers ?? {}) };
+  const headers =
+    isMultipart || init?.body === undefined
+      ? { ...(init?.headers ?? {}) }
+      : { 'Content-Type': 'application/json', ...(init?.headers ?? {}) };
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
@@ -371,6 +375,79 @@ const visualApi = {
         method: 'PUT',
         body: JSON.stringify({ visualObjectProfileId }),
       },
+    ),
+};
+
+type ImageScheduleDto = {
+  executionId: string;
+  stepId: string;
+  jobId: string;
+  generation: SceneImageGenerationDto;
+};
+const imageApi = {
+  settings: (projectId: string) =>
+    api<ImageGenerationSettingsDto>(`/api/projects/${projectId}/image-settings`),
+  saveSettings: (projectId: string, body: Record<string, unknown>) =>
+    api<ImageGenerationSettingsDto>(`/api/projects/${projectId}/image-settings`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  readiness: (projectId: string) =>
+    api<ImageReadiness>(`/api/projects/${projectId}/image-settings/readiness`, {
+      method: 'POST',
+    }),
+  list: (projectId: string, sceneId: string) =>
+    api<SceneImageGenerationDto[]>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images?limit=50&offset=0`,
+    ),
+  generate: (projectId: string, sceneId: string, instructions = '') =>
+    api<ImageScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/images/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ instructions }),
+    }),
+  regenerate: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ) =>
+    api<ImageScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/regenerate`,
+      { method: 'POST', body: JSON.stringify({ mode, instructions: '' }) },
+    ),
+  review: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    status: 'UNREVIEWED' | 'ACCEPTED' | 'REJECTED',
+    notes = '',
+  ) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/review`,
+      { method: 'PUT', body: JSON.stringify({ status, notes }) },
+    ),
+  setCurrent: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    expectedSceneRevision: number,
+  ) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/current`,
+      { method: 'PUT', body: JSON.stringify({ expectedSceneRevision }) },
+    ),
+  upload: (projectId: string, sceneId: string, file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/manual`,
+      { method: 'POST', body },
+    );
+  },
+  chapterBatch: (projectId: string, chapterId: string) =>
+    api<{ jobs: ImageScheduleDto[] }>(
+      `/api/projects/${projectId}/chapters/${chapterId}/images/generate-batch`,
+      { method: 'POST', body: JSON.stringify({ onlyMissing: true, includeStale: true }) },
     ),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
@@ -2406,6 +2483,12 @@ function ScenesWorkspace({
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [draft, setDraft] = useState<SceneDto | null>(null);
   const [scenePackage, setScenePackage] = useState<VisualPromptPackageDto | null>(null);
+  const [imageSettings, setImageSettings] = useState<ImageGenerationSettingsDto | null>(null);
+  const [imageReadiness, setImageReadiness] = useState<ImageReadiness | null>(null);
+  const [sceneImages, setSceneImages] = useState<SceneImageGenerationDto[]>([]);
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const [imageInstructions, setImageInstructions] = useState('');
+  const [showImageSettings, setShowImageSettings] = useState(false);
   const [density, setDensity] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('MEDIUM');
   const [targetMin, setTargetMin] = useState('');
   const [targetMax, setTargetMax] = useState('');
@@ -2442,7 +2525,12 @@ function ScenesWorkspace({
           aspectRatio: nextStyle.aspectRatio,
           promptSuffix: nextStyle.promptSuffix,
         });
-      setLocations(await sceneApi.locations(projectId));
+      const [nextLocations, nextImageSettings] = await Promise.all([
+        sceneApi.locations(projectId),
+        imageApi.settings(projectId),
+      ]);
+      setLocations(nextLocations);
+      setImageSettings(nextImageSettings);
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể tải dữ liệu cảnh');
     } finally {
@@ -2478,6 +2566,8 @@ function ScenesWorkspace({
     if (!selectedSceneId) {
       setDraft(null);
       setScenePackage(null);
+      setSceneImages([]);
+      setSelectedImageId(null);
       return;
     }
     const selectedScene = sceneList.find((scene) => scene.id === selectedSceneId);
@@ -2485,10 +2575,17 @@ function ScenesWorkspace({
       void Promise.all([
         sceneApi.get(projectId, selectedScene.id),
         visualApi.scenePackage(projectId, selectedScene.id).catch(() => null),
+        imageApi.list(projectId, selectedScene.id),
       ])
-        .then(([nextDraft, nextPackage]) => {
+        .then(([nextDraft, nextPackage, nextImages]) => {
           setDraft(nextDraft);
           setScenePackage(nextPackage);
+          setSceneImages(nextImages);
+          setSelectedImageId((current) =>
+            current && nextImages.some((image) => image.id === current)
+              ? current
+              : (nextImages.find((image) => image.isCurrent)?.id ?? nextImages[0]?.id ?? null),
+          );
         })
         .catch((cause) =>
           onError(cause instanceof Error ? cause.message : 'Không thể tải chi tiết cảnh'),
@@ -2519,6 +2616,8 @@ function ScenesWorkspace({
           );
           await loadSceneChapters();
           await loadScenes();
+          if (selectedSceneId)
+            setSceneImages(await imageApi.list(projectId, selectedSceneId));
           onChanged();
           const failed = jobs.find((job) => job.status === 'FAILED');
           if (failed) setSceneFailedJob(failed);
@@ -2526,7 +2625,7 @@ function ScenesWorkspace({
         }
       } catch (cause) {
         if (!disposed)
-          onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job Scene Engine');
+          onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job nền');
       }
     };
     void poll();
@@ -2535,7 +2634,7 @@ function ScenesWorkspace({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [projectId, sceneJobIds]);
+  }, [projectId, sceneJobIds, selectedSceneId]);
 
   const chapter = sceneChapters.find((item) => item.chapterId === selectedChapterId);
   const sceneJobBody = (): Record<string, unknown> => {
@@ -2687,6 +2786,118 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể rebuild Visual Prompt Package');
     }
   };
+  const queueImage = (result: ImageScheduleDto): void => {
+    setSceneImages((current) => [
+      result.generation,
+      ...current.filter((item) => item.id !== result.generation.id),
+    ]);
+    setSelectedImageId(result.generation.id);
+    setSceneJobIds((current) => [...new Set([...current, result.jobId])]);
+  };
+  const saveImageSettings = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!imageSettings) return;
+    try {
+      const saved = await imageApi.saveSettings(projectId, {
+        provider: imageSettings.provider,
+        baseUrl: imageSettings.baseUrl,
+        workflowTemplate: imageSettings.workflowTemplate,
+        diffusionModel: imageSettings.diffusionModel,
+        textEncoder: imageSettings.textEncoder,
+        vaeName: imageSettings.vaeName,
+        sampler: imageSettings.sampler,
+        connectionTimeoutMs: imageSettings.connectionTimeoutMs,
+        generationTimeoutMs: imageSettings.generationTimeoutMs,
+        width: imageSettings.width,
+        height: imageSettings.height,
+        steps: imageSettings.steps,
+        guidance: imageSettings.guidance,
+        seedMode: imageSettings.seedMode,
+        fixedSeed: imageSettings.fixedSeed,
+        expectedRowVersion: imageSettings.rowVersion,
+      });
+      setImageSettings(saved);
+      setImageReadiness(null);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu cài đặt tạo ảnh');
+    }
+  };
+  const checkImageReadiness = async (): Promise<void> => {
+    try {
+      setImageReadiness(await imageApi.readiness(projectId));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể kiểm tra ComfyUI');
+    }
+  };
+  const generateSceneImage = async (): Promise<void> => {
+    if (!draft) return;
+    if (!scenePackage) {
+      onError('Cảnh chưa có Visual Prompt Package hiện hành.');
+      return;
+    }
+    try {
+      queueImage(await imageApi.generate(projectId, draft.id, imageInstructions.trim()));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lên lịch tạo ảnh');
+    }
+  };
+  const regenerateImage = async (
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ): Promise<void> => {
+    if (!draft) return;
+    try {
+      queueImage(await imageApi.regenerate(projectId, draft.id, generationId, mode));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo lại ảnh');
+    }
+  };
+  const reviewImage = async (
+    generationId: string,
+    status: 'ACCEPTED' | 'REJECTED',
+  ): Promise<void> => {
+    if (!draft) return;
+    try {
+      const saved = await imageApi.review(projectId, draft.id, generationId, status);
+      setSceneImages((current) =>
+        current.map((item) => (item.id === saved.id ? saved : item)),
+      );
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá ảnh');
+    }
+  };
+  const selectCurrentImage = async (generationId: string): Promise<void> => {
+    if (!draft) return;
+    try {
+      await imageApi.setCurrent(projectId, draft.id, generationId, draft.revision);
+      setSceneImages(await imageApi.list(projectId, draft.id));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chọn ảnh hiện hành');
+    }
+  };
+  const uploadSceneImage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!draft || !file) return;
+    try {
+      await imageApi.upload(projectId, draft.id, file);
+      setSceneImages(await imageApi.list(projectId, draft.id));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tải ảnh thủ công');
+    }
+  };
+  const generateChapterImages = async (): Promise<void> => {
+    if (!selectedChapterId) return;
+    try {
+      const result = await imageApi.chapterBatch(projectId, selectedChapterId);
+      result.jobs.forEach(queueImage);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo ảnh theo chương');
+    }
+  };
   const updateDraft = <K extends keyof SceneDto>(key: K, value: SceneDto[K]): void => {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
   };
@@ -2702,6 +2913,14 @@ function ScenesWorkspace({
   const allCurrentPageSelected =
     sceneChapters.length > 0 &&
     sceneChapters.every((item) => selectedBatchIds.includes(item.chapterId));
+  const displayedImage =
+    sceneImages.find((image) => image.id === selectedImageId) ??
+    sceneImages.find((image) => image.isCurrent) ??
+    sceneImages[0] ??
+    null;
+  const imageGenerationActive = sceneImages.some((image) =>
+    ['PENDING', 'RUNNING'].includes(image.status),
+  );
 
   if (loading) {
     return (
@@ -2761,6 +2980,19 @@ function ScenesWorkspace({
           </button>
           <button className="secondary" onClick={() => setShowStyle((current) => !current)}>
             {showStyle ? 'Ẩn phong cách' : 'Phong cách hình ảnh'}
+          </button>
+          <button
+            className="secondary"
+            onClick={() => setShowImageSettings((current) => !current)}
+          >
+            {showImageSettings ? 'Ẩn cài đặt tạo ảnh' : 'Cài đặt tạo ảnh'}
+          </button>
+          <button
+            className="secondary"
+            disabled={!selectedChapterId || sceneJobIds.length > 0}
+            onClick={() => void generateChapterImages()}
+          >
+            Tạo ảnh còn thiếu trong chương
           </button>
         </div>
       </div>
@@ -2832,6 +3064,116 @@ function ScenesWorkspace({
             </label>
           </div>
           <button type="submit">Lưu phong cách hình ảnh</button>
+        </form>
+      )}
+      {showImageSettings && imageSettings && (
+        <form className="scene-style panel" onSubmit={(event) => void saveImageSettings(event)}>
+          <div className="section-head">
+            <div>
+              <h4>ComfyUI và mặc định tạo ảnh</h4>
+              <p className="muted">
+                Workflow được kiểm soát bởi ứng dụng. Chỉ cấu hình endpoint, model và tham số.
+              </p>
+            </div>
+            <span className="status-chip">Phiên bản {imageSettings.rowVersion}</span>
+          </div>
+          <div className="scene-form-grid">
+            {(
+              [
+                ['baseUrl', 'URL ComfyUI'],
+                ['diffusionModel', 'Diffusion model'],
+                ['textEncoder', 'Text encoder'],
+                ['vaeName', 'VAE'],
+                ['sampler', 'Sampler'],
+              ] as const
+            ).map(([key, label]) => (
+              <label className="field" key={key}>
+                <span>{label}</span>
+                <input
+                  required
+                  value={imageSettings[key]}
+                  onChange={(event) =>
+                    setImageSettings((current) =>
+                      current ? { ...current, [key]: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+            ))}
+            {(
+              [
+                ['width', 'Chiều rộng', 16],
+                ['height', 'Chiều cao', 16],
+                ['steps', 'Số bước', 1],
+                ['guidance', 'Guidance', 0],
+                ['connectionTimeoutMs', 'Timeout kết nối (ms)', 500],
+                ['generationTimeoutMs', 'Timeout tạo ảnh (ms)', 5000],
+              ] as const
+            ).map(([key, label, min]) => (
+              <label className="field" key={key}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={min}
+                  value={imageSettings[key]}
+                  onChange={(event) =>
+                    setImageSettings((current) =>
+                      current ? { ...current, [key]: Number(event.target.value) } : current,
+                    )
+                  }
+                />
+              </label>
+            ))}
+            <label className="field">
+              <span>Seed mặc định</span>
+              <select
+                value={imageSettings.seedMode}
+                onChange={(event) =>
+                  setImageSettings((current) =>
+                    current
+                      ? {
+                          ...current,
+                          seedMode: event.target.value as ImageGenerationSettingsDto['seedMode'],
+                          fixedSeed: event.target.value === 'FIXED' ? (current.fixedSeed ?? 0) : null,
+                        }
+                      : current,
+                  )
+                }
+              >
+                <option value="RANDOM">Ngẫu nhiên</option>
+                <option value="FIXED">Cố định</option>
+              </select>
+            </label>
+            {imageSettings.seedMode === 'FIXED' && (
+              <label className="field">
+                <span>Fixed seed</span>
+                <input
+                  type="number"
+                  min="0"
+                  value={imageSettings.fixedSeed ?? 0}
+                  onChange={(event) =>
+                    setImageSettings((current) =>
+                      current ? { ...current, fixedSeed: Number(event.target.value) } : current,
+                    )
+                  }
+                />
+              </label>
+            )}
+          </div>
+          {imageReadiness && (
+            <div
+              className={`scene-job-status readiness-${imageReadiness.status.toLowerCase()}`}
+              role="status"
+            >
+              {imageReadiness.status}: {imageReadiness.message}
+            </div>
+          )}
+          <div className="actions">
+            <button type="submit">Lưu cài đặt</button>
+            <button type="button" className="secondary" onClick={() => void checkImageReadiness()}>
+              Kiểm tra kết nối
+            </button>
+          </div>
         </form>
       )}
       <div className="scene-layout">
@@ -3092,6 +3434,167 @@ function ScenesWorkspace({
                   </button>
                 </section>
               )}
+              <section className="scene-image-panel field-wide">
+                <div className="section-head">
+                  <div>
+                    <span className="field-label">Ảnh cảnh</span>
+                    <p className="muted">
+                      Tạo bằng Visual Prompt Package hiện hành hoặc thay bằng ảnh thủ công.
+                    </p>
+                  </div>
+                  <div className="chip-row">
+                    {displayedImage && (
+                      <>
+                        <span className={`status-chip status-${displayedImage.status.toLowerCase()}`}>
+                          {displayedImage.status}
+                        </span>
+                        <span
+                          className={`status-chip status-${displayedImage.freshness.toLowerCase()}`}
+                        >
+                          {displayedImage.freshness}
+                        </span>
+                        <span className="status-chip">
+                          {displayedImage.source === 'MANUAL' ? 'Thủ công' : 'ComfyUI'}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {displayedImage?.assetUrl ? (
+                  <img
+                    className="scene-image-preview"
+                    src={`${API_BASE}${displayedImage.assetUrl}`}
+                    alt={`Ảnh cho cảnh ${draft.sceneNumber}: ${draft.title}`}
+                  />
+                ) : (
+                  <div className="scene-image-empty">
+                    {imageGenerationActive ? 'Đang tạo ảnh...' : 'Cảnh này chưa có ảnh.'}
+                  </div>
+                )}
+                {displayedImage && (
+                  <div className="scene-image-meta">
+                    <span>
+                      Seed {displayedImage.actualSeed ?? displayedImage.requestedSeed ?? 'n/a'}
+                    </span>
+                    <span>
+                      {displayedImage.actualWidth ?? displayedImage.requestedWidth ?? '?'} ×{' '}
+                      {displayedImage.actualHeight ?? displayedImage.requestedHeight ?? '?'}
+                    </span>
+                    <span>Lần thử {displayedImage.attempt}</span>
+                    <span>
+                      Duyệt:{' '}
+                      {displayedImage.reviewStatus === 'ACCEPTED'
+                        ? 'Đã chấp nhận'
+                        : displayedImage.reviewStatus === 'REJECTED'
+                          ? 'Đã từ chối'
+                          : 'Chưa duyệt'}
+                    </span>
+                  </div>
+                )}
+                {displayedImage?.error && (
+                  <div className="scene-job-error" role="alert">
+                    {displayedImage.errorCode}: {displayedImage.error}
+                  </div>
+                )}
+                <label className="field field-wide">
+                  <span>Chỉ dẫn bổ sung cho lần tạo ảnh</span>
+                  <textarea
+                    maxLength={2000}
+                    value={imageInstructions}
+                    onChange={(event) => setImageInstructions(event.target.value)}
+                  />
+                </label>
+                <div className="actions">
+                  {!scenePackage && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={sceneJobIds.length > 0}
+                      onClick={() => void rebuildVisualPackage()}
+                    >
+                      Tạo Visual Prompt Package
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={!scenePackage || imageGenerationActive}
+                    onClick={() => void generateSceneImage()}
+                  >
+                    Tạo ảnh
+                  </button>
+                  {displayedImage?.status === 'COMPLETED' && displayedImage.source === 'GENERATED' && (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={imageGenerationActive}
+                        onClick={() => void regenerateImage(displayedImage.id, 'SAME_SEED')}
+                      >
+                        Tạo lại cùng seed
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={imageGenerationActive}
+                        onClick={() => void regenerateImage(displayedImage.id, 'NEW_SEED')}
+                      >
+                        Tạo lại seed mới
+                      </button>
+                    </>
+                  )}
+                  <label className="button secondary upload-button">
+                    Thay ảnh thủ công
+                    <input
+                      hidden
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={(event) => void uploadSceneImage(event)}
+                    />
+                  </label>
+                  {displayedImage?.status === 'COMPLETED' && (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void reviewImage(displayedImage.id, 'ACCEPTED')}
+                      >
+                        Chấp nhận
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void reviewImage(displayedImage.id, 'REJECTED')}
+                      >
+                        Từ chối
+                      </button>
+                      {!displayedImage.isCurrent && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void selectCurrentImage(displayedImage.id)}
+                        >
+                          Chọn làm ảnh hiện hành
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+                {sceneImages.length > 1 && (
+                  <div className="scene-image-history" aria-label="Lịch sử ảnh cảnh">
+                    {sceneImages.map((image) => (
+                      <button
+                        type="button"
+                        className={image.id === displayedImage?.id ? 'active' : ''}
+                        key={image.id}
+                        onClick={() => setSelectedImageId(image.id)}
+                      >
+                        v{image.revision} · {image.status} · {image.actualSeed ?? image.requestedSeed ?? 'n/a'}
+                        {image.isCurrent ? ' · hiện hành' : ''}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
               {draft.characters.length > 0 && (
                 <div className="scene-character-snapshots field-wide">
                   <span className="field-label">Nhân vật và trạng thái hình ảnh</span>

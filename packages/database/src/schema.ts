@@ -1204,3 +1204,106 @@ export const visualPromptPackageDependencies = sqliteTable(
     package: index('visual_prompt_package_dependencies_package_idx').on(table.packageId),
   }),
 );
+
+export const imageGenerationSettings = sqliteTable(
+  'image_generation_settings',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull().default('COMFYUI'),
+    baseUrl: text('base_url').notNull().default('http://127.0.0.1:8188'),
+    workflowTemplate: text('workflow_template').notNull().default('text-to-image-v1'),
+    diffusionModel: text('diffusion_model').notNull().default(''),
+    textEncoder: text('text_encoder').notNull().default(''),
+    vaeName: text('vae_name').notNull().default(''),
+    sampler: text('sampler').notNull().default('euler'),
+    connectionTimeoutMs: integer('connection_timeout_ms').notNull().default(5000),
+    generationTimeoutMs: integer('generation_timeout_ms').notNull().default(3_600_000),
+    width: integer('width').notNull().default(1024),
+    height: integer('height').notNull().default(576),
+    steps: integer('steps').notNull().default(20),
+    guidance: real('guidance').notNull().default(5),
+    seedMode: text('seed_mode').notNull().default('RANDOM'),
+    fixedSeed: integer('fixed_seed'),
+    rowVersion: integer('row_version').notNull().default(1),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    project: uniqueIndex('image_generation_settings_project_idx').on(table.projectId),
+  }),
+);
+
+export const sceneImageGenerations = sqliteTable(
+  'scene_image_generations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    visualPromptPackageId: text('visual_prompt_package_id').references(
+      () => visualPromptPackages.id,
+      { onDelete: 'set null' },
+    ),
+    revision: integer('revision').notNull(),
+    source: text('source').notNull().default('GENERATED'),
+    provider: text('provider'),
+    status: text('status').notNull().default('PENDING'),
+    reviewStatus: text('review_status').notNull().default('UNREVIEWED'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    requestedSeed: integer('requested_seed'),
+    actualSeed: integer('actual_seed'),
+    requestedWidth: integer('requested_width'),
+    requestedHeight: integer('requested_height'),
+    actualWidth: integer('actual_width'),
+    actualHeight: integer('actual_height'),
+    providerJobId: text('provider_job_id'),
+    workflowTemplate: text('workflow_template'),
+    modelSettings: text('model_settings').notNull().default('{}'),
+    packageFingerprint: text('package_fingerprint'),
+    settingsFingerprint: text('settings_fingerprint'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    assetId: text('asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    attempt: integer('attempt').notNull().default(0),
+    durationMs: integer('duration_ms'),
+    errorCode: text('error_code'),
+    error: text('error'),
+    notes: text('notes').notNull().default(''),
+    generationInstructions: text('generation_instructions'),
+    metadata: text('metadata').notNull().default('{}'),
+    createdAt: text('created_at').notNull(),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    revision: uniqueIndex('scene_image_generations_revision_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+    current: uniqueIndex('scene_image_generations_current_idx')
+      .on(table.projectId, table.sceneStableId)
+      .where(sql`${table.isCurrent} = 1`),
+    scene: index('scene_image_generations_scene_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+    status: index('scene_image_generations_status_idx').on(
+      table.projectId,
+      table.status,
+      table.updatedAt,
+    ),
+    providerJob: index('scene_image_generations_provider_job_idx').on(table.providerJobId),
+  }),
+);

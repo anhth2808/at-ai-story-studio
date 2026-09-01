@@ -6,11 +6,12 @@ AI Story Studio is a local-first modular monolith with three connected layers:
 
 `Idea -> blueprint -> arcs/windows -> chapter generation -> StoryState -> review`
 
-`Reviewed chapter -> Scene Engine -> Visual Bible -> deterministic prompt package`
+`Reviewed chapter -> Scene Engine -> Visual Bible -> Visual Prompt Package`
 
-The Story, Scene, and Visual Consistency Engines are authoring workflows.
-Neither automatically creates narration, images, or video assets; media
-remains an explicit handoff after review.
+`CURRENT Visual Prompt Package -> ComfyUI -> validated Scene image -> review`
+
+The Story, Scene, Visual Consistency, and Image Generation workflows are
+explicit. None automatically starts narration, rendering, or video generation.
 
 ## Implementation guides
 
@@ -30,6 +31,10 @@ remains an explicit handoff after review.
 - [Visual objects](visual-objects.md)
 - [Style Bible](style-bible.md)
 - [Visual Prompt Package](visual-prompt-package.md)
+- [Image generation](image-generation.md)
+- [ComfyUI](comfyui.md)
+- [Image provider boundary](image-provider.md)
+- [Image assets](image-assets.md)
 - [Visual style](visual-style.md)
 - [Locations](locations.md)
 - [Scene prompts](scene-prompts.md)
@@ -40,8 +45,13 @@ remains an explicit handoff after review.
 The long-story path supports bounded structured generation, durable SQLite
 state, resumable chapter batches, manual chapter analysis, continuity review,
 and explicit regeneration. It intentionally stops before character-memory
-retrieval systems, scene graphs, image generation, AI video, publishing, and
-generic workflow/plugin frameworks.
+retrieval systems, scene graphs, AI video, publishing, and generic
+workflow/plugin frameworks.
+
+The image path consumes only current Visual Prompt Packages through one
+controlled ComfyUI workflow. It preserves immutable revisions, manual
+replacement, and explicit review/current selection. It does not implement
+reference conditioning, automatic best-image selection, or render handoff.
 
 The media path remains focused on the first working video: project and chapter
 creation, narration, subtitles, background media, FFmpeg rendering, and MP4

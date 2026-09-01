@@ -74,7 +74,17 @@ import { buildSceneGenerationContext, buildSceneRegenerationContext } from './sc
 import type { AiAgentProgress } from './omp-agent.js';
 import { SceneEngine } from './scene-engine.js';
 import { VisualConsistencyService, createVisualConsistencyService } from './visual-service.js';
-export { SceneEngine, VisualConsistencyService, createVisualConsistencyService };
+import { ImageGenerationService, createImageGenerationService } from './image-service.js';
+import { ComfyUiImageProvider, ImageProviderError } from './comfyui.js';
+export {
+  ComfyUiImageProvider,
+  ImageGenerationService,
+  ImageProviderError,
+  SceneEngine,
+  VisualConsistencyService,
+  createImageGenerationService,
+  createVisualConsistencyService,
+};
 import {
   renderArcPlanningPrompt,
   renderBlueprintPrompt,
@@ -86,6 +96,11 @@ import {
   renderScenePromptRefreshPrompt,
   renderSceneRegenerationPrompt,
 } from './story-prompts.js';
+export {
+  imageGenerationFingerprint,
+  imageSettingsFingerprint,
+  resolveImageSeed,
+} from './image-generation.js';
 export type StudioContext = {
   database: DatabaseHandle;
   workspace: WorkspacePaths;
@@ -106,6 +121,7 @@ export class StudioService {
   readonly sceneObjectResolutions: SceneObjectResolutionRepository;
   readonly visualPackages: VisualPromptPackageRepository;
   readonly visual: VisualConsistencyService;
+  readonly images: ImageGenerationService;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
@@ -126,6 +142,7 @@ export class StudioService {
       this.visualPackages,
       this.assets,
     );
+    this.images = createImageGenerationService(context);
   }
   createProject(input: ProjectInput): ProjectDto {
     return this.projects.create(input);
@@ -281,7 +298,7 @@ export class StudioService {
       const sceneIds = this.scenes.listCurrentSceneIds(null, projectId, locationId);
       this.workflow.invalidateEntities(
         sceneIds,
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
         'Location changed',
       );
       return saved;
@@ -305,7 +322,7 @@ export class StudioService {
       const saved = this.scenes.updateScene(scene.id, sceneEditSchema.parse(input));
       this.workflow.invalidateEntities(
         [scene.id],
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
         'Scene changed',
       );
       return saved;
@@ -338,7 +355,7 @@ export class StudioService {
     const sceneIds = this.scenes.listCurrentSceneIds(chapterId);
     this.workflow.invalidateEntities(
       sceneIds,
-      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
       error,
     );
   }
@@ -347,7 +364,7 @@ export class StudioService {
     const sceneIds = this.scenes.listProjectCurrentSceneIds(projectId);
     this.workflow.invalidateEntities(
       sceneIds,
-      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT'],
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
       error,
     );
   }
@@ -1361,10 +1378,19 @@ export class WorkerExecutor {
     private readonly storyEngine?: StoryEngine,
     private readonly sceneEngine?: SceneEngine,
     private readonly visualService?: VisualConsistencyService,
+    private readonly imageService?: ImageGenerationService,
   ) {
     this.workflow = new WorkflowRepository(context.database);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    if (step.type === 'GENERATE_SCENE_IMAGE') {
+      if (!this.imageService)
+        throw new AppError('CONFIGURATION_ERROR', 'Image generation worker is not configured', 500);
+      await this.imageService.executeStep(step, this.workerId, signal, (progress, message) => {
+        this.workflow.progress(step, progress, message);
+      });
+      return;
+    }
     if (
       step.type === 'GENERATE_CHARACTER_VISUAL_PROFILE' ||
       step.type === 'GENERATE_LOCATION_VISUAL_PROFILE' ||

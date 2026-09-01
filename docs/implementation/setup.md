@@ -8,6 +8,7 @@
 - FFmpeg and ffprobe on `PATH`, or `FFMPEG_PATH` and `FFPROBE_PATH`.
 - Internet access for Edge TTS synthesis and for the selected OMP provider.
 - An authenticated OMP model for Story generation.
+- A separately installed ComfyUI server for Scene image generation.
 
 Windows example:
 
@@ -33,6 +34,28 @@ bun apps/omp-agent/src/index.ts --readiness
 Readiness returns only `ready`, Bun runtime, selected provider/model, and safe guidance. Configure authentication through the normal OMP OAuth/auth-broker flow or provider environment. Never put API keys, OAuth tokens, or credentials in Story settings.
 
 Story settings default to `openai-codex/gpt-5.6-luna`; an explicitly selected authenticated `provider/model` remains supported. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host. The API exposes the same bounded readiness result at `/api/projects/:projectId/story/readiness`.
+
+## ComfyUI readiness
+
+Start ComfyUI on its configured credential-free HTTP(S) endpoint. The tested
+local endpoint is `http://127.0.0.1:8188`. In the Scene workspace, open
+**Cài đặt tạo ảnh**, configure the exact model filenames, save, then choose
+**Kiểm tra kết nối**.
+
+The tested Flux 2 configuration is:
+
+```text
+diffusion: flux-2-klein-base-4b-fp8.safetensors
+text encoder: qwen_3_4b.safetensors
+VAE: full_encoder_small_decoder.safetensors
+sampler: euler
+workflow: text-to-image-v1
+```
+
+Readiness checks the server API, required native nodes, model availability,
+sampler, and optional targeted-cancel support. Studio does not install ComfyUI,
+download models, accept credentials in the URL, or accept arbitrary workflow
+JSON. See [ComfyUI](comfyui.md) for the exact routes and recovery behavior.
 
 ## Install, migrate, and verify
 

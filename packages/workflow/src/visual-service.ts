@@ -603,11 +603,20 @@ export class VisualConsistencyService {
       objectResolutions: this.objectResolutions,
       locationMatches: (projectId, name) => this.scenes.listLocationMatches(projectId, name),
     });
+    const generationId = this.story.createGenerationRecord(
+      options.projectId,
+      'BUILD_VISUAL_PROMPT',
+      scene.id,
+      options.generationId ?? null,
+      result.package.inputFingerprint,
+      { deterministic: true },
+      'COMPLETED',
+    );
     return this.packages.saveCurrent({
       projectId: options.projectId,
       sceneRevisionId: scene.id,
       payload: result.package,
-      generationId: options.generationId,
+      generationId,
     });
   }
 

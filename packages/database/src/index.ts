@@ -5,3 +5,4 @@ export * from './story.js';
 export * from './story-batch.js';
 export * from './scene.js';
 export * from './visual.js';
+export * from './image.js';

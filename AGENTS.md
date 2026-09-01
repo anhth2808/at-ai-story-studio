@@ -282,6 +282,14 @@ Provider implementations can use:
 - ComfyUI
 - isolated Python sidecars
 
+# Image Generation
+
+Image providers must consume the exact current Visual Prompt Package. They must
+not reconstruct Story context or mutate canonical visual profiles.
+
+A generated image whose package, settings, fingerprint, or active lease became
+stale may remain historical, but it must never replace the current Scene image.
+
 # TTS
 
 Never assume a provider accepts arbitrarily long text.

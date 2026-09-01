@@ -49,9 +49,9 @@
 
 ## Scene Engine limits
 
-- Scene Engine plans text into structured scene metadata and image prompts only.
-  It does not generate pixels, call image/video providers, upload background
-  media, or hand prompts to rendering automatically.
+- Scene Engine plans text into structured scene metadata and image prompts. It
+  does not call image/video providers itself or hand media to rendering
+  automatically; explicit Image Generation consumes the resulting package.
 - Chapter source ranges use JavaScript UTF-16 offsets and are validated against
   the exact persisted chapter revision. Overlapping, reversed, out-of-bounds,
   or empty ranges are rejected.
@@ -73,8 +73,8 @@
 ## Visual Consistency limits
 
 - The Visual Consistency Layer produces structured profiles and deterministic
-  prompt packages only. It does not generate pixels, call an image/video
-  provider, upload generated media, or hand off to rendering automatically.
+  prompt packages. It does not call providers itself; explicit Image Generation
+  consumes one current package without changing its canonical profiles.
 - Generated profile candidates require explicit review and approval. Provider
   output quality, identity stability, and visual continuity still require
   human inspection.
@@ -89,8 +89,27 @@
 - Optional prompt refinement is fingerprint-checked and schema-validated, but
   an OMP model can still return unusable creative text. Canonical package text
   remains the deterministic source of truth.
-- Real visual quality cannot be judged from rendered pixels because image
-  generation is outside this change.
+- Visual consistency still requires manual inspection of generated pixels;
+  package validation cannot guarantee identity or composition quality.
+
+## Image Generation limits
+
+- ComfyUI is the only implemented image provider. Studio requires a separately
+  installed compatible server and configured Flux 2 model components.
+- `text-to-image-v1` is a controlled native workflow. Arbitrary workflow JSON,
+  custom nodes, model downloads, provider marketplaces, and automatic fallback
+  models are not supported.
+- Reference Asset identifiers are preserved in requests but the current
+  workflow does not condition on them. It reports `REFERENCE_IMAGES_UNUSED`.
+  Face and identity drift are expected and must be reviewed manually.
+- Effective provider concurrency is one because the current durable worker
+  claims one step at a time. No extra semaphore or second queue exists.
+- A server without targeted running-job cancellation can only stop Studio's
+  local wait. Studio never issues an uncertain global ComfyUI interrupt.
+- Generated and manual image history is retained. There is no destructive
+  revision deletion or long-term orphan-retention policy yet.
+- Image generation does not select a best output automatically and does not
+  hand images to FFmpeg, background media, image-to-video, or AI video.
 
 ## Verification record
 
@@ -147,7 +166,36 @@ Scene action, and deterministic dependency fingerprints. Several earlier
 attempts returned scalar values for array fields, so strict validation rejected
 them without profile persistence; this remains a provider adherence weakness.
 
-These limits are deliberate boundaries for the first working video and the
-bounded long-story authoring workflow. They do not enable character-memory
-retrieval, scene graphs, image generation, AI video, publishing, or generic
-workflow/plugin systems.
+## Image Generation verification record
+
+Live verification on 2026-09-01 used ComfyUI `0.33.1` at
+`http://127.0.0.1:8188` with `text-to-image-v1`,
+`flux-2-klein-base-4b-fp8.safetensors`, `qwen_3_4b.safetensors`, and
+`full_encoder_small_decoder.safetensors`. UI readiness returned
+`READY` with targeted cancellation supported.
+
+- The Smoke project scene required a current package; the first build exposed
+  and fixed an FK bug (`generation_id` referenced a workflow step id). A
+  deterministic `BUILD_VISUAL_PROMPT` generation record is now created first.
+- Real generation 1 (`job 6b7a69d6`, seed `1001779549`, 40.8s) published a
+  1024x576 PNG (155,855 bytes, sha256 `dc69219...`) as the current Asset.
+  New-seed regeneration (`job 30868d77`, seed `354441164`, 37.5s) added
+  immutable revision 2; revision 1 stayed previewable. Set Current and review
+  updates rotated pointers transactionally. API/worker restart preserved
+  history, current selection, review state, and asset serving without
+  resubmission. Manual PNG upload became revision 3/current.
+- Model quality on the intentionally minimal fixture scene was degenerate:
+  garbled pseudo-text (revision 1) and a near-blank frame (revision 2).
+  After a manual scene edit to a content-bearing prompt and deterministic
+  package rebuild, generation 4 (seed `27457721`, ~168s) produced a coherent
+  lighthouse-on-foggy-cliff-at-dawn image matching the prompt, with drift:
+  the model doubled the lighthouse and the path fades unnaturally. Character
+  resemblance is not demonstrable because the fixture scene has no characters.
+- Reference Assets remain request-only; `REFERENCE_IMAGES_UNUSED` is asserted
+  in provider tests. No reference conditioning or video handoff exists.
+
+
+These limits are deliberate boundaries for the first working video, bounded
+long-story authoring, and first working image workflows. They do not enable
+character-memory retrieval, scene graphs, reference-conditioned generation,
+AI video, publishing, or generic workflow/plugin systems.

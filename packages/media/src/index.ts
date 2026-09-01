@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { access, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { access, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, extname, join, normalize, relative, resolve, win32 } from 'node:path';
 import { AppError } from '@studio/shared';
@@ -90,7 +90,7 @@ export async function prepareProjectDirectories(
 ): Promise<void> {
   const base = join(paths.projects, projectId);
   await Promise.all(
-    ['chapters', 'audio/segments', 'subtitles', 'backgrounds', 'music', 'renders'].map((part) =>
+    ['chapters', 'audio/segments', 'subtitles', 'backgrounds', 'music', 'renders', 'images/scenes'].map((part) =>
       mkdir(join(base, part), { recursive: true }),
     ),
   );
@@ -367,6 +367,67 @@ export async function validateMediaFile(
   }
   return await tools.validateProbe(filename, kind === 'mp4' ? 'video' : kind);
 }
+
+export type ValidatedImage = {
+  format: 'png' | 'jpeg' | 'webp';
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
+  width: number;
+  height: number;
+  probe: Record<string, unknown>;
+};
+
+export async function validateImageFile(
+  tools: FfmpegTools,
+  filename: string,
+): Promise<ValidatedImage> {
+  const info = await stat(filename);
+  if (!info.isFile() || info.size === 0)
+    throw new AppError('INVALID_MEDIA', 'Image file is empty', 400);
+  const handle = await open(filename, 'r');
+  const signature = Buffer.alloc(12);
+  try {
+    const result = await handle.read(signature, 0, signature.length, 0);
+    const bytes = signature.subarray(0, result.bytesRead);
+    const format =
+      bytes.length >= 8 &&
+      bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+        ? 'png'
+        : bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+          ? 'jpeg'
+          : bytes.length >= 12 &&
+              bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+              bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+            ? 'webp'
+            : null;
+    if (!format) throw new AppError('INVALID_MEDIA', 'Image format is not supported', 400);
+    const probe = await tools.validateProbe(filename, 'image');
+    const streams = Array.isArray(probe.streams) ? probe.streams : [];
+    const stream = streams.find((value): value is Record<string, unknown> => {
+      if (!value || typeof value !== 'object') return false;
+      const candidate = value as Record<string, unknown>;
+      return (
+        candidate.codec_type === 'video' &&
+        Number.isInteger(candidate.width) &&
+        Number.isInteger(candidate.height) &&
+        Number(candidate.width) >= 16 &&
+        Number(candidate.height) >= 16
+      );
+    });
+    const width = stream ? Number(stream.width) : 0;
+    const height = stream ? Number(stream.height) : 0;
+    if (!stream || width > 16_384 || height > 16_384)
+      throw new AppError('INVALID_MEDIA', 'Image dimensions are invalid', 400);
+    return {
+      format,
+      mediaType: format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp',
+      width,
+      height,
+      probe,
+    };
+  } finally {
+    await handle.close();
+  }
+}
 export type RenderArguments = {
   backgroundPath: string;
   backgroundType: 'BACKGROUND_IMAGE' | 'BACKGROUND_VIDEO';
@@ -461,6 +522,7 @@ export function contentTypeFor(filename: string): string {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
     '.srt': 'text/plain; charset=utf-8',
   };
   return types[ext] ?? 'application/octet-stream';

@@ -41,6 +41,7 @@ export const workflowStepTypeSchema = z.enum([
   'GENERATE_OBJECT_VISUAL_PROFILE',
   'BUILD_VISUAL_PROMPT',
   'REFINE_VISUAL_PROMPT',
+  'GENERATE_SCENE_IMAGE',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);
@@ -54,6 +55,7 @@ export const assetTypeSchema = z.enum([
   'MUSIC',
   'RENDERED_VIDEO',
   'TIMELINE_MANIFEST',
+  'SCENE_IMAGE',
   'CHARACTER_REFERENCE_IMAGE',
   'LOCATION_REFERENCE_IMAGE',
   'OBJECT_REFERENCE_IMAGE',
@@ -188,4 +190,5 @@ export class AppError extends Error {
   }
 }
 export * from './visual.js';
+export * from './image.js';
 export * from './story.js';

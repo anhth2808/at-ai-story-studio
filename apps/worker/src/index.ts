@@ -10,7 +10,9 @@ import {
 } from '@studio/database';
 import { FfmpegTools, ProcessRunner, reconcileWorkspace, initializeWorkspace } from '@studio/media';
 import {
+  ImageProviderError,
   WorkerExecutor,
+  createImageGenerationService,
   createOmpAgent,
   createStoryEngine,
   createVisualConsistencyService,
@@ -38,6 +40,7 @@ const sceneEngine = new SceneEngine({ database, agent });
 const batches = new StoryBatchRepository(database);
 const heartbeat = new HeartbeatRepository(database);
 const visualService = createVisualConsistencyService(database, agent);
+const imageService = createImageGenerationService(context);
 const executor = new WorkerExecutor(
   context,
   workerId,
@@ -45,6 +48,7 @@ const executor = new WorkerExecutor(
   storyEngine,
   sceneEngine,
   visualService,
+  imageService,
 );
 let stopping = false;
 let activeController: AbortController | undefined;
@@ -88,7 +92,8 @@ while (!stopping) {
       workflow.cancel(step, 'Cancelled by user');
       batches.reconcileWorkflowStep(step.id);
     } else {
-      workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', true);
+      const retry = error instanceof ImageProviderError ? error.retryable : true;
+      workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', retry);
       batches.reconcileWorkflowStep(step.id);
     }
   } finally {
