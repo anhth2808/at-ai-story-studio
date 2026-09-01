@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_OMP_MODEL,
   ompProtocolErrorSchema,
   ompProtocolRequestSchema,
   ompProtocolResultSchema,
@@ -33,6 +34,7 @@ describe('Story Engine schemas', () => {
       pacing: 'MEDIUM',
     });
     expect(settings.mode).toBe('IDEA_TO_STORY');
+    expect(settings.generation.model).toBe(DEFAULT_OMP_MODEL);
     expect(() => storySettingsSchema.parse({ ...settings, mode: 'ADAPTATION' })).toThrow();
     expect(() => storySettingsSchema.parse({ ...settings, targetChapterCount: 201 })).toThrow();
   });

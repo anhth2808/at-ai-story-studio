@@ -9,6 +9,7 @@ import {
   ProjectRepository,
   StoryBatchRepository,
   StoryRepository,
+  SceneRepository,
   WorkflowRepository,
   type ClaimedStep,
   type ChapterStatusFilter,
@@ -27,6 +28,14 @@ import {
 } from '@studio/media';
 import {
   AppError,
+  locationSchema,
+  locationUpdateSchema,
+  sceneBatchRequestSchema,
+  sceneEditSchema,
+  sceneGenerationRequestSchema,
+  scenePromptRequestSchema,
+  sceneRegenerationRequestSchema,
+  visualStyleUpdateSchema,
   storyArcSchema,
   storyGenerationBatchRequestSchema,
   storyPlanWindowResultSchema,
@@ -36,6 +45,8 @@ import {
   type JobDto,
   type ProjectDto,
   type ProjectInput,
+  type SceneDto,
+  type SceneStatus,
   type StatusSummary,
   type StoryArc,
   type StoryGenerationBatch,
@@ -53,6 +64,9 @@ import {
   renderSummaryGenerationPrompt,
   type StoryEngine,
 } from './story-engine.js';
+import { buildSceneGenerationContext, buildSceneRegenerationContext } from './scene-context.js';
+import { SceneEngine } from './scene-engine.js';
+export { SceneEngine };
 import {
   renderArcPlanningPrompt,
   renderBlueprintPrompt,
@@ -60,6 +74,9 @@ import {
   renderChapterPlanWindowPrompt,
   renderChapterPlansPrompt,
   renderSummaryCompactionPrompt,
+  renderScenePlanningPrompt,
+  renderScenePromptRefreshPrompt,
+  renderSceneRegenerationPrompt,
 } from './story-prompts.js';
 export type StudioContext = {
   database: DatabaseHandle;
@@ -74,6 +91,7 @@ export class StudioService {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
   readonly story: StoryRepository;
+  readonly scenes: SceneRepository;
   readonly batches: StoryBatchRepository;
   readonly workflow: WorkflowRepository;
   readonly assets: AssetRepository;
@@ -81,6 +99,7 @@ export class StudioService {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.story = new StoryRepository(context.database);
+    this.scenes = new SceneRepository(context.database);
     this.batches = new StoryBatchRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
@@ -127,7 +146,7 @@ export class StudioService {
   updateChapter(id: Id, input: ChapterInput): ChapterDto {
     const current = this.chapters.get(id);
     if (!current) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
-    const contentChanged = input.content !== current.content;
+    const sourceChanged = input.content !== current.content || input.title !== current.title;
     let chapter: ChapterDto;
     try {
       chapter = this.chapters.update(id, input);
@@ -136,8 +155,10 @@ export class StudioService {
         throw new AppError('REVISION_CONFLICT', error.message, 409);
       throw error;
     }
-    if (contentChanged) {
+    if (sourceChanged) {
       this.invalidateChapterDescendants(chapter.projectId, chapter.id);
+      this.scenes.markChapterStale(chapter.id);
+      this.invalidateSceneWorkflowForChapter(chapter.id);
       this.story.markManualContinuityReview(chapter.projectId, chapter.number);
     }
     return chapter;
@@ -161,6 +182,340 @@ export class StudioService {
   setRenderConfig(projectId: Id, input: unknown): void {
     this.projects.setRenderConfig(projectId, renderConfigSchema.parse(input));
     this.invalidateRender(projectId);
+  }
+  getScenePlan(projectId: Id, chapterId: Id) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter || chapter.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    return this.scenes.getScenePlan(chapterId);
+  }
+  listSceneChapters(projectId: Id, limit = 25, offset = 0, status: SceneStatus | '' = '') {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    return this.scenes.listProjectSceneChapters(projectId, limit, offset, status);
+  }
+
+  listScenes(projectId: Id, chapterId: Id, limit = 100, offset = 0, includeExcerpt = false) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter || chapter.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    return this.scenes.listScenes(chapterId, limit, offset, includeExcerpt);
+  }
+
+  getScene(projectId: Id, sceneId: Id) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const scene = this.scenes.getScene(sceneId, true);
+    if (!scene || scene.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Scene not found', 404);
+    return scene;
+  }
+
+  getSceneById(sceneId: Id) {
+    const scene = this.scenes.getScene(sceneId, true);
+    if (!scene) throw new AppError('NOT_FOUND', 'Scene not found', 404);
+    return scene;
+  }
+  getVisualStyle(projectId: Id) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    return this.scenes.getVisualStyle(projectId);
+  }
+  saveVisualStyle(projectId: Id, input: unknown) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const value = visualStyleUpdateSchema.parse(input);
+    const { expectedRevision, ...style } = value;
+    try {
+      const saved = this.scenes.saveVisualStyle(projectId, style, expectedRevision);
+      this.invalidateSceneWorkflowForProject(projectId, 'Visual style changed');
+      return saved;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Revision conflict')
+        throw new AppError('REVISION_CONFLICT', error.message, 409);
+      throw error;
+    }
+  }
+
+  listLocations(projectId: Id, limit = 100, offset = 0) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    return this.scenes.listLocations(projectId, limit, offset);
+  }
+  createLocation(projectId: Id, input: unknown) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    try {
+      return this.scenes.createLocation(projectId, locationSchema.parse(input));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Location name is invalid')
+        throw new AppError('INVALID_INPUT', error.message, 400);
+      if (
+        error instanceof Error &&
+        error.message === 'A location with the same normalized name already exists'
+      )
+        throw new AppError('LOCATION_CONFLICT', error.message, 409);
+      throw error;
+    }
+  }
+
+  updateLocation(projectId: Id, locationId: Id, input: unknown) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    try {
+      const saved = this.scenes.updateLocation(
+        projectId,
+        locationId,
+        locationUpdateSchema.parse(input),
+      );
+      const sceneIds = this.scenes.listCurrentSceneIds(null, projectId, locationId);
+      this.workflow.invalidateEntities(
+        sceneIds,
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+        'Location changed',
+      );
+      return saved;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Revision conflict')
+        throw new AppError('REVISION_CONFLICT', error.message, 409);
+      if (error instanceof Error && error.message === 'Location name is invalid')
+        throw new AppError('INVALID_INPUT', error.message, 400);
+      if (
+        error instanceof Error &&
+        error.message === 'A location with the same normalized name already exists'
+      )
+        throw new AppError('LOCATION_CONFLICT', error.message, 409);
+      throw error;
+    }
+  }
+
+  updateScene(projectId: Id, sceneId: Id, input: unknown) {
+    const scene = this.getScene(projectId, sceneId);
+    try {
+      const saved = this.scenes.updateScene(scene.id, sceneEditSchema.parse(input));
+      this.workflow.invalidateEntities(
+        [scene.id],
+        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+        'Scene changed',
+      );
+      return saved;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Revision conflict')
+        throw new AppError('REVISION_CONFLICT', error.message, 409);
+      if (error instanceof Error && error.message === 'Location match is ambiguous')
+        throw new AppError('LOCATION_AMBIGUOUS', error.message, 409);
+      throw error;
+    }
+  }
+  private assertSceneSchedulingCurrent(scene: SceneDto): void {
+    const chapter = this.chapters.get(scene.chapterId);
+    const plan = this.scenes.getScenePlan(scene.chapterId);
+    if (
+      !chapter ||
+      chapter.revision !== scene.chapterRevision ||
+      scene.status !== 'CURRENT' ||
+      plan?.status !== 'CURRENT'
+    )
+      throw new AppError(
+        'STALE_INPUT',
+        'Scene plan is stale; generate a current scene plan before this operation',
+        409,
+      );
+  }
+  private invalidateSceneWorkflowForChapter(chapterId: Id): void {
+    const error = 'Scene input changed';
+    this.workflow.invalidateSteps(chapterId, ['GENERATE_SCENES'], error);
+    const sceneIds = this.scenes.listCurrentSceneIds(chapterId);
+    this.workflow.invalidateEntities(
+      sceneIds,
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      error,
+    );
+  }
+
+  private invalidateSceneWorkflowForProject(projectId: Id, error = 'Scene input changed'): void {
+    for (const chapter of this.chapters.listMetadata(projectId)) {
+      this.workflow.invalidateSteps(chapter.id, ['GENERATE_SCENES'], error);
+    }
+    const sceneIds = this.scenes.listProjectCurrentSceneIds(projectId);
+    this.workflow.invalidateEntities(
+      sceneIds,
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      error,
+    );
+  }
+
+  scheduleSceneGeneration(
+    projectId: Id,
+    chapterId: Id,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter || chapter.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    const request = sceneGenerationRequestSchema.parse(requestInput);
+    if (
+      request.expectedChapterRevision !== undefined &&
+      request.expectedChapterRevision !== chapter.revision
+    )
+      throw new AppError('REVISION_CONFLICT', 'Chapter revision is stale', 409);
+    const context = buildSceneGenerationContext({
+      story: this.story,
+      chapters: this.chapters,
+      scenes: this.scenes,
+      projectId,
+      chapterId,
+      density: request.density,
+      targetRange: request.targetRange,
+      style: this.scenes.getVisualStyle(projectId),
+    });
+    const prompt = renderScenePlanningPrompt(
+      context,
+      this.story.getSettings(projectId)?.generation.model ?? null,
+    );
+    const executionId = this.workflow.createExecution(projectId, 'SCENE_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `scene-planning:${chapterId}:${chapter.revision}:${prompt.inputFingerprint}`,
+      'GENERATE_SCENES',
+      chapterId,
+      prompt.inputFingerprint,
+      3,
+      request,
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('GENERATE_SCENES', chapterId, stepId),
+    };
+  }
+
+  scheduleSceneRegeneration(
+    projectId: Id,
+    sceneId: Id,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const scene = this.getScene(projectId, sceneId);
+    this.assertSceneSchedulingCurrent(scene);
+    const request = sceneRegenerationRequestSchema.parse(requestInput);
+    if (request.expectedRevision !== undefined && request.expectedRevision !== scene.revision)
+      throw new AppError('REVISION_CONFLICT', 'Scene revision is stale', 409);
+    const context = buildSceneRegenerationContext({
+      story: this.story,
+      chapters: this.chapters,
+      scenes: this.scenes,
+      projectId,
+      sceneId,
+      style: this.scenes.getVisualStyle(projectId),
+      instructions: request.instructions ? [request.instructions] : [],
+    });
+    const prompt = renderSceneRegenerationPrompt(
+      context,
+      scene,
+      this.story.getSettings(projectId)?.generation.model ?? null,
+    );
+    const executionId = this.workflow.createExecution(projectId, 'SCENE_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `scene-regeneration:${sceneId}:${scene.revision}:${prompt.inputFingerprint}`,
+      'REGENERATE_SCENE',
+      sceneId,
+      prompt.inputFingerprint,
+      3,
+      request,
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('REGENERATE_SCENE', sceneId, stepId),
+    };
+  }
+
+  scheduleScenePromptRefresh(
+    projectId: Id,
+    sceneId: Id,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const scene = this.getScene(projectId, sceneId);
+    this.assertSceneSchedulingCurrent(scene);
+    const request = scenePromptRequestSchema.parse(requestInput);
+    if (request.expectedRevision !== undefined && request.expectedRevision !== scene.revision)
+      throw new AppError('REVISION_CONFLICT', 'Scene revision is stale', 409);
+    const context = buildSceneRegenerationContext({
+      story: this.story,
+      chapters: this.chapters,
+      scenes: this.scenes,
+      projectId,
+      sceneId,
+      style: this.scenes.getVisualStyle(projectId),
+      instructions: request.instructions ? [request.instructions] : [],
+    });
+    const prompt = renderScenePromptRefreshPrompt(
+      context,
+      scene,
+      this.story.getSettings(projectId)?.generation.model ?? null,
+    );
+    const executionId = this.workflow.createExecution(projectId, 'SCENE_GENERATION');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `scene-prompt:${sceneId}:${scene.revision}:${prompt.inputFingerprint}`,
+      'GENERATE_SCENE_PROMPT',
+      sceneId,
+      prompt.inputFingerprint,
+      3,
+      request,
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('GENERATE_SCENE_PROMPT', sceneId, stepId),
+    };
+  }
+
+  scheduleSceneBatch(
+    projectId: Id,
+    requestInput: unknown,
+  ): { executionId: Id; jobIds: Id[]; skippedChapterIds: Id[] } {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const request = sceneBatchRequestSchema.parse(requestInput);
+    const executionId = this.workflow.createExecution(projectId, 'SCENE_GENERATION');
+    const jobIds: Id[] = [];
+    const skippedChapterIds: Id[] = [];
+    for (const chapterId of request.chapterIds) {
+      const chapter = this.chapters.get(chapterId);
+      if (!chapter || chapter.projectId !== projectId)
+        throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+      const currentPlan = this.scenes.getScenePlan(chapterId);
+      if (request.onlyMissing && currentPlan?.status === 'CURRENT' && currentPlan.sceneCount > 0) {
+        skippedChapterIds.push(chapterId);
+        continue;
+      }
+      const context = buildSceneGenerationContext({
+        story: this.story,
+        chapters: this.chapters,
+        scenes: this.scenes,
+        projectId,
+        chapterId,
+        density: request.density,
+        targetRange: request.targetRange,
+        style: this.scenes.getVisualStyle(projectId),
+      });
+      const prompt = renderScenePlanningPrompt(
+        context,
+        this.story.getSettings(projectId)?.generation.model ?? null,
+      );
+      const stepId = this.workflow.createStep(
+        executionId,
+        `scene-planning:${chapterId}:${chapter.revision}:${prompt.inputFingerprint}`,
+        'GENERATE_SCENES',
+        chapterId,
+        prompt.inputFingerprint,
+        3,
+        {
+          density: request.density,
+          targetRange: request.targetRange,
+          expectedChapterRevision: chapter.revision,
+        },
+      );
+      jobIds.push(this.workflow.createJob('GENERATE_SCENES', chapterId, stepId));
+    }
+    return { executionId, jobIds, skippedChapterIds };
   }
   scheduleStoryBlueprint(projectId: Id): { executionId: Id; jobId: Id } {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
@@ -843,10 +1198,26 @@ export class WorkerExecutor {
     private readonly workerId: string,
     private readonly tts: TtsProvider = new EdgeTtsProvider(context.runner),
     private readonly storyEngine?: StoryEngine,
+    private readonly sceneEngine?: SceneEngine,
   ) {
     this.workflow = new WorkflowRepository(context.database);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    if (
+      step.type === 'GENERATE_SCENES' ||
+      step.type === 'REGENERATE_SCENE' ||
+      step.type === 'GENERATE_SCENE_PROMPT'
+    ) {
+      if (!this.sceneEngine)
+        throw new AppError('CONFIGURATION_ERROR', 'Scene Engine worker is not configured', 500);
+      await this.sceneEngine.executeStep(step, signal, (event) => {
+        const progress = { STARTING: 0.05, AUTHENTICATING: 0.1, GENERATING: 0.5, PARSING: 0.9 }[
+          event.stage
+        ];
+        this.workflow.progress(step, progress, event.message);
+      });
+      return;
+    }
     if (
       step.type === 'GENERATE_STORY_BLUEPRINT' ||
       step.type === 'GENERATE_CHAPTER_PLANS' ||

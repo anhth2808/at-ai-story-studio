@@ -33,6 +33,9 @@ export const workflowStepTypeSchema = z.enum([
   'GENERATE_CHAPTER_V2',
   'ANALYZE_STORY_STATE',
   'CHECK_CONTINUITY',
+  'GENERATE_SCENES',
+  'REGENERATE_SCENE',
+  'GENERATE_SCENE_PROMPT',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);

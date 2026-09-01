@@ -32,7 +32,7 @@ bun apps/omp-agent/src/index.ts --readiness
 
 Readiness returns only `ready`, Bun runtime, selected provider/model, and safe guidance. Configure authentication through the normal OMP OAuth/auth-broker flow or provider environment. Never put API keys, OAuth tokens, or credentials in Story settings.
 
-Story settings may select `provider/model`, for example `zai/glm-4.5`. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host. The API exposes the same bounded readiness result at `/api/projects/:projectId/story/readiness`.
+Story settings default to `openai-codex/gpt-5.6-luna`; an explicitly selected authenticated `provider/model` remains supported. `BUN_EXECUTABLE` and `OMP_AGENT_SCRIPT` are optional overrides for the isolated host. The API exposes the same bounded readiness result at `/api/projects/:projectId/story/readiness`.
 
 ## Install, migrate, and verify
 

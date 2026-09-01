@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   AppError,
+  DEFAULT_OMP_MODEL,
   ompProtocolErrorSchema,
   ompProtocolRequestSchema,
   ompReadinessSchema,
@@ -118,7 +119,7 @@ export class OmpAgent implements AiAgent {
       version: 1,
       correlationId,
       operation: request.operation,
-      model: request.model,
+      model: request.model ?? DEFAULT_OMP_MODEL,
       promptVersion: request.promptVersion,
       schemaVersion: request.schemaVersion,
       inputFingerprint: request.inputFingerprint,

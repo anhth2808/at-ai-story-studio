@@ -12,9 +12,11 @@ export const storyGenerationModeSchema = z.literal('IDEA_TO_STORY');
 export type StoryGenerationMode = z.infer<typeof storyGenerationModeSchema>;
 
 export const storyPacingSchema = z.enum(['SLOW', 'MEDIUM', 'FAST']);
+export const DEFAULT_OMP_MODEL = 'openai-codex/gpt-5.6-luna';
+
 export const storyGenerationSettingsSchema = z
   .object({
-    model: z.string().trim().min(1).max(200).nullable().default(null),
+    model: z.string().trim().min(1).max(200).nullable().default(DEFAULT_OMP_MODEL),
     contextBudget: z.number().int().min(500).max(10_000).default(5_000),
     temperature: z.number().min(0).max(1).default(0.7),
     maxOutputTokens: z.number().int().min(256).max(32_000).default(8_000),
@@ -206,6 +208,278 @@ export const chapterSummarySchema = z
   .strict();
 export type ChapterSummary = z.infer<typeof chapterSummarySchema>;
 
+export const sceneStringArraySchema = z.array(z.string().max(2_000)).max(200);
+
+export const sceneDensitySchema = z.enum(['LOW', 'MEDIUM', 'HIGH']);
+export type SceneDensity = z.infer<typeof sceneDensitySchema>;
+
+export const scenePurposeSchema = z.enum([
+  'INTRODUCTION',
+  'ESTABLISHING',
+  'DIALOGUE',
+  'ACTION',
+  'DISCOVERY',
+  'EMOTIONAL',
+  'TRANSITION',
+  'REVEAL',
+  'CLIMAX',
+  'ENDING_HOOK',
+]);
+export type ScenePurpose = z.infer<typeof scenePurposeSchema>;
+
+export const sceneCameraFramingSchema = z.enum([
+  'EXTREME_WIDE',
+  'WIDE',
+  'FULL',
+  'MEDIUM',
+  'CLOSE_UP',
+  'EXTREME_CLOSE_UP',
+  'OVER_THE_SHOULDER',
+  'POV',
+]);
+export type SceneCameraFraming = z.infer<typeof sceneCameraFramingSchema>;
+
+export const sceneCameraSchema = z
+  .object({
+    framing: sceneCameraFramingSchema,
+    angle: boundedString(120).nullable().default(null),
+    movementIntent: boundedString(240).nullable().default(null),
+  })
+  .strict();
+export type SceneCamera = z.infer<typeof sceneCameraSchema>;
+
+export const sceneCharacterVisualStateSchema = z
+  .object({
+    clothing: boundedString(500).default(''),
+    injuries: boundedStringArray(10, 300).default([]),
+    expression: boundedString(300).default(''),
+    pose: boundedString(500).default(''),
+    action: boundedString(500).default(''),
+    position: boundedString(240).default(''),
+    heldObjects: boundedStringArray(20, 300).default([]),
+  })
+  .strict();
+export type SceneCharacterVisualState = z.infer<typeof sceneCharacterVisualStateSchema>;
+
+export const sceneCharacterSchema = z
+  .object({
+    characterId: storyStableIdSchema.nullable().default(null),
+    displayName: z.string().trim().min(1).max(200),
+    roleInScene: boundedString(240).default(''),
+    visualState: sceneCharacterVisualStateSchema.default({}),
+  })
+  .strict();
+export type SceneCharacter = z.infer<typeof sceneCharacterSchema>;
+
+export const sceneCharacterPositionSchema = z
+  .object({
+    characterId: storyStableIdSchema.nullable().default(null),
+    displayName: z.string().trim().min(1).max(200),
+    position: boundedString(240),
+  })
+  .strict();
+export type SceneCharacterPosition = z.infer<typeof sceneCharacterPositionSchema>;
+
+export const sceneCompositionSchema = z
+  .object({
+    subjectFocus: boundedString(500),
+    foreground: boundedStringArray(12, 500).default([]),
+    midground: boundedStringArray(12, 500).default([]),
+    background: boundedStringArray(12, 500).default([]),
+    characterPositions: z.array(sceneCharacterPositionSchema).max(100).default([]),
+  })
+  .strict();
+export type SceneComposition = z.infer<typeof sceneCompositionSchema>;
+
+export const sceneSourceRangeSchema = z
+  .object({
+    start: z.number().int().nonnegative(),
+    end: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.end <= value.start)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['end'],
+        message: 'Scene source range end must follow start',
+      });
+  });
+export type SceneSourceRange = z.infer<typeof sceneSourceRangeSchema>;
+
+export const scenePlanItemSchema = z
+  .object({
+    sceneNumber: z.number().int().min(1).max(200),
+    title: z.string().trim().min(1).max(200),
+    summary: boundedString(3_000),
+    purpose: scenePurposeSchema,
+    sourceRange: sceneSourceRangeSchema,
+    location: z.string().trim().min(1).max(300).nullable().default(null),
+    timeOfDay: boundedString(120).default(''),
+    weather: boundedString(120).default(''),
+    mood: boundedString(240).default(''),
+    characters: z.array(sceneCharacterSchema).max(100).default([]),
+    importantObjects: boundedStringArray(50, 500).default([]),
+    visualDescription: boundedString(4_000),
+    camera: sceneCameraSchema,
+    composition: sceneCompositionSchema,
+    lighting: boundedString(1_000).default(''),
+    colorMood: boundedString(500).default(''),
+    imagePrompt: boundedString(6_000),
+    negativePrompt: boundedString(2_000).nullable().default(null),
+    continuityNotes: boundedString(2_000).default(''),
+  })
+  .strict();
+export type ScenePlanItem = z.infer<typeof scenePlanItemSchema>;
+
+export const scenePlanningEnvelopeSchema = z
+  .object({ scenes: z.array(scenePlanItemSchema).min(1).max(200) })
+  .strict();
+export type ScenePlanningEnvelope = z.infer<typeof scenePlanningEnvelopeSchema>;
+
+export const sceneRegenerationEnvelopeSchema = z.object({ scene: scenePlanItemSchema }).strict();
+export type SceneRegenerationEnvelope = z.infer<typeof sceneRegenerationEnvelopeSchema>;
+
+export const scenePromptEnvelopeSchema = z
+  .object({
+    imagePrompt: boundedString(6_000),
+    negativePrompt: boundedString(2_000).nullable().default(null),
+  })
+  .strict();
+export type ScenePromptEnvelope = z.infer<typeof scenePromptEnvelopeSchema>;
+
+export const sceneCountRangeSchema = z
+  .object({
+    min: z.number().int().min(1).max(200),
+    max: z.number().int().min(1).max(200),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.max < value.min)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['max'],
+        message: 'Scene count range maximum must not precede minimum',
+      });
+  });
+export type SceneCountRange = z.infer<typeof sceneCountRangeSchema>;
+
+export const sceneGenerationRequestSchema = z
+  .object({
+    density: sceneDensitySchema.default('MEDIUM'),
+    targetRange: sceneCountRangeSchema.nullable().default(null),
+    expectedChapterRevision: z.number().int().positive().optional(),
+  })
+  .strict();
+export type SceneGenerationRequest = z.infer<typeof sceneGenerationRequestSchema>;
+
+export const sceneBatchRequestSchema = z
+  .object({
+    chapterIds: z.array(z.string().uuid()).min(1).max(200),
+    density: sceneDensitySchema.default('MEDIUM'),
+    targetRange: sceneCountRangeSchema.nullable().default(null),
+    onlyMissing: z.boolean().default(true),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (new Set(value.chapterIds).size !== value.chapterIds.length)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['chapterIds'],
+        message: 'Scene batch chapter IDs must be unique',
+      });
+  });
+export type SceneBatchRequest = z.infer<typeof sceneBatchRequestSchema>;
+
+export const sceneRegenerationRequestSchema = z
+  .object({
+    expectedRevision: z.number().int().positive().optional(),
+    instructions: z.string().max(2_000).default(''),
+  })
+  .strict();
+export type SceneRegenerationRequest = z.infer<typeof sceneRegenerationRequestSchema>;
+
+export const scenePromptRequestSchema = sceneRegenerationRequestSchema;
+export type ScenePromptRequest = z.infer<typeof scenePromptRequestSchema>;
+
+export const sceneEditSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    title: z.string().trim().min(1).max(200).optional(),
+    summary: boundedString(3_000).optional(),
+    purpose: scenePurposeSchema.optional(),
+    location: z.string().trim().min(1).max(300).nullable().optional(),
+    timeOfDay: boundedString(120).optional(),
+    weather: boundedString(120).optional(),
+    mood: boundedString(240).optional(),
+    visualDescription: boundedString(4_000).optional(),
+    camera: sceneCameraSchema.optional(),
+    composition: sceneCompositionSchema.optional(),
+    lighting: boundedString(1_000).optional(),
+    colorMood: boundedString(500).optional(),
+    imagePrompt: boundedString(6_000).optional(),
+    negativePrompt: boundedString(2_000).nullable().optional(),
+    continuityNotes: boundedString(2_000).optional(),
+  })
+  .strict();
+export type SceneEdit = z.infer<typeof sceneEditSchema>;
+
+export const visualStyleSettingsSchema = z
+  .object({
+    styleName: z.string().trim().min(1).max(120),
+    styleDescription: z.string().max(2_000).default(''),
+    medium: boundedString(120).default(''),
+    realism: boundedString(120).default(''),
+    colorPalette: boundedString(500).default(''),
+    cinematicStyle: boundedString(500).default(''),
+    aspectRatio: z
+      .string()
+      .trim()
+      .regex(/^[1-9][0-9]{0,3}:[1-9][0-9]{0,3}$/)
+      .default('16:9'),
+    promptSuffix: boundedString(1_000).default(''),
+  })
+  .strict();
+export type VisualStyleSettings = z.infer<typeof visualStyleSettingsSchema>;
+
+export const visualStyleUpdateSchema = visualStyleSettingsSchema
+  .extend({ expectedRevision: z.number().int().positive().optional() })
+  .strict();
+export type VisualStyleUpdate = z.infer<typeof visualStyleUpdateSchema>;
+
+export const locationStatusSchema = z.enum(['DRAFT', 'ACTIVE']);
+export type LocationStatus = z.infer<typeof locationStatusSchema>;
+
+export const locationSchema = z
+  .object({
+    name: z.string().trim().min(1).max(300),
+    description: boundedString(2_000).default(''),
+    type: boundedString(160).default(''),
+    visualDescription: boundedString(4_000).default(''),
+    environment: boundedString(2_000).default(''),
+    architecture: boundedString(2_000).default(''),
+    importantObjects: boundedStringArray(50, 500).default([]),
+    lightingDefaults: boundedString(1_000).default(''),
+    status: locationStatusSchema.default('DRAFT'),
+  })
+  .strict();
+export type Location = z.infer<typeof locationSchema>;
+
+export const locationUpdateSchema = locationSchema
+  .partial()
+  .extend({ expectedRowVersion: z.number().int().positive().optional() })
+  .strict();
+export type LocationUpdate = z.infer<typeof locationUpdateSchema>;
+
+export const sceneStatusSchema = z.enum(['CURRENT', 'STALE', 'INVALIDATED']);
+export type SceneStatus = z.infer<typeof sceneStatusSchema>;
+
+export const scenePromptStatusSchema = z.enum(['CURRENT', 'STALE', 'MISSING']);
+export type ScenePromptStatus = z.infer<typeof scenePromptStatusSchema>;
+
+export const sceneCharacterResolutionStatusSchema = z.enum(['RESOLVED', 'UNRESOLVED']);
+export type SceneCharacterResolutionStatus = z.infer<typeof sceneCharacterResolutionStatusSchema>;
+
 export const generationOperationSchema = z.enum([
   'BLUEPRINT',
   'CHAPTER_PLANS',
@@ -217,6 +491,9 @@ export const generationOperationSchema = z.enum([
   'STATE_ANALYSIS',
   'CONTINUITY_CHECK',
   'SUMMARY_COMPACTION',
+  'SCENE_PLANNING',
+  'SCENE_REGENERATION',
+  'SCENE_PROMPT',
 ]);
 export type GenerationOperation = z.infer<typeof generationOperationSchema>;
 export const storyGenerationRequestSchema = z
@@ -300,6 +577,9 @@ export function parseStoryOperationOutput(operation: GenerationOperation, text: 
   if (operation === 'CHAPTER_GENERATION_V2') return chapterGenerationV2EnvelopeSchema.parse(value);
   if (operation === 'STATE_ANALYSIS') return manualChapterAnalysisSchema.parse(value);
   if (operation === 'CONTINUITY_CHECK') return continuityCheckResultSchema.parse(value);
+  if (operation === 'SCENE_PLANNING') return scenePlanningEnvelopeSchema.parse(value);
+  if (operation === 'SCENE_REGENERATION') return sceneRegenerationEnvelopeSchema.parse(value);
+  if (operation === 'SCENE_PROMPT') return scenePromptEnvelopeSchema.parse(value);
   return z.string().min(1).parse(value);
 }
 export const ompProtocolVersionSchema = z.literal(1);
@@ -435,6 +715,65 @@ export type StorySummaryDto = {
   warnings: string[];
   metadata: GenerationMetadata | null;
   createdAt: string;
+};
+export type VisualStyleSettingsDto = VisualStyleSettings & {
+  id: string;
+  projectId: string;
+  revision: number;
+  inputFingerprint: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type LocationDto = Location & {
+  id: string;
+  projectId: string;
+  normalizedName: string;
+  rowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type SceneCharacterDto = SceneCharacter & {
+  resolutionStatus: SceneCharacterResolutionStatus;
+};
+export type SceneDto = Omit<ScenePlanItem, 'characters'> & {
+  id: string;
+  stableId: string;
+  projectId: string;
+  scenePlanRevisionId: string;
+  chapterId: string;
+  chapterRevision: number;
+  planRevision: number;
+  revision: number;
+  characters: SceneCharacterDto[];
+  locationId: string | null;
+  styleRevisionId: string | null;
+  status: SceneStatus;
+  promptStatus: ScenePromptStatus;
+  unresolvedReferences: string[];
+  sourceExcerpt?: string;
+  generationId: string | null;
+  inputFingerprint: string;
+  promptVersion: string;
+  schemaVersion: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ScenePlanDto = {
+  id: string;
+  projectId: string;
+  chapterId: string;
+  chapterRevision: number;
+  revision: number;
+  density: SceneDensity;
+  targetRange: SceneCountRange | null;
+  styleRevision: number | null;
+  styleRevisionId: string | null;
+  status: SceneStatus;
+  sceneCount: number;
+  inputFingerprint: string;
+  generationId: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 export type StoryLongStoryCounts = {
   targetChapterCount: number;

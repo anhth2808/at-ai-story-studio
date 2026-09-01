@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ProcessError, ProcessRunner } from '@studio/media';
-import { AppError } from '@studio/shared';
+import { DEFAULT_OMP_MODEL, AppError } from '@studio/shared';
 import { OmpAgent } from './omp-agent.js';
-
 const request = {
   operation: 'BLUEPRINT' as const,
   model: 'openai-codex/gpt-5.6-luna',
@@ -145,6 +144,31 @@ describe('OmpAgent', () => {
     });
     expect(received).toMatchObject({ timeoutMs: 6_000, maxOutputBytes: 2_500_000 });
     expect(received?.arguments).toHaveLength(1);
+  });
+
+  it('uses the Codex model when a request has no model override', async () => {
+    let forwardedModel: unknown;
+    const runner = {
+      run: async (options: { input?: string }) => {
+        const forwarded = JSON.parse(options.input!.trim()) as {
+          correlationId: string;
+          model: unknown;
+        };
+        forwardedModel = forwarded.model;
+        return {
+          stdout: JSON.stringify({ ...result, correlationId: forwarded.correlationId }),
+          stderr: '',
+          exitCode: 0,
+          signal: null,
+          durationMs: 1,
+        };
+      },
+    };
+    const agent = new OmpAgent(runner as unknown as ProcessRunner);
+    await expect(agent.generate({ ...request, model: null })).resolves.toMatchObject({
+      model: 'gpt-5.6-luna',
+    });
+    expect(forwardedModel).toBe(DEFAULT_OMP_MODEL);
   });
 
   it('preserves nullable and available usage metadata from the protocol result', async () => {

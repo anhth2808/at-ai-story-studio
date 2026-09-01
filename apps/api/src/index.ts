@@ -32,6 +32,15 @@ import {
   storyPlanWindowResultSchema,
   storySettingsSchema,
   storyStableIdSchema,
+  sceneBatchRequestSchema,
+  sceneEditSchema,
+  sceneGenerationRequestSchema,
+  scenePromptRequestSchema,
+  sceneRegenerationRequestSchema,
+  sceneStatusSchema,
+  visualStyleUpdateSchema,
+  locationSchema,
+  locationUpdateSchema,
   subtitleReplacementSchema,
 } from '@studio/shared';
 import type { OmpReadiness } from '@studio/shared';
@@ -244,6 +253,186 @@ app.put('/api/projects/:projectId/story/plan-windows/:windowId', async (request)
     idSchema.parse(params.projectId),
     storyStableIdSchema.parse(params.windowId),
     storyPlanWindowResultSchema.parse(request.body),
+  );
+});
+
+app.get('/api/projects/:projectId/scenes', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string; status?: string };
+  const status =
+    query.status === undefined || query.status === '' ? '' : sceneStatusSchema.parse(query.status);
+  return service.listSceneChapters(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 25, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    status,
+  );
+});
+app.get('/api/projects/:projectId/chapters/:chapterId/scenes', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const query = request.query as { limit?: string; offset?: string; excerpt?: string };
+  return service.listScenes(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.chapterId),
+    parsePageValue(query.limit, 100, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    query.excerpt === 'true',
+  );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return service.getScene(idSchema.parse(params.projectId), idSchema.parse(params.sceneId));
+});
+app.put('/api/projects/:projectId/scenes/:sceneId', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return service.updateScene(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    sceneEditSchema.parse(request.body),
+  );
+});
+app.post('/api/projects/:projectId/chapters/:chapterId/scenes/generate', async (request, reply) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleSceneGeneration(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.chapterId),
+        sceneGenerationRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.post('/api/projects/:projectId/scenes/:sceneId/regenerate', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleSceneRegeneration(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        sceneRegenerationRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.post('/api/projects/:projectId/scenes/:sceneId/prompt', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleScenePromptRefresh(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        scenePromptRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.get('/api/chapters/:chapterId/scenes', async (request) => {
+  const params = request.params as { chapterId: string };
+  const chapter = service.getChapter(idSchema.parse(params.chapterId));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const query = request.query as { limit?: string; offset?: string; excerpt?: string };
+  return service.listScenes(
+    chapter.projectId,
+    chapter.id,
+    parsePageValue(query.limit, 100, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    query.excerpt === 'true',
+  );
+});
+app.get('/api/scenes/:sceneId', async (request) => {
+  const params = request.params as { sceneId: string };
+  return service.getSceneById(idSchema.parse(params.sceneId));
+});
+app.patch('/api/scenes/:sceneId', async (request) => {
+  const params = request.params as { sceneId: string };
+  const scene = service.getSceneById(idSchema.parse(params.sceneId));
+  return service.updateScene(scene.projectId, scene.id, sceneEditSchema.parse(request.body));
+});
+app.post('/api/chapters/:chapterId/scenes/generate', async (request, reply) => {
+  const params = request.params as { chapterId: string };
+  const chapter = service.getChapter(idSchema.parse(params.chapterId));
+  if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  return reply
+    .code(202)
+    .send(
+      service.scheduleSceneGeneration(
+        chapter.projectId,
+        chapter.id,
+        sceneGenerationRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.post('/api/scenes/:sceneId/regenerate', async (request, reply) => {
+  const params = request.params as { sceneId: string };
+  const scene = service.getSceneById(idSchema.parse(params.sceneId));
+  return reply
+    .code(202)
+    .send(
+      service.scheduleSceneRegeneration(
+        scene.projectId,
+        scene.id,
+        sceneRegenerationRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.post('/api/scenes/:sceneId/prompt', async (request, reply) => {
+  const params = request.params as { sceneId: string };
+  const scene = service.getSceneById(idSchema.parse(params.sceneId));
+  return reply
+    .code(202)
+    .send(
+      service.scheduleScenePromptRefresh(
+        scene.projectId,
+        scene.id,
+        scenePromptRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.post('/api/projects/:projectId/scenes/batch', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleSceneBatch(
+        idSchema.parse(params.projectId),
+        sceneBatchRequestSchema.parse(request.body),
+      ),
+    );
+});
+app.get('/api/projects/:projectId/visual-style', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.getVisualStyle(idSchema.parse(params.projectId));
+});
+app.put('/api/projects/:projectId/visual-style', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.saveVisualStyle(
+    idSchema.parse(params.projectId),
+    visualStyleUpdateSchema.parse(request.body),
+  );
+});
+app.get('/api/projects/:projectId/locations', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.listLocations(
+    idSchema.parse(params.projectId),
+    parsePageValue(query.limit, 100, 200),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+  );
+});
+app.post('/api/projects/:projectId/locations', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.createLocation(
+    idSchema.parse(params.projectId),
+    locationSchema.parse(request.body),
+  );
+});
+app.put('/api/projects/:projectId/locations/:locationId', async (request) => {
+  const params = request.params as { projectId: string; locationId: string };
+  return service.updateLocation(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.locationId),
+    locationUpdateSchema.parse(request.body),
   );
 });
 
@@ -541,6 +730,8 @@ const errorCategoryByCode: Record<
   INVALID_CONTINUITY: 'CONTINUITY',
   CANCELLED: 'CANCELLED',
   BUDGET_ERROR: 'BUDGET',
+  SCENE_CONTEXT_TOO_LARGE: 'CONTEXT',
+  SCENE_OUTPUT_INVALID: 'STRUCTURED_OUTPUT',
 };
 
 app.setErrorHandler((error, _request, reply) => {

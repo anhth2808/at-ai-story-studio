@@ -31,6 +31,8 @@ export function migrateDatabase(database: DatabaseHandle): string {
     '0004_long_story_engine',
     '0005_manual_analysis',
     '0006_arc_ordinal',
+    '0007_scene_engine',
+    '0008_scene_source_snapshot',
   ];
   database.sqlite.exec(readFileSync(join(migrationDirectory, '0000_initial.sql'), 'utf8'));
   database.sqlite.exec(

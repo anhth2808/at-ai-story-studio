@@ -6,6 +6,7 @@ import {
   Settings,
 } from '@oh-my-pi/pi-coding-agent';
 import {
+  DEFAULT_OMP_MODEL,
   ompProtocolErrorSchema,
   ompProtocolRequestSchema,
   ompProtocolResultSchema,
@@ -43,6 +44,13 @@ type SessionEventSnapshot = {
 
 const MAX_LINE_BYTES = 2_500_000;
 const write = (value: unknown): void => process.stdout.write(`${JSON.stringify(value)}\n`);
+
+function selectModel(modelRegistry: ModelRegistry, selector: string) {
+  const separator = selector.indexOf('/');
+  if (separator > 0)
+    return modelRegistry.find(selector.slice(0, separator), selector.slice(separator + 1));
+  return modelRegistry.getAvailable().find((candidate) => candidate.id === selector);
+}
 
 function errorCode(message: string): string {
   const normalized = message.toLowerCase();
@@ -92,20 +100,17 @@ async function run(request: OmpProtocolRequest): Promise<void> {
   const authStorage = await discoverAuthStorage();
   const modelRegistry = new ModelRegistry(authStorage);
   await modelRegistry.refresh();
-  const available = modelRegistry.getAvailable();
-  const selected = request.model
-    ? (() => {
-        const separator = request.model!.indexOf('/');
-        if (separator > 0)
-          return modelRegistry.find(
-            request.model!.slice(0, separator),
-            request.model!.slice(separator + 1),
-          );
-        return available.find((candidate) => candidate.id === request.model);
-      })()
-    : available[0];
+  const modelSelector = request.model ?? DEFAULT_OMP_MODEL;
+  const selected = selectModel(modelRegistry, modelSelector);
   if (!selected) {
-    write(errorEvent(request, 'MODEL_ERROR', 'No authenticated OMP model is available', false));
+    write(
+      errorEvent(
+        request,
+        'MODEL_ERROR',
+        `Configured OMP model is unavailable: ${modelSelector}`,
+        false,
+      ),
+    );
     return;
   }
   write({
@@ -240,14 +245,14 @@ async function reportReadiness(): Promise<void> {
     const authStorage = await discoverAuthStorage();
     const modelRegistry = new ModelRegistry(authStorage);
     await modelRegistry.refresh();
-    const selected = modelRegistry.getAvailable()[0];
+    const selected = selectModel(modelRegistry, DEFAULT_OMP_MODEL);
     write({
       ready: Boolean(selected),
       runtime: `bun ${Bun.version}`,
       model: selected ? `${selected.provider}/${selected.id}` : null,
       message: selected
         ? 'OMP authentication and model discovery are ready'
-        : 'No authenticated OMP model is available',
+        : `Default OMP model is unavailable: ${DEFAULT_OMP_MODEL}`,
     });
   } catch {
     write({

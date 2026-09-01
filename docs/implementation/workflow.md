@@ -32,6 +32,30 @@ When a worker claims a V2 chapter, it compiles deterministic bounded context fro
 
 Accepted V2 output is schema-validated and reduced before one SQLite finalization transaction writes the chapter revision, summary, StateDelta, StoryState checkpoint, normalized records, lineage, usage, and generation completion. The worker marks the workflow step complete only after finalization returns. A recovered finalized checkpoint is reused idempotently instead of calling OMP again.
 
+## Scene workflow
+
+Scene work uses the same SQLite workflow and one worker; it does not create a
+second queue:
+
+```text
+GENERATE_SCENES (one chapter-level OMP call -> atomic scene plan)
+REGENERATE_SCENE (one selected scene revision)
+GENERATE_SCENE_PROMPT (one selected scene prompt revision)
+```
+
+The planner receives exact chapter text plus bounded blueprint, selected
+characters, summaries, StoryState, current style, and diagnostics. A plan is
+accepted only after strict scene schema, contiguous order, UTF-16 range, and
+prompt validation. Scene and prompt generations persist provenance and usage
+before the worker marks the step complete. Technical failure, cancellation,
+lease expiry, and retry use the existing workflow paths.
+
+Scene dependencies are deliberately selective. Chapter text and Story
+settings/blueprint stale scene structure and prompts. Visual style, location,
+and future canonical character edits stale only dependent prompts. Scene
+planning never starts image generation, media upload, narration, subtitle, or
+render work.
+
 ## Batch outcomes
 
 Batch items are independently `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED`, or `CANCELLED`. Failure pauses later work. Retry resets only the failed item. Skip records a visible gap marker and makes only the immediate successor dependency optional; it is never counted as generated content. Cancel stops future claims and propagates cancellation to the active step.

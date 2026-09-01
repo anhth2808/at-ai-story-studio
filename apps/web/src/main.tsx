@@ -1,6 +1,8 @@
 import { StrictMode, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
+import { DEFAULT_OMP_MODEL } from '@studio/shared';
+
 import type {
   ChapterDto,
   ChapterPlanItem,
@@ -19,6 +21,9 @@ import type {
   StorySettingsDto,
   StorySnapshotDto,
   StoryUsageSummary,
+  SceneDto,
+  VisualStyleSettingsDto,
+  LocationDto,
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -39,7 +44,7 @@ const defaultStorySettings: StorySettings = {
   worldNotes: '',
   plotRequirements: '',
   generation: {
-    model: null,
+    model: DEFAULT_OMP_MODEL,
     contextBudget: 5_000,
     temperature: 0.7,
     maxOutputTokens: 8_000,
@@ -174,6 +179,69 @@ const storyApi = {
   compactSummary: (projectId: string) =>
     api<StoryJobScheduleDto>(`/api/projects/${projectId}/story/summary/compact`, {
       method: 'POST',
+    }),
+};
+
+type SceneChapterSummary = {
+  chapterId: string;
+  chapterNumber: number;
+  chapterTitle: string;
+  chapterRevision: number;
+  planRevision: number | null;
+  planStatus: 'CURRENT' | 'STALE' | 'INVALIDATED' | null;
+  sceneCount: number;
+  stalePromptCount: number;
+};
+const sceneApi = {
+  chapters: (projectId: string, offset = 0) =>
+    api<SceneChapterSummary[]>(`/api/projects/${projectId}/scenes?limit=25&offset=${offset}`),
+  list: (projectId: string, chapterId: string) =>
+    api<SceneDto[]>(`/api/projects/${projectId}/chapters/${chapterId}/scenes?excerpt=false`),
+  get: (projectId: string, sceneId: string) =>
+    api<SceneDto>(`/api/projects/${projectId}/scenes/${sceneId}`),
+  generate: (projectId: string, chapterId: string, input: Record<string, unknown>) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/chapters/${chapterId}/scenes/generate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  regenerate: (projectId: string, sceneId: string, input: Record<string, unknown>) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/regenerate`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  refreshPrompt: (projectId: string, sceneId: string, input: Record<string, unknown>) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/prompt`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  update: (projectId: string, sceneId: string, input: Record<string, unknown>) =>
+    api<SceneDto>(`/api/projects/${projectId}/scenes/${sceneId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  batch: (projectId: string, input: Record<string, unknown>) =>
+    api<{ executionId: string; jobIds: string[]; skippedChapterIds: string[] }>(
+      `/api/projects/${projectId}/scenes/batch`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
+  style: (projectId: string) =>
+    api<VisualStyleSettingsDto | null>(`/api/projects/${projectId}/visual-style`),
+  saveStyle: (projectId: string, input: Record<string, unknown>) =>
+    api<VisualStyleSettingsDto>(`/api/projects/${projectId}/visual-style`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  locations: (projectId: string) =>
+    api<LocationDto[]>(`/api/projects/${projectId}/locations?limit=100&offset=0`),
+  saveLocation: (projectId: string, input: Record<string, unknown>) =>
+    api<LocationDto>(`/api/projects/${projectId}/locations`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  updateLocation: (projectId: string, locationId: string, input: Record<string, unknown>) =>
+    api<LocationDto>(`/api/projects/${projectId}/locations/${locationId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
     }),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
@@ -503,7 +571,7 @@ function App() {
                 </button>
               </div>
               <div className="tabs">
-                {['Story', 'Audio', 'Video', 'Render'].map((item) => (
+                {['Story', 'Scenes', 'Audio', 'Video', 'Render'].map((item) => (
                   <button
                     className={tab === item ? 'selected' : ''}
                     key={item}
@@ -568,6 +636,14 @@ function App() {
                   onGenerate={(chapter) => void generateStoryChapter(chapter)}
                 />
               </>
+            )}
+            {tab === 'Scenes' && (
+              <ScenesWorkspace
+                projectId={selected.id}
+                activeChapterId={activeChapter?.id ?? null}
+                onChanged={() => void refresh()}
+                onError={setError}
+              />
             )}
             {tab === 'Audio' && (
               <div className="panel">
@@ -1070,10 +1146,12 @@ function StoryWorkspace({
             />
           </label>
           <label className="field">
-            <span>Model OMP (tuỳ chọn)</span>
+            <span>Model OMP mặc định</span>
             <input
-              value={draft.generation.model ?? ''}
-              onChange={(event) => setGenerationField('model', event.target.value || null)}
+              value={draft.generation.model ?? DEFAULT_OMP_MODEL}
+              onChange={(event) =>
+                setGenerationField('model', event.target.value.trim() || DEFAULT_OMP_MODEL)
+              }
             />
           </label>
         </div>
@@ -1502,6 +1580,891 @@ function StoryWorkspace({
         </div>
       )}
     </div>
+  );
+}
+
+type SceneStyleForm = {
+  styleName: string;
+  styleDescription: string;
+  medium: string;
+  realism: string;
+  colorPalette: string;
+  cinematicStyle: string;
+  aspectRatio: string;
+  promptSuffix: string;
+};
+
+const scenePurposeLabels: Record<SceneDto['purpose'], string> = {
+  INTRODUCTION: 'Mở đầu',
+  ESTABLISHING: 'Thiết lập không gian',
+  DIALOGUE: 'Đối thoại',
+  ACTION: 'Hành động',
+  DISCOVERY: 'Khám phá',
+  EMOTIONAL: 'Cảm xúc',
+  TRANSITION: 'Chuyển cảnh',
+  REVEAL: 'Tiết lộ',
+  CLIMAX: 'Cao trào',
+  ENDING_HOOK: 'Móc kết',
+};
+const sceneFramingLabels: Record<SceneDto['camera']['framing'], string> = {
+  EXTREME_WIDE: 'Toàn cảnh rất rộng',
+  WIDE: 'Toàn cảnh rộng',
+  FULL: 'Toàn thân',
+  MEDIUM: 'Trung cảnh',
+  CLOSE_UP: 'Cận cảnh',
+  EXTREME_CLOSE_UP: 'Đặc tả',
+  OVER_THE_SHOULDER: 'Qua vai',
+  POV: 'Góc nhìn nhân vật',
+};
+const sceneStatusLabels: Record<SceneDto['status'], string> = {
+  CURRENT: 'Hiện hành',
+  STALE: 'Lỗi thời',
+  INVALIDATED: 'Đã vô hiệu',
+};
+const scenePromptStatusLabels: Record<SceneDto['promptStatus'], string> = {
+  CURRENT: 'Hiện hành',
+  STALE: 'Lỗi thời',
+  MISSING: 'Chưa có',
+};
+const scenePurposeOptions = Object.keys(scenePurposeLabels) as Array<SceneDto['purpose']>;
+const sceneFramingOptions = Object.keys(sceneFramingLabels) as Array<SceneDto['camera']['framing']>;
+
+const defaultSceneStyleForm: SceneStyleForm = {
+  styleName: 'Điện ảnh nhất quán',
+  styleDescription: '',
+  medium: 'Minh họa điện ảnh',
+  realism: 'Tự nhiên',
+  colorPalette: '',
+  cinematicStyle: '',
+  aspectRatio: '16:9',
+  promptSuffix: '',
+};
+
+function ScenesWorkspace({
+  projectId,
+  activeChapterId,
+  onChanged,
+  onError,
+}: {
+  projectId: string;
+  activeChapterId: string | null;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [sceneChapters, setSceneChapters] = useState<SceneChapterSummary[]>([]);
+  const [chapterOffset, setChapterOffset] = useState(0);
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(activeChapterId);
+  const [sceneList, setSceneList] = useState<SceneDto[]>([]);
+  const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<SceneDto | null>(null);
+  const [density, setDensity] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('MEDIUM');
+  const [targetMin, setTargetMin] = useState('');
+  const [targetMax, setTargetMax] = useState('');
+  const [style, setStyle] = useState<VisualStyleSettingsDto | null>(null);
+  const [styleForm, setStyleForm] = useState<SceneStyleForm>(defaultSceneStyleForm);
+  const [showStyle, setShowStyle] = useState(false);
+  const [locations, setLocations] = useState<LocationDto[]>([]);
+  const [newLocationName, setNewLocationName] = useState('');
+  const [sceneFailedJob, setSceneFailedJob] = useState<JobDto | null>(null);
+  const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sceneJobIds, setSceneJobIds] = useState<string[]>([]);
+
+  const loadSceneChapters = async (): Promise<void> => {
+    try {
+      const next = await sceneApi.chapters(projectId, chapterOffset);
+      setSceneChapters(next);
+      setSelectedChapterId((current) => {
+        if (activeChapterId && next.some((item) => item.chapterId === activeChapterId))
+          return activeChapterId;
+        if (current && next.some((item) => item.chapterId === current)) return current;
+        return next[0]?.chapterId ?? null;
+      });
+      const nextStyle = await sceneApi.style(projectId);
+      setStyle(nextStyle);
+      if (nextStyle)
+        setStyleForm({
+          styleName: nextStyle.styleName,
+          styleDescription: nextStyle.styleDescription,
+          medium: nextStyle.medium,
+          realism: nextStyle.realism,
+          colorPalette: nextStyle.colorPalette,
+          cinematicStyle: nextStyle.cinematicStyle,
+          aspectRatio: nextStyle.aspectRatio,
+          promptSuffix: nextStyle.promptSuffix,
+        });
+      setLocations(await sceneApi.locations(projectId));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tải dữ liệu cảnh');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadScenes = async (): Promise<void> => {
+    if (!selectedChapterId) {
+      setSceneList([]);
+      setSelectedSceneId(null);
+      return;
+    }
+    try {
+      const next = await sceneApi.list(projectId, selectedChapterId);
+      setSceneList(next);
+      setSelectedSceneId((current) =>
+        current && next.some((scene) => scene.id === current) ? current : (next[0]?.id ?? null),
+      );
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tải danh sách cảnh');
+    }
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    void loadSceneChapters();
+  }, [projectId, chapterOffset]);
+  useEffect(() => {
+    void loadScenes();
+  }, [projectId, selectedChapterId]);
+  useEffect(() => {
+    if (!selectedSceneId) {
+      setDraft(null);
+      return;
+    }
+    const selectedScene = sceneList.find((scene) => scene.id === selectedSceneId);
+    if (selectedScene) {
+      void sceneApi
+        .get(projectId, selectedScene.id)
+        .then(setDraft)
+        .catch((cause) =>
+          onError(cause instanceof Error ? cause.message : 'Không thể tải chi tiết cảnh'),
+        );
+    }
+  }, [projectId, selectedSceneId, sceneList]);
+  useEffect(() => {
+    if (!sceneJobIds.length) return;
+    let disposed = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const jobs = await Promise.all(
+          sceneJobIds.map((jobId) => api<JobDto>(`/api/jobs/${jobId}`)),
+        );
+        const finished = jobs.some((job) =>
+          ['COMPLETED', 'FAILED', 'CANCELLED', 'INVALIDATED'].includes(job.status),
+        );
+        if (!disposed && finished) {
+          setSceneJobIds((current) =>
+            current.filter(
+              (jobId) =>
+                !jobs.some(
+                  (job) =>
+                    job.id === jobId &&
+                    ['COMPLETED', 'FAILED', 'CANCELLED', 'INVALIDATED'].includes(job.status),
+                ),
+            ),
+          );
+          await loadSceneChapters();
+          await loadScenes();
+          onChanged();
+          const failed = jobs.find((job) => job.status === 'FAILED');
+          if (failed) setSceneFailedJob(failed);
+          if (failed?.error) onError(failed.error);
+        }
+      } catch (cause) {
+        if (!disposed)
+          onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job Scene Engine');
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [projectId, sceneJobIds]);
+
+  const chapter = sceneChapters.find((item) => item.chapterId === selectedChapterId);
+  const sceneJobBody = (): Record<string, unknown> => {
+    const min = Number(targetMin);
+    const max = Number(targetMax);
+    return {
+      density,
+      targetRange:
+        Number.isInteger(min) && Number.isInteger(max) && min > 0 && max >= min
+          ? { min, max }
+          : null,
+      expectedChapterRevision: chapter?.chapterRevision,
+    };
+  };
+  const queueSceneJobs = (result: StoryJobScheduleDto): void => {
+    const ids = [...(result.jobIds ?? []), ...(result.jobId ? [result.jobId] : [])];
+    setSceneFailedJob(null);
+    setSceneJobIds((current) => [...new Set([...current, ...ids])]);
+  };
+  const retrySceneJob = async (): Promise<void> => {
+    if (!sceneFailedJob) return;
+    try {
+      await storyApi.retryJob(sceneFailedJob.id);
+      setSceneFailedJob(null);
+      setSceneJobIds((current) => [...new Set([...current, sceneFailedJob.id])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể thử lại job Scene Engine');
+    }
+  };
+  const generateSelectedChapter = async (): Promise<void> => {
+    if (!selectedChapterId) return;
+    try {
+      queueSceneJobs(await sceneApi.generate(projectId, selectedChapterId, sceneJobBody()));
+      await loadSceneChapters();
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo scene plan');
+    }
+  };
+  const generateBatch = async (): Promise<void> => {
+    if (!selectedBatchIds.length) {
+      onError('Chọn ít nhất một chương để tạo scene plan.');
+      return;
+    }
+    try {
+      queueSceneJobs(
+        await sceneApi.batch(projectId, {
+          chapterIds: selectedBatchIds,
+          density,
+          targetRange: sceneJobBody().targetRange,
+          onlyMissing: true,
+        }),
+      );
+      await loadSceneChapters();
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo scene plan theo lô');
+    }
+  };
+  const saveStyle = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    try {
+      const saved = await sceneApi.saveStyle(projectId, {
+        ...styleForm,
+        ...(style ? { expectedRevision: style.revision } : {}),
+      });
+      setStyle(saved);
+      setShowStyle(false);
+      await loadScenes();
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu visual style');
+    }
+  };
+  const createLocation = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!newLocationName.trim()) return;
+    try {
+      const created = await sceneApi.saveLocation(projectId, { name: newLocationName.trim() });
+      setLocations((current) =>
+        [...current, created].sort((left, right) => left.name.localeCompare(right.name)),
+      );
+      setNewLocationName('');
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể thêm location');
+    }
+  };
+  const saveScene = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!draft) return;
+    try {
+      const saved = await sceneApi.update(projectId, draft.id, {
+        expectedRevision: draft.revision,
+        title: draft.title,
+        summary: draft.summary,
+        purpose: draft.purpose,
+        location: draft.location,
+        timeOfDay: draft.timeOfDay,
+        weather: draft.weather,
+        mood: draft.mood,
+        visualDescription: draft.visualDescription,
+        camera: draft.camera,
+        lighting: draft.lighting,
+        colorMood: draft.colorMood,
+        imagePrompt: draft.imagePrompt,
+        negativePrompt: draft.negativePrompt,
+        continuityNotes: draft.continuityNotes,
+      });
+      setDraft(saved);
+      await loadScenes();
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu scene');
+    }
+  };
+  const regenerateScene = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      queueSceneJobs(
+        await sceneApi.regenerate(projectId, draft.id, {
+          expectedRevision: draft.revision,
+        }),
+      );
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo lại scene');
+    }
+  };
+  const refreshPrompt = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      queueSceneJobs(
+        await sceneApi.refreshPrompt(projectId, draft.id, {
+          expectedRevision: draft.revision,
+        }),
+      );
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể làm mới prompt');
+    }
+  };
+  const updateDraft = <K extends keyof SceneDto>(key: K, value: SceneDto[K]): void => {
+    setDraft((current) => (current ? { ...current, [key]: value } : current));
+  };
+  const updateCamera = <K extends keyof SceneDto['camera']>(
+    key: K,
+    value: SceneDto['camera'][K],
+  ): void => {
+    setDraft((current) =>
+      current ? { ...current, camera: { ...current.camera, [key]: value } } : current,
+    );
+  };
+  const pageSize = 25;
+  const allCurrentPageSelected =
+    sceneChapters.length > 0 &&
+    sceneChapters.every((item) => selectedBatchIds.includes(item.chapterId));
+
+  if (loading) {
+    return (
+      <section className="scene-workspace scene-loading">
+        <strong>Đang tải Bộ máy cảnh...</strong>
+        <span className="muted">Đang đọc kế hoạch cảnh và ngữ cảnh hình ảnh đã lưu.</span>
+      </section>
+    );
+  }
+  return (
+    <section className="scene-workspace">
+      <div className="scene-toolbar">
+        <div>
+          <p className="eyebrow">BỘ MÁY CẢNH</p>
+          <h3>Chương → cảnh → prompt hình ảnh</h3>
+          <p className="muted">
+            Lập kế hoạch theo chương với khoảng nguồn UTF-16, cảnh báo liên tục và prompt có phiên
+            bản.
+          </p>
+        </div>
+        <div className="scene-toolbar-actions">
+          <label>
+            Mật độ
+            <select
+              value={density}
+              onChange={(event) => setDensity(event.target.value as typeof density)}
+            >
+              <option value="LOW">Thưa</option>
+              <option value="MEDIUM">Vừa</option>
+              <option value="HIGH">Dày</option>
+            </select>
+          </label>
+          <label>
+            Khoảng cảnh
+            <span className="range-fields">
+              <input
+                aria-label="Số cảnh tối thiểu"
+                inputMode="numeric"
+                placeholder="min"
+                value={targetMin}
+                onChange={(event) => setTargetMin(event.target.value)}
+              />
+              <input
+                aria-label="Số cảnh tối đa"
+                inputMode="numeric"
+                placeholder="max"
+                value={targetMax}
+                onChange={(event) => setTargetMax(event.target.value)}
+              />
+            </span>
+          </label>
+          <button
+            disabled={!selectedChapterId || sceneJobIds.length > 0}
+            onClick={() => void generateSelectedChapter()}
+          >
+            {chapter?.sceneCount ? 'Tạo lại kế hoạch' : 'Tạo kế hoạch cảnh'}
+          </button>
+          <button className="secondary" onClick={() => setShowStyle((current) => !current)}>
+            {showStyle ? 'Ẩn phong cách' : 'Phong cách hình ảnh'}
+          </button>
+        </div>
+      </div>
+      {sceneFailedJob && (
+        <div className="scene-job-error" role="alert">
+          <span>Tác vụ Bộ máy cảnh thất bại: {sceneFailedJob.error ?? 'Lỗi không xác định.'}</span>
+          <button className="secondary" onClick={() => void retrySceneJob()}>
+            Thử lại
+          </button>
+        </div>
+      )}
+      {sceneJobIds.length > 0 && (
+        <div className="scene-job-status" role="status">
+          Đang xử lý {sceneJobIds.length} tác vụ Bộ máy cảnh. Dữ liệu sẽ tự làm mới khi worker hoàn
+          tất.
+        </div>
+      )}
+      {showStyle && (
+        <form className="scene-style panel" onSubmit={(event) => void saveStyle(event)}>
+          <div className="section-head">
+            <div>
+              <h4>Phong cách hình ảnh hiện tại</h4>
+              <p className="muted">
+                Phong cách là bản sửa đổi độc lập; đổi phong cách chỉ làm prompt lỗi thời.
+              </p>
+            </div>
+            {style && (
+              <span className="status-chip status-current">Bản sửa đổi {style.revision}</span>
+            )}
+          </div>
+          <div className="scene-form-grid">
+            {(
+              [
+                ['styleName', 'Tên phong cách'],
+                ['medium', 'Chất liệu'],
+                ['realism', 'Độ chân thực'],
+                ['colorPalette', 'Bảng màu'],
+                ['cinematicStyle', 'Phong cách điện ảnh'],
+                ['aspectRatio', 'Tỷ lệ khung hình'],
+              ] as Array<[keyof SceneStyleForm, string]>
+            ).map(([key, label]) => (
+              <label className="field" key={key}>
+                <span>{label}</span>
+                <input
+                  value={styleForm[key]}
+                  onChange={(event) =>
+                    setStyleForm((current) => ({ ...current, [key]: event.target.value }))
+                  }
+                />
+              </label>
+            ))}
+            <label className="field field-wide">
+              <span>Mô tả phong cách</span>
+              <textarea
+                value={styleForm.styleDescription}
+                onChange={(event) =>
+                  setStyleForm((current) => ({ ...current, styleDescription: event.target.value }))
+                }
+              />
+            </label>
+            <label className="field field-wide">
+              <span>Hậu tố prompt</span>
+              <textarea
+                value={styleForm.promptSuffix}
+                onChange={(event) =>
+                  setStyleForm((current) => ({ ...current, promptSuffix: event.target.value }))
+                }
+              />
+            </label>
+          </div>
+          <button type="submit">Lưu phong cách hình ảnh</button>
+        </form>
+      )}
+      <div className="scene-layout">
+        <aside className="scene-chapter-list" aria-label="Danh sách chương cho Bộ máy cảnh">
+          <div className="section-head">
+            <div>
+              <h4>Chương</h4>
+              <p className="muted">Chọn chương để xem kế hoạch cảnh.</p>
+            </div>
+            <button
+              className="secondary"
+              disabled={chapterOffset === 0}
+              onClick={() => setChapterOffset(Math.max(0, chapterOffset - pageSize))}
+            >
+              Trước
+            </button>
+          </div>
+          {sceneChapters.map((item) => (
+            <button
+              className={`scene-chapter ${selectedChapterId === item.chapterId ? 'active' : ''}`}
+              key={item.chapterId}
+              onClick={() => setSelectedChapterId(item.chapterId)}
+            >
+              <span>Chương {item.chapterNumber}</span>
+              <strong>{item.chapterTitle}</strong>
+              <small>
+                {item.sceneCount ? `${item.sceneCount} cảnh` : 'Chưa có kế hoạch'}
+                {item.stalePromptCount ? ` · ${item.stalePromptCount} prompt lỗi thời` : ''}
+              </small>
+            </button>
+          ))}
+          <button
+            className="secondary"
+            disabled={sceneChapters.length < pageSize}
+            onClick={() => setChapterOffset(chapterOffset + pageSize)}
+          >
+            Sau
+          </button>
+          <div className="batch-picker">
+            <div className="section-head">
+              <strong>Tạo theo lô</strong>
+              <button
+                className="secondary"
+                disabled={!sceneChapters.length || sceneJobIds.length > 0}
+                onClick={() =>
+                  setSelectedBatchIds((current) => {
+                    const pageIds = sceneChapters.map((item) => item.chapterId);
+                    return allCurrentPageSelected
+                      ? current.filter((id) => !pageIds.includes(id))
+                      : [...new Set([...current, ...pageIds])];
+                  })
+                }
+              >
+                {allCurrentPageSelected ? 'Bỏ chọn trang' : 'Chọn trang'}
+              </button>
+            </div>
+            {sceneChapters.map((item) => (
+              <label key={`batch-${item.chapterId}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedBatchIds.includes(item.chapterId)}
+                  onChange={(event) =>
+                    setSelectedBatchIds((current) =>
+                      event.target.checked
+                        ? [...current, item.chapterId]
+                        : current.filter((id) => id !== item.chapterId),
+                    )
+                  }
+                />
+                Chương {item.chapterNumber}
+              </label>
+            ))}
+            <button
+              disabled={!selectedBatchIds.length || sceneJobIds.length > 0}
+              onClick={() => void generateBatch()}
+            >
+              Tạo kế hoạch cho các chương đã chọn
+            </button>
+          </div>
+        </aside>
+        <div className="scene-editor">
+          <div className="section-head">
+            <div>
+              <h4>
+                {chapter
+                  ? `Chương ${chapter.chapterNumber}: ${chapter.chapterTitle}`
+                  : 'Chưa chọn chương'}
+              </h4>
+              <p className="muted">
+                {chapter?.planRevision
+                  ? `Bản kế hoạch ${chapter.planRevision}`
+                  : 'Chưa có kế hoạch'}
+              </p>
+            </div>
+            <button className="secondary" onClick={() => void loadScenes()}>
+              Làm mới
+            </button>
+          </div>
+          <div className="scene-card-list">
+            {sceneList.map((scene) => (
+              <button
+                className={`scene-card ${selectedSceneId === scene.id ? 'active' : ''}`}
+                key={scene.id}
+                onClick={() => setSelectedSceneId(scene.id)}
+              >
+                <span className="scene-number">
+                  Cảnh {String(scene.sceneNumber).padStart(2, '0')}
+                </span>
+                <strong>{scene.title}</strong>
+                <p>{scene.summary}</p>
+                <div className="chip-row">
+                  <span className="status-chip status-current">
+                    {scenePurposeLabels[scene.purpose]}
+                  </span>
+                  <span className="status-chip">{scene.location ?? 'Chưa có địa điểm'}</span>
+                  <span className={`status-chip status-${scene.promptStatus.toLowerCase()}`}>
+                    Prompt {scenePromptStatusLabels[scene.promptStatus]}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+          {!sceneList.length && (
+            <div className="scene-empty">
+              <strong>Chương này chưa có kế hoạch cảnh.</strong>
+              <span className="muted">
+                Chọn mật độ rồi tạo kế hoạch. Văn bản chương và ngữ cảnh giới hạn sẽ được gửi qua
+                OMP.
+              </span>
+              <button disabled={!selectedChapterId} onClick={() => void generateSelectedChapter()}>
+                Tạo kế hoạch cảnh đầu tiên
+              </button>
+            </div>
+          )}
+          {draft && (
+            <form className="scene-detail panel" onSubmit={(event) => void saveScene(event)}>
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">CẢNH {String(draft.sceneNumber).padStart(2, '0')}</p>
+                  <h4>{draft.title}</h4>
+                </div>
+                <div className="chip-row">
+                  <span className={`status-chip status-${draft.status.toLowerCase()}`}>
+                    {sceneStatusLabels[draft.status]}
+                  </span>
+                  <span className={`status-chip status-${draft.promptStatus.toLowerCase()}`}>
+                    Prompt {scenePromptStatusLabels[draft.promptStatus]}
+                  </span>
+                  <span className="status-chip">Bản sửa đổi {draft.revision}</span>
+                </div>
+              </div>
+              <div className="scene-metadata">
+                <span>Mục đích: {scenePurposeLabels[draft.purpose]}</span>
+                <span>
+                  Khoảng nguồn UTF-16: {draft.sourceRange.start}-{draft.sourceRange.end}
+                </span>
+                <span>Bản kế hoạch: {draft.planRevision}</span>
+              </div>
+              <label className="field">
+                <span>Đoạn trích nguồn (chỉ đọc)</span>
+                <pre className="source-excerpt">
+                  {draft.sourceExcerpt ?? 'Không có đoạn trích.'}
+                </pre>
+              </label>
+              {draft.unresolvedReferences.length > 0 && (
+                <div className="warning-list">
+                  {draft.unresolvedReferences.map((reference) => (
+                    <span key={reference}>Chưa resolve: {reference}</span>
+                  ))}
+                </div>
+              )}
+              {draft.characters.length > 0 && (
+                <div className="scene-character-snapshots field-wide">
+                  <span className="field-label">Nhân vật và trạng thái hình ảnh</span>
+                  <div className="scene-character-grid">
+                    {draft.characters.map((character) => (
+                      <article
+                        className="scene-character-snapshot"
+                        key={`${character.displayName}-${character.characterId ?? 'unresolved'}`}
+                      >
+                        <strong>{character.displayName}</strong>
+                        <span>{character.roleInScene || 'Vai trò chưa ghi'}</span>
+                        <small>
+                          {[
+                            character.visualState.expression,
+                            character.visualState.pose,
+                            character.visualState.action,
+                            character.visualState.clothing,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ') || 'Chưa có trạng thái hình ảnh'}
+                        </small>
+                        <em>
+                          {character.resolutionStatus === 'RESOLVED'
+                            ? 'Đã nối nhân vật chuẩn'
+                            : 'Cần duyệt nhân vật'}
+                        </em>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="scene-composition field-wide">
+                <span className="field-label">Bố cục khung hình</span>
+                <div className="scene-composition-grid">
+                  <span>
+                    <strong>Trọng tâm:</strong> {draft.composition.subjectFocus}
+                  </span>
+                  <span>
+                    <strong>Tiền cảnh:</strong>{' '}
+                    {draft.composition.foreground.join(', ') || 'Không có'}
+                  </span>
+                  <span>
+                    <strong>Trung cảnh:</strong>{' '}
+                    {draft.composition.midground.join(', ') || 'Không có'}
+                  </span>
+                  <span>
+                    <strong>Hậu cảnh:</strong>{' '}
+                    {draft.composition.background.join(', ') || 'Không có'}
+                  </span>
+                  {draft.composition.characterPositions.length > 0 && (
+                    <span>
+                      <strong>Vị trí nhân vật:</strong>{' '}
+                      {draft.composition.characterPositions
+                        .map((item) => `${item.displayName}: ${item.position}`)
+                        .join(' · ')}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="scene-form-grid">
+                <label className="field">
+                  <span>Tiêu đề</span>
+                  <input
+                    value={draft.title}
+                    onChange={(event) => updateDraft('title', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Mục đích</span>
+                  <select
+                    value={draft.purpose}
+                    onChange={(event) =>
+                      updateDraft('purpose', event.target.value as SceneDto['purpose'])
+                    }
+                  >
+                    {scenePurposeOptions.map((value) => (
+                      <option key={value} value={value}>
+                        {scenePurposeLabels[value]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field field-wide">
+                  <span>Tóm tắt</span>
+                  <textarea
+                    value={draft.summary}
+                    onChange={(event) => updateDraft('summary', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Địa điểm</span>
+                  <input
+                    list="scene-locations"
+                    value={draft.location ?? ''}
+                    onChange={(event) => updateDraft('location', event.target.value || null)}
+                  />
+                  <datalist id="scene-locations">
+                    {locations.map((location) => (
+                      <option key={location.id} value={location.name} />
+                    ))}
+                  </datalist>
+                </label>
+                <label className="field">
+                  <span>Thời điểm</span>
+                  <input
+                    value={draft.timeOfDay}
+                    onChange={(event) => updateDraft('timeOfDay', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Thời tiết</span>
+                  <input
+                    value={draft.weather}
+                    onChange={(event) => updateDraft('weather', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Tâm trạng</span>
+                  <input
+                    value={draft.mood}
+                    onChange={(event) => updateDraft('mood', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Khung hình</span>
+                  <select
+                    value={draft.camera.framing}
+                    onChange={(event) =>
+                      updateCamera('framing', event.target.value as SceneDto['camera']['framing'])
+                    }
+                  >
+                    {sceneFramingOptions.map((value) => (
+                      <option key={value} value={value}>
+                        {sceneFramingLabels[value]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Góc máy</span>
+                  <input
+                    value={draft.camera.angle ?? ''}
+                    onChange={(event) => updateCamera('angle', event.target.value || null)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Mô tả hình ảnh</span>
+                  <textarea
+                    value={draft.visualDescription}
+                    onChange={(event) => updateDraft('visualDescription', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Ánh sáng</span>
+                  <textarea
+                    value={draft.lighting}
+                    onChange={(event) => updateDraft('lighting', event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Tông màu</span>
+                  <input
+                    value={draft.colorMood}
+                    onChange={(event) => updateDraft('colorMood', event.target.value)}
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span>Prompt hình ảnh</span>
+                  <textarea
+                    value={draft.imagePrompt}
+                    onChange={(event) => updateDraft('imagePrompt', event.target.value)}
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span>Prompt loại trừ</span>
+                  <textarea
+                    value={draft.negativePrompt ?? ''}
+                    onChange={(event) => updateDraft('negativePrompt', event.target.value || null)}
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span>Ghi chú liên tục</span>
+                  <textarea
+                    value={draft.continuityNotes}
+                    onChange={(event) => updateDraft('continuityNotes', event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="actions">
+                <button type="submit">Lưu cảnh</button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={sceneJobIds.length > 0}
+                  onClick={() => void regenerateScene()}
+                >
+                  Tạo lại cảnh
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={sceneJobIds.length > 0}
+                  onClick={() => void refreshPrompt()}
+                >
+                  Làm mới prompt hình ảnh
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+      <form className="location-quick-add panel" onSubmit={(event) => void createLocation(event)}>
+        <div>
+          <h4>Danh mục địa điểm</h4>
+          <p className="muted">
+            Địa điểm mới được lưu dạng bản nháp để duyệt trước khi dùng rộng hơn.
+          </p>
+        </div>
+        <input
+          aria-label="Tên địa điểm mới"
+          placeholder="Tên địa điểm mới"
+          value={newLocationName}
+          onChange={(event) => setNewLocationName(event.target.value)}
+        />
+        <button type="submit">Thêm địa điểm</button>
+      </form>
+    </section>
   );
 }
 

@@ -1,16 +1,16 @@
 # Implementation
 
-AI Story Studio is a local-first modular monolith with two connected paths:
+AI Story Studio is a local-first modular monolith with three connected layers:
 
 `Story -> TTS -> SRT subtitles -> background -> FFmpeg -> MP4`
 
-and the bounded long-story engine:
-
 `Idea -> blueprint -> arcs/windows -> chapter generation -> StoryState -> review`
 
-The story engine is an authoring workflow. It does not automatically create
-narration or video assets; media remains an explicit handoff after chapter
-review.
+`Reviewed chapter -> Scene Engine -> scene metadata/prompts -> explicit media handoff`
+
+The Story and Scene Engines are authoring workflows. Neither automatically
+creates narration, images, or video assets; media remains an explicit handoff
+after review.
 
 ## Implementation guides
 
@@ -23,6 +23,10 @@ review.
 - [Continuity](continuity.md)
 - [AI usage](ai-usage.md)
 - [Filesystem](filesystem.md)
+- [Scene Engine](scene-engine.md)
+- [Visual style](visual-style.md)
+- [Locations](locations.md)
+- [Scene prompts](scene-prompts.md)
 - [Known limitations](known-limitations.md)
 
 ## Scope boundaries

@@ -72,6 +72,7 @@ export const workflowSteps = sqliteTable(
     entityId: text('entity_id').notNull(),
     status: text('status').notNull().default('PENDING'),
     inputFingerprint: text('input_fingerprint').notNull(),
+    payload: text('payload').notNull().default('{}'),
     progress: real('progress').notNull().default(0),
     progressMessage: text('progress_message').notNull().default(''),
     attempts: integer('attempts').notNull().default(0),
@@ -777,5 +778,189 @@ export const storyContinuityChecks = sqliteTable(
       table.chapterRevision,
       table.createdAt,
     ),
+  }),
+);
+
+export const visualStyleSettings = sqliteTable(
+  'visual_style_settings',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    styleName: text('style_name').notNull(),
+    styleDescription: text('style_description').notNull().default(''),
+    medium: text('medium').notNull().default(''),
+    realism: text('realism').notNull().default(''),
+    colorPalette: text('color_palette').notNull().default(''),
+    cinematicStyle: text('cinematic_style').notNull().default(''),
+    aspectRatio: text('aspect_ratio').notNull().default('16:9'),
+    promptSuffix: text('prompt_suffix').notNull().default(''),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    rowVersion: integer('row_version').notNull().default(1),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('visual_style_settings_revision_idx').on(table.projectId, table.revision),
+    current: uniqueIndex('visual_style_settings_current_idx')
+      .on(table.projectId)
+      .where(sql`${table.isCurrent} = 1`),
+  }),
+);
+
+export const locations = sqliteTable(
+  'locations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    normalizedName: text('normalized_name').notNull(),
+    description: text('description').notNull().default(''),
+    type: text('type').notNull().default(''),
+    visualDescription: text('visual_description').notNull().default(''),
+    environment: text('environment').notNull().default(''),
+    architecture: text('architecture').notNull().default(''),
+    importantObjects: text('important_objects').notNull().default('[]'),
+    lightingDefaults: text('lighting_defaults').notNull().default(''),
+    status: text('status').notNull().default('DRAFT'),
+    rowVersion: integer('row_version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    normalized: index('locations_project_normalized_idx').on(table.projectId, table.normalizedName),
+  }),
+);
+
+export const scenePlanRevisions = sqliteTable(
+  'scene_plan_revisions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    chapterRevision: integer('chapter_revision').notNull(),
+    revision: integer('revision').notNull(),
+    density: text('density').notNull(),
+    targetRange: text('target_range'),
+    styleRevisionId: text('style_revision_id').references(() => visualStyleSettings.id, {
+      onDelete: 'set null',
+    }),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    metadata: text('metadata'),
+    status: text('status').notNull().default('CURRENT'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('scene_plan_chapter_revision_idx').on(table.chapterId, table.revision),
+    current: uniqueIndex('scene_plan_current_idx')
+      .on(table.chapterId)
+      .where(sql`${table.isCurrent} = 1`),
+    projectStatus: index('scene_plan_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.chapterId,
+    ),
+  }),
+);
+
+export const sceneRevisions = sqliteTable(
+  'scene_revisions',
+  {
+    id: text('id').primaryKey(),
+    stableId: text('stable_id').notNull(),
+    scenePlanRevisionId: text('scene_plan_revision_id')
+      .notNull()
+      .references(() => scenePlanRevisions.id, { onDelete: 'cascade' }),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    chapterRevision: integer('chapter_revision').notNull(),
+    sourceContent: text('source_content').notNull().default(''),
+    sceneNumber: integer('scene_number').notNull(),
+    revision: integer('revision').notNull(),
+    title: text('title').notNull(),
+    summary: text('summary').notNull(),
+    purpose: text('purpose').notNull(),
+    sourceStartOffset: integer('source_start_offset').notNull(),
+    sourceEndOffset: integer('source_end_offset').notNull(),
+    locationId: text('location_id').references(() => locations.id, { onDelete: 'set null' }),
+    locationNameSnapshot: text('location_name_snapshot'),
+    timeOfDay: text('time_of_day').notNull().default(''),
+    weather: text('weather').notNull().default(''),
+    mood: text('mood').notNull().default(''),
+    visualDescription: text('visual_description').notNull(),
+    camera: text('camera').notNull(),
+    composition: text('composition').notNull(),
+    importantObjects: text('important_objects').notNull().default('[]'),
+    lighting: text('lighting').notNull().default(''),
+    colorMood: text('color_mood').notNull().default(''),
+    imagePrompt: text('image_prompt').notNull(),
+    negativePrompt: text('negative_prompt'),
+    continuityNotes: text('continuity_notes').notNull().default(''),
+    unresolvedReferences: text('unresolved_references').notNull().default('[]'),
+    status: text('status').notNull().default('CURRENT'),
+    promptStatus: text('prompt_status').notNull().default('CURRENT'),
+    styleRevisionId: text('style_revision_id').references(() => visualStyleSettings.id, {
+      onDelete: 'set null',
+    }),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    promptVersion: text('prompt_version').notNull(),
+    schemaVersion: text('schema_version').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('scene_revision_stable_revision_idx').on(
+      table.scenePlanRevisionId,
+      table.stableId,
+      table.revision,
+    ),
+    current: uniqueIndex('scene_revision_current_idx')
+      .on(table.scenePlanRevisionId, table.stableId)
+      .where(sql`${table.isCurrent} = 1`),
+    chapterNumber: index('scene_revision_chapter_number_idx').on(
+      table.chapterId,
+      table.sceneNumber,
+      table.isCurrent,
+    ),
+    location: index('scene_revision_location_idx').on(table.locationId, table.isCurrent),
+  }),
+);
+
+export const sceneCharacters = sqliteTable(
+  'scene_characters',
+  {
+    id: text('id').primaryKey(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    characterId: text('character_id'),
+    displayName: text('display_name').notNull(),
+    resolutionStatus: text('resolution_status').notNull().default('UNRESOLVED'),
+    roleInScene: text('role_in_scene').notNull().default(''),
+    visualState: text('visual_state').notNull().default('{}'),
+    dependencyFingerprint: text('dependency_fingerprint'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => ({
+    scene: index('scene_characters_scene_idx').on(table.sceneRevisionId),
+    character: index('scene_characters_character_idx').on(table.characterId, table.sceneRevisionId),
   }),
 );

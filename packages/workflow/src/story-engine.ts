@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   StoryBatchRepository,
   StoryRepository,
+  SceneRepository,
   ChapterRepository,
   WorkflowRepository,
   type ClaimedStep,
@@ -222,20 +223,44 @@ export function renderSummaryGenerationPrompt(
 export class StoryEngine {
   readonly story: StoryRepository;
   readonly chapters: ChapterRepository;
+  readonly scenes: SceneRepository;
   readonly batches: StoryBatchRepository;
   readonly workflow: WorkflowRepository;
-
   constructor(private readonly context: StoryEngineContext) {
     this.story = new StoryRepository(context.database);
+    this.scenes = new SceneRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.batches = new StoryBatchRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
+  }
+  private invalidateSceneWorkflow(projectId: Id, error: string): void {
+    for (const chapter of this.chapters.listMetadata(projectId)) {
+      this.workflow.invalidateSteps(chapter.id, ['GENERATE_SCENES'], error);
+    }
+    const sceneIds = this.scenes.listProjectCurrentSceneIds(projectId);
+    this.workflow.invalidateEntities(
+      sceneIds,
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      error,
+    );
+  }
+  private invalidateSceneWorkflowForChapter(chapterId: Id): void {
+    const error = 'Story chapter changed';
+    this.workflow.invalidateSteps(chapterId, ['GENERATE_SCENES'], error);
+    const sceneIds = this.scenes.listCurrentSceneIds(chapterId);
+    this.workflow.invalidateEntities(
+      sceneIds,
+      ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT'],
+      error,
+    );
   }
 
   saveSettings(projectId: Id, input: unknown): StorySettingsDto {
     const settings = storySettingsSchema.parse(input);
     const saved = this.story.saveSettings(projectId, settings);
     this.story.invalidateScope({ projectId, kind: 'SETTINGS' });
+    this.scenes.markProjectStale(projectId);
+    this.invalidateSceneWorkflow(projectId, 'Story settings changed');
     return saved;
   }
 
@@ -270,6 +295,8 @@ export class StoryEngine {
       }),
     );
     this.story.invalidateScope({ projectId, kind: 'BLUEPRINT' });
+    this.scenes.markProjectStale(projectId);
+    this.invalidateSceneWorkflow(projectId, 'Story blueprint changed');
     return saved;
   }
 
@@ -306,6 +333,11 @@ export class StoryEngine {
       }),
     );
     this.story.invalidateScope({ projectId, kind: 'PLAN_ITEM', stableId: planItemId });
+    const chapter = this.chapters.getByPlanItem(projectId, planItemId);
+    if (chapter) {
+      this.scenes.markChapterStale(chapter.id);
+      this.invalidateSceneWorkflowForChapter(chapter.id);
+    }
     return saved;
   }
 
@@ -968,6 +1000,8 @@ export class StoryEngine {
       excludeStepId: workflowStepId ?? undefined,
       preserveCurrentSummary: true,
     });
+    this.scenes.markChapterStale(result.chapterId);
+    this.invalidateSceneWorkflowForChapter(result.chapterId);
     return result;
   }
   private analysisPlanItem(
@@ -1414,6 +1448,8 @@ export class StoryEngine {
       excludeStepId: workflowStepId ?? undefined,
       preserveCurrentSummary: true,
     });
+    this.scenes.markChapterStale(result.chapterId);
+    this.invalidateSceneWorkflowForChapter(result.chapterId);
     return result;
   }
 

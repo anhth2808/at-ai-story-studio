@@ -326,6 +326,7 @@ export type StepRow = {
   entity_id: Id;
   status: WorkflowStatus;
   input_fingerprint: string;
+  payload: string;
   progress: number;
   progress_message: string;
   attempts: number;
@@ -356,25 +357,51 @@ export class WorkflowRepository {
     entityId: string,
     fingerprint: string,
     maxAttempts = 3,
+    payload: unknown = {},
   ): Id {
     const id = randomUUID();
     const stamp = now();
-    this.database.sqlite
-      .prepare(
-        'INSERT INTO workflow_steps(id,execution_id,step_key,type,entity_id,status,input_fingerprint,max_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-      )
-      .run(
-        id,
-        executionId,
-        stepKey,
-        type,
-        entityId,
-        'PENDING',
-        fingerprint,
-        maxAttempts,
-        stamp,
-        stamp,
-      );
+    const hasPayloadColumn = (
+      this.database.sqlite.prepare('PRAGMA table_info(workflow_steps)').all() as Array<{
+        name: string;
+      }>
+    ).some((column) => column.name === 'payload');
+    if (hasPayloadColumn) {
+      this.database.sqlite
+        .prepare(
+          'INSERT INTO workflow_steps(id,execution_id,step_key,type,entity_id,status,input_fingerprint,payload,max_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          id,
+          executionId,
+          stepKey,
+          type,
+          entityId,
+          'PENDING',
+          fingerprint,
+          json(payload),
+          maxAttempts,
+          stamp,
+          stamp,
+        );
+    } else {
+      this.database.sqlite
+        .prepare(
+          'INSERT INTO workflow_steps(id,execution_id,step_key,type,entity_id,status,input_fingerprint,max_attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          id,
+          executionId,
+          stepKey,
+          type,
+          entityId,
+          'PENDING',
+          fingerprint,
+          maxAttempts,
+          stamp,
+          stamp,
+        );
+    }
     return id;
   }
   updateRunningStepFingerprint(step: ClaimedStep, fingerprint: string): void {
