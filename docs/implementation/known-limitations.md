@@ -99,9 +99,16 @@
 - `text-to-image-v1` is a controlled native workflow. Arbitrary workflow JSON,
   custom nodes, model downloads, provider marketplaces, and automatic fallback
   models are not supported.
-- Reference Asset identifiers are preserved in requests but the current
-  workflow does not condition on them. It reports `REFERENCE_IMAGES_UNUSED`.
-  Face and identity drift are expected and must be reviewed manually.
+- Reference conditioning (Prompt #10) is implemented through Flux 2 native
+  `ReferenceLatent` conditioning with the `reference-character-v1` workflow.
+  Identity consistency is assisted, not guaranteed: face/clothing/hair drift
+  must be reviewed manually. Multi-character conditioning relies on explicit
+  per-character reference mapping plus prompt text; upstream does not quantify
+  identity-swap risk, so treat two-character scenes as LIMITED until reviewed.
+  Only the primary (first) approved reference of a character conditions a
+  Scene; additional approved references are stored but unused. There is no
+  per-reference strength control (the native node exposes none) and no
+  automatic fallback from conditioned to text-only generation.
 - Effective provider concurrency is one because the current durable worker
   claims one step at a time. No extra semaphore or second queue exists.
 - A server without targeted running-job cancellation can only stop Studio's
@@ -193,7 +200,6 @@ Live verification on 2026-09-01 used ComfyUI `0.33.1` at
   resemblance is not demonstrable because the fixture scene has no characters.
 - Reference Assets remain request-only; `REFERENCE_IMAGES_UNUSED` is asserted
   in provider tests. No reference conditioning or video handoff exists.
-
 
 These limits are deliberate boundaries for the first working video, bounded
 long-story authoring, and first working image workflows. They do not enable

@@ -87,6 +87,12 @@ terminal evidence, downloads only the controlled output node, validates the
 file, and commits the Asset under the active lease. Restart recovery therefore
 resumes the same provider prompt instead of blindly submitting another one.
 
+Conditioned generation is an explicit opt-in: the request carries an
+`ImageGenerationMode` of `TEXT_ONLY` (default) or `REFERENCE_CONDITIONED` with
+an explicit CharacterId-to-reference mapping, and `REFERENCE_CONDITIONED` uses
+the approved `reference-character-v1` native workflow. See
+`reference-conditioning.md`.
+
 Technical retry keeps the logical generation and seed. Same-seed or new-seed
 regeneration creates a separate immutable revision. If package or settings
 inputs change while ComfyUI runs, a validated result may remain historical but

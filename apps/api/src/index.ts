@@ -11,6 +11,7 @@ import {
   safeWorkspacePath,
   sha256File,
   contentTypeFor,
+  validateImageFile,
   relativeAssetPath,
   prepareProjectDirectories,
 } from '@studio/media';
@@ -31,6 +32,8 @@ import {
   storyPlanWindowRequestSchema,
   storyPlanWindowResultSchema,
   storySettingsSchema,
+  referenceApprovalUpdateSchema,
+  sceneImageReferencePromotionSchema,
   storyStableIdSchema,
   sceneBatchRequestSchema,
   sceneEditSchema,
@@ -552,6 +555,134 @@ app.put(
     );
   },
 );
+app.get('/api/projects/:projectId/characters/:characterId/references', async (request) => {
+  const params = request.params as { projectId: string; characterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const characterId = storyStableIdSchema.parse(params.characterId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const profile = service.visual.getCharacterProfile(projectId, characterId);
+  const attachedIds = profile?.payload.referenceAssetIds ?? [];
+  const references = service.assets.listCharacterReferences(projectId, characterId).map((asset) => {
+    let metadata: Record<string, unknown> = {};
+    try {
+      const rawMetadata: unknown = typeof asset.metadata === 'string' ? asset.metadata : '{}';
+      const parsed: unknown = JSON.parse(rawMetadata as string);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        metadata = parsed as Record<string, unknown>;
+    } catch {
+      metadata = {};
+    }
+    return {
+      id: asset.id,
+      url: `/api/assets/${asset.id}`,
+      mediaType: asset.mediaType,
+      bytes: asset.bytes,
+      sha256: asset.sha256,
+      approval: typeof metadata.approval === 'string' ? metadata.approval : 'CANDIDATE',
+      displayName: typeof metadata.displayName === 'string' ? metadata.displayName : '',
+      isPrimary: asset.id === attachedIds[0],
+      attached: attachedIds.includes(asset.id),
+      createdAt: asset.createdAt,
+    };
+  });
+  return {
+    characterId,
+    profileRevision: profile?.revision ?? null,
+    primaryReferenceId: attachedIds[0] ?? null,
+    references,
+  };
+});
+app.post('/api/projects/:projectId/characters/:characterId/references', async (request, reply) => {
+  const params = request.params as { projectId: string; characterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const characterId = storyStableIdSchema.parse(params.characterId);
+  if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  const part = await request.file();
+  if (!part) throw new AppError('INVALID_UPLOAD', 'File is required');
+  const extensionByMime: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+  };
+  const extension = extensionByMime[part.mimetype];
+  if (!extension) throw new AppError('INVALID_UPLOAD', 'Unsupported media type');
+  const assetId = randomUUID();
+  const directory = join(workspace.projects, projectId, 'references');
+  const target = join(directory, `${assetId}${extension}`);
+  await mkdir(directory, { recursive: true });
+  let validated: { mediaType: string; width: number; height: number } | null = null;
+  try {
+    await pipeline(part.file, createWriteStream(target));
+    validated = await validateImageFile(media, target);
+  } catch {
+    await rm(target, { force: true });
+    throw new AppError('INVALID_UPLOAD', 'Uploaded reference could not be decoded', 400);
+  }
+  if (!validated) {
+    await rm(target, { force: true });
+    throw new AppError('INVALID_UPLOAD', 'Uploaded reference could not be decoded', 400);
+  }
+  const digest = await sha256File(target);
+  service.assets.registerReference({
+    id: assetId,
+    projectId,
+    type: 'CHARACTER_REFERENCE_IMAGE',
+    role: 'CHARACTER_REFERENCE_IMAGE',
+    path: relativeAssetPath(workspace.root, target),
+    mediaType: validated.mediaType,
+    bytes: digest.bytes,
+    sha256: digest.hash,
+    metadata: { characterId, approval: 'CANDIDATE', displayName: part.filename },
+  });
+  return reply
+    .code(201)
+    .send({ id: assetId, url: `/api/assets/${assetId}`, approval: 'CANDIDATE' });
+});
+app.patch(
+  '/api/projects/:projectId/characters/:characterId/references/:assetId/approval',
+  async (request) => {
+    const params = request.params as { projectId: string; characterId: string; assetId: string };
+    const projectId = idSchema.parse(params.projectId);
+    const characterId = storyStableIdSchema.parse(params.characterId);
+    const assetId = idSchema.parse(params.assetId);
+    const body = referenceApprovalUpdateSchema.parse(request.body);
+    if (!service.getProject(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    service.assets.setReferenceApproval(projectId, assetId, characterId, body.approval);
+    return { id: assetId, characterId, approval: body.approval };
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/images/:generationId/promote-reference',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    const projectId = idSchema.parse(params.projectId);
+    const sceneId = idSchema.parse(params.sceneId);
+    const generationId = idSchema.parse(params.generationId);
+    const body = sceneImageReferencePromotionSchema.parse(request.body);
+    const { assetId } = await service.images.promoteToCharacterReference(
+      projectId,
+      sceneId,
+      generationId,
+      body,
+    );
+    const profile = service.visual.getCharacterProfile(projectId, body.characterId);
+    const currentRefs = profile?.payload.referenceAssetIds ?? [];
+    const referenceAssetIds = body.primary
+      ? [assetId, ...currentRefs.filter((id) => id !== assetId)]
+      : [...currentRefs, assetId];
+    const updated = await Promise.resolve(
+      service.visual.updateCharacterProfileReferences(projectId, body.characterId, {
+        expectedRevision: body.expectedRevision,
+        referenceAssetIds,
+      }),
+    );
+    return { assetId, characterId: body.characterId, profile: updated };
+  },
+);
 app.post(
   '/api/projects/:projectId/visual-bible/characters/:characterId/approve',
   async (request) => {
@@ -835,30 +966,29 @@ app.get('/api/projects/:projectId/scenes/:sceneId/images/current', async (reques
   if (!image) throw new AppError('NOT_FOUND', 'Current Scene image not found', 404);
   return image;
 });
-app.get(
-  '/api/projects/:projectId/scenes/:sceneId/images/:generationId',
-  async (request) => {
-    const params = request.params as {
-      projectId: string;
-      sceneId: string;
-      generationId: string;
-    };
-    return service.images.getGeneration(
-      idSchema.parse(params.projectId),
-      idSchema.parse(params.sceneId),
-      idSchema.parse(params.generationId),
-    );
-  },
-);
+app.get('/api/projects/:projectId/scenes/:sceneId/images/:generationId', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.images.getGeneration(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+  );
+});
 app.post('/api/projects/:projectId/scenes/:sceneId/images/generate', async (request, reply) => {
   const params = request.params as { projectId: string; sceneId: string };
-  return reply.code(202).send(
-    service.images.schedule(
-      idSchema.parse(params.projectId),
-      idSchema.parse(params.sceneId),
-      sceneImageGenerationScheduleSchema.parse(request.body ?? {}),
-    ),
-  );
+  return reply
+    .code(202)
+    .send(
+      service.images.schedule(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        sceneImageGenerationScheduleSchema.parse(request.body ?? {}),
+      ),
+    );
 });
 app.post(
   '/api/projects/:projectId/scenes/:sceneId/images/:generationId/regenerate',
@@ -868,32 +998,31 @@ app.post(
       sceneId: string;
       generationId: string;
     };
-    return reply.code(202).send(
-      service.images.regenerate(
-        idSchema.parse(params.projectId),
-        idSchema.parse(params.sceneId),
-        idSchema.parse(params.generationId),
-        sceneImageRegenerationSchema.parse(request.body ?? {}),
-      ),
-    );
+    return reply
+      .code(202)
+      .send(
+        service.images.regenerate(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          idSchema.parse(params.generationId),
+          sceneImageRegenerationSchema.parse(request.body ?? {}),
+        ),
+      );
   },
 );
-app.put(
-  '/api/projects/:projectId/scenes/:sceneId/images/:generationId/review',
-  async (request) => {
-    const params = request.params as {
-      projectId: string;
-      sceneId: string;
-      generationId: string;
-    };
-    return service.images.updateReview(
-      idSchema.parse(params.projectId),
-      idSchema.parse(params.sceneId),
-      idSchema.parse(params.generationId),
-      sceneImageReviewUpdateSchema.parse(request.body),
-    );
-  },
-);
+app.put('/api/projects/:projectId/scenes/:sceneId/images/:generationId/review', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.images.updateReview(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+    sceneImageReviewUpdateSchema.parse(request.body),
+  );
+});
 app.put(
   '/api/projects/:projectId/scenes/:sceneId/images/:generationId/current',
   async (request) => {
@@ -924,18 +1053,14 @@ app.post('/api/projects/:projectId/scenes/:sceneId/images/manual', async (reques
     'image/webp': '.webp',
   };
   const extension = extensionByMime[part.mimetype];
-  if (!extension) throw new AppError('INVALID_UPLOAD', 'Only PNG, JPEG, and WEBP images are supported', 400);
+  if (!extension)
+    throw new AppError('INVALID_UPLOAD', 'Only PNG, JPEG, and WEBP images are supported', 400);
   const stagingPath = join(workspace.staging, `manual-image-${randomUUID()}${extension}`);
   try {
     await pipeline(part.file, createWriteStream(stagingPath));
     if (part.file.truncated || statSync(stagingPath).size > 50_000_000)
       throw new AppError('INVALID_UPLOAD', 'Scene image exceeds the 50 MB limit', 413);
-    const image = await service.images.registerManual(
-      projectId,
-      sceneId,
-      stagingPath,
-      input.notes,
-    );
+    const image = await service.images.registerManual(projectId, sceneId, stagingPath, input.notes);
     return reply.code(201).send(image);
   } catch (error) {
     await rm(stagingPath, { force: true });
@@ -944,24 +1069,28 @@ app.post('/api/projects/:projectId/scenes/:sceneId/images/manual', async (reques
 });
 app.post('/api/projects/:projectId/images/generate-batch', async (request, reply) => {
   const params = request.params as { projectId: string };
-  return reply.code(202).send(
-    service.images.scheduleBatch(
-      idSchema.parse(params.projectId),
-      imageGenerationBatchSchema.parse(request.body),
-    ),
-  );
+  return reply
+    .code(202)
+    .send(
+      service.images.scheduleBatch(
+        idSchema.parse(params.projectId),
+        imageGenerationBatchSchema.parse(request.body),
+      ),
+    );
 });
 app.post(
   '/api/projects/:projectId/chapters/:chapterId/images/generate-batch',
   async (request, reply) => {
     const params = request.params as { projectId: string; chapterId: string };
-    return reply.code(202).send(
-      service.images.scheduleChapterBatch(
-        idSchema.parse(params.projectId),
-        idSchema.parse(params.chapterId),
-        imageGenerationChapterBatchSchema.parse(request.body ?? {}),
-      ),
-    );
+    return reply
+      .code(202)
+      .send(
+        service.images.scheduleChapterBatch(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.chapterId),
+          imageGenerationChapterBatchSchema.parse(request.body ?? {}),
+        ),
+      );
   },
 );
 app.get('/api/projects/:projectId/story/state', async (request) => {

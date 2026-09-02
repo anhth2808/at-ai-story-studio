@@ -12,6 +12,16 @@ import type {
 } from '@studio/shared';
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value);
+const parseMetadata = (value: unknown): Record<string, unknown> => {
+  try {
+    const parsed: unknown = JSON.parse(typeof value === 'string' ? value : '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
 const safeError = (value: string): string => value.slice(0, 2_000);
 export type ChapterStatusFilter = 'FAILED' | 'PENDING' | 'CONTINUITY_STALE' | 'WARN';
 
@@ -797,6 +807,65 @@ export class AssetRepository {
         "SELECT id,path,type,sha256,media_type as mediaType FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY' ORDER BY created_at DESC LIMIT 1",
       )
       .get(projectId, role) as CurrentAsset | null;
+  }
+  registerReference(input: AssetRegistration): void {
+    this.assertSafePath(input.path);
+    const stamp = now();
+    this.database.sqlite
+      .prepare(
+        'INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,input_fingerprint,metadata,is_current,validation_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        input.id,
+        input.projectId,
+        input.type,
+        input.role,
+        input.validationError ? 'INVALID' : 'READY',
+        input.path,
+        input.mediaType,
+        input.bytes,
+        input.sha256,
+        input.sourceEntityId ?? null,
+        input.sourceStepId ?? null,
+        input.inputFingerprint ?? null,
+        json(input.metadata ?? {}),
+        0,
+        input.validationError ?? null,
+        stamp,
+        stamp,
+      );
+  }
+  listCharacterReferences(projectId: Id, characterId: string): AssetRecord[] {
+    return this.database.sqlite
+      .prepare(
+        `SELECT id,project_id as projectId,type,role,status,path,media_type as mediaType,bytes,sha256,
+          source_entity_id as sourceEntityId,source_step_id as sourceStepId,input_fingerprint as inputFingerprint,
+          metadata,is_current as isCurrent,validation_error as validationError,created_at as createdAt,updated_at as updatedAt
+         FROM assets
+         WHERE project_id=? AND type='CHARACTER_REFERENCE_IMAGE' AND json_extract(metadata,'$.characterId')=?
+         ORDER BY created_at DESC`,
+      )
+      .all(projectId, characterId) as AssetRecord[];
+  }
+  setReferenceApproval(
+    projectId: Id,
+    assetId: Id,
+    characterId: string,
+    approval: string,
+  ): AssetRecord {
+    const asset = this.get(assetId);
+    if (!asset || asset.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Asset not found', 404);
+    if (asset.type !== 'CHARACTER_REFERENCE_IMAGE')
+      throw new AppError('INVALID_INPUT', 'Asset is not a character reference', 400);
+    const metadata = parseMetadata(asset.metadata);
+    if (metadata.characterId !== characterId)
+      throw new AppError('INVALID_INPUT', 'Reference belongs to a different character', 400);
+    metadata.approval = approval;
+    this.database.sqlite
+      .prepare('UPDATE assets SET metadata=?,updated_at=? WHERE id=? AND project_id=?')
+      .run(json(metadata), now(), assetId, projectId);
+    return { ...asset, metadata: json(metadata), updatedAt: now() };
   }
   get(id: Id): AssetRecord | null {
     return this.database.sqlite

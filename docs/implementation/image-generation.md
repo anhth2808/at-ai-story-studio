@@ -27,6 +27,6 @@ Review state is `UNREVIEWED`, `ACCEPTED`, or `REJECTED`. Review never changes cu
 
 The API supports an explicit bounded Scene selection and one Chapter's missing or stale eligible Scenes. It skips duplicate successful or pending work. There is no action that silently schedules every Scene in a project.
 
-## Deliberate limits
+## Conditioning
 
-`text-to-image-v1` records reference Asset identifiers but does not condition on them. The result reports `REFERENCE_IMAGES_UNUSED`. Character identity and faces can drift. No image-to-video, video provider, generic workflow JSON, best-image selection, or automatic render handoff is implemented.
+Reference conditioning is documented in `reference-conditioning.md` and `image-consistency.md`. `text-to-image-v1` remains the default and unchanged path.

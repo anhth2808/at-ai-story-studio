@@ -12,15 +12,19 @@ AI Story Studio expects an independently installed local ComfyUI server. It does
 - VAE: `full_encoder_small_decoder.safetensors`
 - Sampler: `euler`
 
-Start ComfyUI using its normal installation command and ensure port 8188 is reachable. Then open the Studio Scene workspace, choose **Cài đặt tạo ảnh**, enter the model filenames exactly, save, and choose **Kiểm tra kết nối**.
+## Approved native workflows
 
-## Approved native workflow
+Two application-approved templates exist; both use only native nodes.
 
-The controlled Flux 2 graph uses only:
+`text-to-image-v1` (default):
 
 `UNETLoader`, `CLIPLoader`, `VAELoader`, `CLIPTextEncode`, `RandomNoise`, `KSamplerSelect`, `Flux2Scheduler`, `EmptyFlux2LatentImage`, `CFGGuider`, `SamplerCustomAdvanced`, `VAEDecode`, and `SaveImage`.
 
-Studio maps prompt, negative prompt, concrete seed, normalized dimensions, steps, guidance, sampler, and configured model components. Node IDs, classes, links, and the output node are validated before submission.
+`reference-character-v1` (reference conditioning) adds per reference:
+
+`LoadImage` -> `ImageScaleToTotalPixels` (lanczos, 1.0 MP, resolution_steps 1) -> `VAEEncode` -> `ReferenceLatent` chained on both the positive and the negative conditioning, mirroring the official klein-base CFG reference template. The same VAEEncode latent feeds both chains. Node IDs, classes, inputs, and links are validated per template before submission.
+
+Studio maps prompt, negative prompt, concrete seed, normalized dimensions, steps, guidance, sampler, configured model components, and reference-image inputs. No custom nodes and no additional model files are required for either template.
 
 ## HTTP endpoints
 
@@ -28,6 +32,7 @@ Studio uses only these ComfyUI routes:
 
 - `GET /system_stats`
 - `GET /object_info` and per-class fallback
+- `POST /upload/image` (multipart; reference images land in the ComfyUI input directory; the returned `name` is used in `LoadImage`)
 - `GET /models/diffusion_models`
 - `GET /models/text_encoders`
 - `GET /models/vae`

@@ -55,15 +55,19 @@ function assertReferences(
   const uniqueIds = [...new Set(assetIds)];
   if (!uniqueIds.length) return;
   const placeholders = uniqueIds.map(() => '?').join(',');
+  const approvalFilter =
+    kind === 'CHARACTER' ? " AND json_extract(metadata,'$.approval')='APPROVED'" : '';
   const rows = database.sqlite
     .prepare(
-      `SELECT id,type FROM assets WHERE project_id=? AND id IN (${placeholders}) AND status='READY'`,
+      `SELECT id,type FROM assets WHERE project_id=? AND id IN (${placeholders}) AND status='READY'${approvalFilter}`,
     )
     .all(projectId, ...uniqueIds) as Array<{ id: string; type: string }>;
   if (rows.length !== uniqueIds.length || rows.some((row) => row.type !== referenceTypes[kind]))
     throw new AppError(
       'INVALID_REFERENCE',
-      'Reference assets must belong to the project and use the allowed role',
+      kind === 'CHARACTER'
+        ? 'Character references must be project-owned READY assets in APPROVED state'
+        : 'Reference assets must belong to the project and use the allowed role',
       400,
     );
 }

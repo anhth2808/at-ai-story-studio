@@ -1237,3 +1237,76 @@ select:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+.character-reference-strip {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.reference-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.reference-item {
+  width: 132px;
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.reference-item img {
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid #394252;
+}
+.reference-item.approval-rejected img {
+  opacity: 0.4;
+}
+.reference-item figcaption {
+  display: grid;
+  gap: 4px;
+}
+.reference-item .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.reference-item .actions button {
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.conditioning-info {
+  margin: 6px 0 0;
+}
+.promote-reference {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.scene-image-compare {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.compare-pickers {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.compare-item img {
+  width: 100%;
+  border-radius: 7px;
+  border: 1px solid #394252;
+}
+@media (max-width: 900px) {
+  .compare-grid {
+    grid-template-columns: 1fr;
+  }
+}

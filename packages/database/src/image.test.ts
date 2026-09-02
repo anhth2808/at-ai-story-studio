@@ -111,6 +111,7 @@ describe('scene image persistence', () => {
       guidance: current.guidance,
       seedMode: current.seedMode,
       fixedSeed: current.fixedSeed,
+      conditioningMode: current.conditioningMode,
       expectedRowVersion: current.rowVersion,
     });
     expect(updated.rowVersion).toBe(current.rowVersion + 1);
@@ -131,6 +132,7 @@ describe('scene image persistence', () => {
         guidance: current.guidance,
         seedMode: current.seedMode,
         fixedSeed: current.fixedSeed,
+        conditioningMode: current.conditioningMode,
         expectedRowVersion: current.rowVersion,
       }),
     ).toThrow(/changed/);

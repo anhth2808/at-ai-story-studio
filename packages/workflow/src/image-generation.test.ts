@@ -21,6 +21,7 @@ const settings = {
   guidance: 5,
   seedMode: 'FIXED' as const,
   fixedSeed: 42,
+  conditioningMode: 'TEXT_ONLY' as const,
 };
 
 describe('image generation helpers', () => {

@@ -608,3 +608,13 @@ historical revisions.
 - Strictly validate OMP structured output at the boundary. Persist provider
 usage when available and leave unavailable token or cost values unknown.
 
+
+# Reference-conditioned image generation rules
+
+- Reference-conditioned image generation must retain an explicit CharacterId ->
+  ReferenceAsset mapping (asset id, content hash, and profile revision) in the
+  persisted request and metadata; never resolve conditioning by prompt name
+  order.
+- Changing a character reference must never invalidate unrelated characters'
+  images or Story/TTS data. Reference changes propagate only through the
+  per-character profile dependency model.

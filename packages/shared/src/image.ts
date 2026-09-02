@@ -6,8 +6,19 @@ const boundedString = (max: number) => z.string().max(max);
 export const imageProviderSchema = z.enum(['COMFYUI']);
 export type ImageProvider = z.infer<typeof imageProviderSchema>;
 
-export const imageWorkflowTemplateSchema = z.literal('text-to-image-v1');
+export const imageWorkflowTemplateSchema = z.enum(['text-to-image-v1', 'reference-character-v1']);
 export type ImageWorkflowTemplate = z.infer<typeof imageWorkflowTemplateSchema>;
+
+export const imageConditioningModeSchema = z.enum(['TEXT_ONLY', 'REFERENCE_CONDITIONED']);
+export type ImageConditioningMode = z.infer<typeof imageConditioningModeSchema>;
+
+export const imageConditioningReadinessSchema = z.enum([
+  'CONDITIONING_READY',
+  'REFERENCE_NODE_MISSING',
+  'MODEL_MISSING',
+  'INCOMPATIBLE_WORKFLOW',
+]);
+export type ImageConditioningReadiness = z.infer<typeof imageConditioningReadinessSchema>;
 
 export const imageSeedModeSchema = z.enum(['RANDOM', 'FIXED']);
 export type ImageSeedMode = z.infer<typeof imageSeedModeSchema>;
@@ -54,6 +65,7 @@ export const imageGenerationErrorCodeSchema = z.enum([
   'STALE_INPUT',
   'OUTCOME_UNKNOWN',
   'CONFIGURATION_ERROR',
+  'REFERENCE_UPLOAD_FAILED',
 ]);
 export type ImageGenerationErrorCode = z.infer<typeof imageGenerationErrorCodeSchema>;
 
@@ -87,12 +99,14 @@ export type ImageProviderSettings = z.infer<typeof imageProviderSettingsSchema>;
 
 const imageGenerationSettingsBaseSchema = imageProviderSettingsBaseSchema
   .extend({
+    workflowTemplate: z.literal('text-to-image-v1').default('text-to-image-v1'),
     width: imageDimensions.default(1024),
     height: imageDimensions.default(576),
     steps: z.number().int().min(1).max(4096).default(20),
     guidance: z.number().min(0).max(100).default(5),
     seedMode: imageSeedModeSchema.default('RANDOM'),
     fixedSeed: safeSeed.nullable().default(null),
+    conditioningMode: imageConditioningModeSchema.default('TEXT_ONLY'),
   })
   .strict();
 
@@ -109,8 +123,9 @@ const validateImageGenerationSettings = (
   }
 };
 
-export const imageGenerationSettingsSchema =
-  imageGenerationSettingsBaseSchema.superRefine(validateImageGenerationSettings);
+export const imageGenerationSettingsSchema = imageGenerationSettingsBaseSchema.superRefine(
+  validateImageGenerationSettings,
+);
 export type ImageGenerationSettings = z.infer<typeof imageGenerationSettingsSchema>;
 export type ImageGenerationSettingsInput = z.input<typeof imageGenerationSettingsSchema>;
 
@@ -133,9 +148,40 @@ export const imageGenerationSettingsDtoSchema = imageGenerationSettingsBaseSchem
   .superRefine(validateImageGenerationSettings);
 export type ImageGenerationSettingsDto = z.infer<typeof imageGenerationSettingsDtoSchema>;
 
-export const imageReferenceInputSchema = z
-  .object({ assetId: idSchema })
+const referenceSha256Schema = z
+  .string()
+  .regex(/^[0-9a-f]{64}$/u, 'Reference hash must be lowercase sha256');
+const workspaceRelativePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1_000)
+  .refine((value) => !value.includes('\\') && !value.startsWith('/'), {
+    message: 'Reference path must be a workspace-relative POSIX path',
+  });
+
+export const imageConditioningCharacterSchema = z
+  .object({
+    characterId: z.string().trim().min(1).max(120),
+    referenceAssetId: idSchema,
+    referenceSha256: referenceSha256Schema,
+    referencePath: workspaceRelativePathSchema,
+    profileRevision: z.number().int().positive(),
+  })
   .strict();
+export type ImageConditioningCharacter = z.infer<typeof imageConditioningCharacterSchema>;
+
+export const imageConditioningSchema = z
+  .object({
+    mode: imageConditioningModeSchema,
+    characters: z.array(imageConditioningCharacterSchema).max(4),
+  })
+  .strict();
+export type ImageConditioning = z.infer<typeof imageConditioningSchema>;
+
+export const textOnlyConditioning: ImageConditioning = { mode: 'TEXT_ONLY', characters: [] };
+
+export const imageReferenceInputSchema = z.object({ assetId: idSchema }).strict();
 export type ImageReferenceInput = z.infer<typeof imageReferenceInputSchema>;
 
 export const imageGenerationRequestSchema = z
@@ -154,6 +200,7 @@ export const imageGenerationRequestSchema = z
     samplerHint: z.string().trim().min(1).max(120),
     referenceImages: z.array(imageReferenceInputSchema).max(12).default([]),
     providerSettings: imageProviderSettingsSchema,
+    conditioning: imageConditioningSchema.default(textOnlyConditioning),
     generationInstructions: boundedString(2_000).default(''),
   })
   .strict();
@@ -199,6 +246,7 @@ export type ImageReadiness = z.infer<typeof imageReadinessSchema>;
 export const sceneImageGenerationScheduleSchema = z
   .object({
     instructions: boundedString(2_000).default(''),
+    conditioningMode: imageConditioningModeSchema.optional(),
   })
   .strict();
 export type SceneImageGenerationSchedule = z.infer<typeof sceneImageGenerationScheduleSchema>;
@@ -207,6 +255,7 @@ export const sceneImageRegenerationSchema = z
   .object({
     mode: z.enum(['SAME_SEED', 'NEW_SEED']),
     instructions: boundedString(2_000).default(''),
+    conditioningMode: imageConditioningModeSchema.optional(),
   })
   .strict();
 export type SceneImageRegeneration = z.infer<typeof sceneImageRegenerationSchema>;
@@ -218,6 +267,23 @@ export const sceneImageReviewUpdateSchema = z
   })
   .strict();
 export type SceneImageReviewUpdate = z.infer<typeof sceneImageReviewUpdateSchema>;
+
+export const sceneImageReferencePromotionSchema = z
+  .object({
+    characterId: z.string().trim().min(1).max(120),
+    expectedRevision: z.number().int().positive(),
+    primary: z.boolean().default(false),
+  })
+  .strict();
+export type SceneImageReferencePromotion = z.infer<typeof sceneImageReferencePromotionSchema>;
+
+export const referenceApprovalSchema = z.enum(['CANDIDATE', 'APPROVED', 'REJECTED']);
+export type ReferenceApproval = z.infer<typeof referenceApprovalSchema>;
+
+export const referenceApprovalUpdateSchema = z
+  .object({ approval: referenceApprovalSchema })
+  .strict();
+export type ReferenceApprovalUpdate = z.infer<typeof referenceApprovalUpdateSchema>;
 
 export const sceneImageManualUploadSchema = z
   .object({ notes: boundedString(1_000).default('') })
@@ -297,7 +363,6 @@ export const sceneImageGenerationDtoSchema = z
 export type SceneImageGenerationDto = z.infer<typeof sceneImageGenerationDtoSchema>;
 
 export type SceneImageGenerationListItem = SceneImageGenerationDto;
-
 
 export type ImageProviderFailure = {
   code: ImageGenerationErrorCode;

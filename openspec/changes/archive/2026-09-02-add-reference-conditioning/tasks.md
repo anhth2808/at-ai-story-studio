@@ -1,0 +1,46 @@
+## 1. Contracts and storage
+
+- [x] 1.1 Shared schemas: add `reference-character-v1` to `imageWorkflowTemplateSchema`, `imageConditioningModeSchema` (`TEXT_ONLY`/`REFERENCE_CONDITIONED`), `conditioning` block on `imageGenerationRequestSchema` (mode + characters with `characterId`, `referenceAssetId`, `referenceSha256`, workspace-relative `referencePath`, `profileRevision`, max 4), `conditioningMode` on image generation settings/update/DTO schemas, `REFERENCE_UPLOAD_FAILED` error code, conditioning readiness detail on `imageReadinessSchema`. Verify: `pnpm --filter @studio/shared test` and typecheck pass.
+- [x] 1.2 Migration 0011 + settings repository: add `conditioning_mode` column (default `TEXT_ONLY`), extend settings create/update/parse and `imageSettingsFingerprint`; keep legacy rows loading. Verify: database tests cover update/read round-trip and old-row parse.
+- [x] 1.3 Reference approval gate: extend `assertReferences` in `packages/database/src/visual.ts` so CHARACTER-kind references must have `metadata.approval='APPROVED'`; update existing visual tests' fixtures to approve assets. Verify: attaching a CANDIDATE reference fails `INVALID_REFERENCE`, APPROVED succeeds.
+- [x] 1.4 Reference asset queries: small repository helpers to list `CHARACTER_REFERENCE_IMAGE` assets by project + `metadata.characterId` and to register one. Verify: unit test lists only matching character's assets.
+
+## 2. Provider conditioning workflow
+
+- [x] 2.1 Confirm against the real server/template: fetch `image_flux2_klein_image_edit_4b_base.json` node shapes and local `/object_info` entries for `LoadImage`, `ImageScaleToTotalPixels`, `VAEEncode`, `ReferenceLatent`; record exact input names in `packages/workflow/src/comfyui.ts` comments. Verify: documented constants match `/object_info` (readiness test asserts against fixture).
+- [x] 2.2 Workflow registry: refactor `TEXT_TO_IMAGE_V1_*` tables into per-template `WORKFLOW_MAPPINGS`; add `reference-character-v1` graph (base graph + per-reference LoadImage -> ImageScaleToTotalPixels(lanczos, 1.0MP) -> VAEEncode, `ReferenceLatent` chains on positive and negative conditioning, same ref latent into both, per design D2) and template-aware `buildComfyUiPrompt(request)` + `validateComfyUiPrompt(prompt, template)`. Verify: unit tests - text-only graph unchanged byte-for-byte, reference graph validates, tampered node/link fails `WORKFLOW_INVALID`.
+- [x] 2.3 Reference upload: provider gains workspace root; stream each bound reference to `POST /upload/image` (multipart `image`, `type=input`, `subfolder=studio-refs`, generated filename), use returned `name` for `LoadImage`; classify failures as retryable `REFERENCE_UPLOAD_FAILED`. Verify: fake-fetch provider tests assert managed filename, returned-name usage, error classification, and that no generation submits with a missing upload.
+- [x] 2.4 Readiness: validate conditioning node classes when `conditioningMode === 'REFERENCE_CONDITIONED'`; report `details.conditioning` = `CONDITIONING_READY`/`REFERENCE_NODE_MISSING`/`MODEL_MISSING`/`INCOMPATIBLE_WORKFLOW` with `missingNodes`; informational in TEXT_ONLY. Verify: provider readiness unit tests for each diagnostic.
+
+## 3. Service and API
+
+- [x] 3.1 Conditioning resolution in `scheduleScene`: derive per-character mapping from the current package payload (approved primary = first `referenceAssetIds` entry), resolve asset path+hash, enforce max 4 with persisted warning, respect settings default + per-request override (`schedule`, `regenerate`, batch schemas), fail `PREREQUISITE_MISSING` when conditioned with no eligible reference; include conditioning + reference hashes in `imageGenerationFingerprint` input; persist request (with conditioning) in generation metadata; keep `scheduledRequestSchema` accepting legacy requests (default TEXT_ONLY). Verify: service tests - mapping content, fingerprint determinism/change on mode/reference/strength-free fields, override behavior, explicit failure, legacy-metadata parse.
+- [x] 3.2 Scoped staleness tests: reference change -> profile revision -> dependent packages stale -> only that character's dependent Scene images stale; Mei-only and Story/TTS unaffected; in-flight completion after reference change stays historical (extend existing commit-guard test). Verify: `pnpm --filter @studio/database test` and workflow service tests.
+- [x] 3.3 Reference management API: `POST /api/projects/:projectId/characters/:characterId/references` (multipart upload -> managed path, validateImageFile, CANDIDATE asset), `GET .../references` (list with approval, isPrimary, URLs), `PATCH /api/projects/:projectId/assets/:assetId/approval` (APPROVED/REJECTED/CANDIDATE, character-scoped), promotion `POST /api/projects/:projectId/scenes/:sceneId/images/:generationId/promote-reference` (copy file -> APPROVED asset -> profile revision append). Keep handlers thin; logic in image/visual services. Verify: API tests for upload/approve/reject/primary-reorder/promote/list including path-traversal and wrong-character rejection.
+- [x] 3.4 Settings API passthrough for `conditioningMode` (update + readiness route unchanged shape + new detail). Verify: API test - updating mode persists and restarts (settings repository round-trip).
+
+## 4. UI (apps/web, Vietnamese copy)
+
+- [x] 4.1 Visual Bible character references: reference strip on character profile card (thumbnails, upload, approve/reject, set primary, remove) wired to new routes. Verify: browser smoke against dev server - upload, approve, set primary reflect in profile payload.
+- [x] 4.2 Scene image panel: generation mode selector (project default + per-generate override), conditioning info line (mode, workflow, references used, seed), "Dùng làm tham chiếu nhân vật" promotion action on a completed image, and two-up compare of two revisions with metadata. Verify: browser smoke - generate TEXT_ONLY and REFERENCE_CONDITIONED for one scene, compare view renders both with metadata.
+
+## 5. Tests and regression
+
+- [x] 5.1 Provider tests for conditioned result metadata: `workflowTemplate=reference-character-v1`, mapping version, conditioning record, no `REFERENCE_IMAGES_UNUSED` when conditioned; TEXT_ONLY still warns. Verify: `pnpm --filter @studio/workflow test`.
+- [x] 5.2 Batch conditioned generation with fake provider: 20 Scenes, one failure at Scene 7, retry only Scene 7, no duplicate success, concurrency 1 preserved. Verify: workflow service test.
+- [x] 5.3 Restart persistence: conditioned generations, references, primary selection, approval states, settings mode survive API/worker restart. Verify: existing restart-test pattern extended.
+- [x] 5.4 Full regression: `pnpm typecheck && pnpm test && pnpm lint` green; existing visual-consistency, image-generation, scene, story, TTS/render suites pass unchanged behaviorally (only approval-fixture updates).
+
+## 6. Documentation
+
+- [x] 6.1 New docs: `docs/implementation/reference-conditioning.md` (technique matrix with research sources, selected technique rationale, rejected/deferred: PuLID-Flux2, LoRA; required nodes/models: none beyond current; conditioning settings honesty - no strength knob), `character-references.md` (asset lifecycle, approval, primary, promotion, upload API details), `image-consistency.md` (fingerprint fields, staleness rules, in-flight rules), `conditioning-benchmark.md` (benchmark set, scores, multi-character verdict, LORA_REQUIRED_NOW decision).
+- [x] 6.2 Update existing docs: `comfyui.md` (endpoints + `/upload/image`, node list + ReferenceLatent), `image-generation.md` (modes, request V2, provenance), `architecture.md`, `workflow.md`, `known-limitations.md` (face-vs-clothing honesty, multi-character limit, no auto-fallback).
+- [x] 6.3 AGENTS.md permanent rules: explicit `CharacterId -> ReferenceAsset` mapping required for conditioned generation; changing a character reference must never invalidate unrelated characters' images or Story/TTS data. Verify: rules present and minimal.
+
+## 7. Real benchmark and verification
+
+- [x] 7.1 Benchmark set: pick one story character with an APPROVED Visual Profile, upload/promote and approve one primary reference, select 5 Scenes with varied shot scale/expression/location/lighting. Verify: benchmark doc records character/reference/scene ids.
+- [x] 7.2 Real generation: for each Scene run TEXT_ONLY baseline and REFERENCE_CONDITIONED (controlled seeds via FIXED seed where useful) against the real ComfyUI stack; confirm all 10 generations persist as Assets with correct metadata and current-selection behavior. Verify: generation records + asset paths listed in `conditioning-benchmark.md`.
+- [x] 7.3 Manual scoring: score both modes per Scene on FACE_IDENTITY/HAIR/CLOTHING/STYLE/PROMPT_ADHERENCE (1-5) plus overall; record improvements, failures, pose-overfit, style drift, composition impact. Verify: completed score table in benchmark doc.
+- [x] 7.4 Multi-character real test: one 2-character Scene with both mappings conditioned; verdict `MULTI_CHARACTER_CONDITIONING = OK|LIMITED` with observed identity binding. Verify: result recorded in benchmark doc.
+- [x] 7.5 Final gates: confirm success criteria 1-24 from the milestone brief; record `LORA_REQUIRED_NOW` and `READY_FOR_ADVANCED_IMAGE_CONTROL` verdicts with evidence in `conditioning-benchmark.md`. Stop - do not start AI video.

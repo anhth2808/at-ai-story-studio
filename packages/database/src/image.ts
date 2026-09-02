@@ -10,6 +10,7 @@ import {
   type ImageGenerationSettingsDto,
   type ImageGenerationSettingsUpdate,
   type ImageProvider,
+  type ImageWorkflowTemplate,
   type SceneImageGenerationDto,
   type SceneImageReviewUpdate,
   type SceneImageSource,
@@ -64,7 +65,12 @@ function parseRecord(value: string): Record<string, unknown> {
 }
 
 function assertSafePath(path: string): void {
-  if (!path || path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.split(/[\\/]/).includes('..'))
+  if (
+    !path ||
+    path.startsWith('/') ||
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    path.split(/[\\/]/).includes('..')
+  )
     throw new AppError('UNSAFE_PATH', 'Asset path must be workspace-relative', 400);
 }
 
@@ -77,7 +83,8 @@ export class ImageGenerationSettingsRepository {
         `SELECT id,project_id as projectId,provider,base_url as baseUrl,workflow_template as workflowTemplate,
           diffusion_model as diffusionModel,text_encoder as textEncoder,vae_name as vaeName,sampler,
           connection_timeout_ms as connectionTimeoutMs,generation_timeout_ms as generationTimeoutMs,
-          width,height,steps,guidance,seed_mode as seedMode,fixed_seed as fixedSeed,row_version as rowVersion,
+          width,height,steps,guidance,seed_mode as seedMode,fixed_seed as fixedSeed,
+          conditioning_mode as conditioningMode,row_version as rowVersion,
           input_fingerprint as inputFingerprint,created_at as createdAt,updated_at as updatedAt
          FROM image_generation_settings WHERE project_id=?`,
       )
@@ -88,7 +95,9 @@ export class ImageGenerationSettingsRepository {
   getOrCreate(projectId: Id): ImageGenerationSettingsDto {
     const existing = this.get(projectId);
     if (existing) return existing;
-    const project = this.database.sqlite.prepare('SELECT 1 FROM projects WHERE id=?').get(projectId);
+    const project = this.database.sqlite
+      .prepare('SELECT 1 FROM projects WHERE id=?')
+      .get(projectId);
     if (!project) throw new AppError('NOT_FOUND', 'Project not found', 404);
     const settings = imageGenerationSettingsSchema.parse({});
     const stamp = now();
@@ -97,8 +106,9 @@ export class ImageGenerationSettingsRepository {
         `INSERT OR IGNORE INTO image_generation_settings(
           id,project_id,provider,base_url,workflow_template,diffusion_model,text_encoder,vae_name,sampler,
           connection_timeout_ms,generation_timeout_ms,width,height,steps,guidance,seed_mode,fixed_seed,
+          conditioning_mode,
           row_version,input_fingerprint,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         randomUUID(),
@@ -118,6 +128,7 @@ export class ImageGenerationSettingsRepository {
         settings.guidance,
         settings.seedMode,
         settings.fixedSeed,
+        settings.conditioningMode,
         1,
         settingsFingerprint(settings),
         stamp,
@@ -138,7 +149,8 @@ export class ImageGenerationSettingsRepository {
       .prepare(
         `UPDATE image_generation_settings SET provider=?,base_url=?,workflow_template=?,diffusion_model=?,
           text_encoder=?,vae_name=?,sampler=?,connection_timeout_ms=?,generation_timeout_ms=?,width=?,height=?,
-          steps=?,guidance=?,seed_mode=?,fixed_seed=?,row_version=row_version+1,input_fingerprint=?,updated_at=?
+          steps=?,guidance=?,seed_mode=?,fixed_seed=?,conditioning_mode=?,
+          row_version=row_version+1,input_fingerprint=?,updated_at=?
          WHERE project_id=? AND row_version=?`,
       )
       .run(
@@ -157,6 +169,7 @@ export class ImageGenerationSettingsRepository {
         settings.guidance,
         settings.seedMode,
         settings.fixedSeed,
+        settings.conditioningMode,
         settingsFingerprint(settings),
         now(),
         projectId,
@@ -168,7 +181,9 @@ export class ImageGenerationSettingsRepository {
   }
 
   private create(projectId: Id, value: ImageGenerationSettingsUpdate): ImageGenerationSettingsDto {
-    const project = this.database.sqlite.prepare('SELECT 1 FROM projects WHERE id=?').get(projectId);
+    const project = this.database.sqlite
+      .prepare('SELECT 1 FROM projects WHERE id=?')
+      .get(projectId);
     if (!project) throw new AppError('NOT_FOUND', 'Project not found', 404);
     const settings = imageGenerationSettingsSchema.parse(value);
     const stamp = now();
@@ -177,8 +192,9 @@ export class ImageGenerationSettingsRepository {
         `INSERT INTO image_generation_settings(
           id,project_id,provider,base_url,workflow_template,diffusion_model,text_encoder,vae_name,sampler,
           connection_timeout_ms,generation_timeout_ms,width,height,steps,guidance,seed_mode,fixed_seed,
+          conditioning_mode,
           row_version,input_fingerprint,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         randomUUID(),
@@ -198,6 +214,7 @@ export class ImageGenerationSettingsRepository {
         settings.guidance,
         settings.seedMode,
         settings.fixedSeed,
+        settings.conditioningMode,
         1,
         settingsFingerprint(settings),
         stamp,
@@ -225,6 +242,7 @@ type ImageSettingsRow = {
   guidance: number;
   seedMode: string;
   fixedSeed: number | null;
+  conditioningMode: string;
   rowVersion: number;
   inputFingerprint: string;
   createdAt: string;
@@ -248,6 +266,7 @@ function parseSettings(row: ImageSettingsRow): ImageGenerationSettingsDto {
     guidance: row.guidance,
     seedMode: row.seedMode,
     fixedSeed: row.fixedSeed,
+    conditioningMode: row.conditioningMode,
   });
   return {
     ...settings,
@@ -273,7 +292,7 @@ export type CreateSceneImageGenerationInput = {
   requestedWidth: number | null;
   requestedHeight: number | null;
   providerJobId: Id | null;
-  workflowTemplate: 'text-to-image-v1' | null;
+  workflowTemplate: ImageWorkflowTemplate | null;
   modelSettings: Record<string, unknown>;
   packageFingerprint: string | null;
   settingsFingerprint: string | null;
@@ -298,7 +317,10 @@ export type GeneratedImageCommitInput = {
   metadata?: Record<string, unknown>;
 };
 
-export type ManualImageCommitInput = Omit<GeneratedImageCommitInput, 'generationId' | 'seed' | 'durationMs'> & {
+export type ManualImageCommitInput = Omit<
+  GeneratedImageCommitInput,
+  'generationId' | 'seed' | 'durationMs'
+> & {
   generationId?: Id;
   notes?: string;
 };
@@ -315,7 +337,9 @@ export class SceneImageGenerationRepository {
 
   getCurrent(projectId: Id, sceneStableId: string): SceneImageGenerationDto | null {
     const row = this.database.sqlite
-      .prepare(`${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1`)
+      .prepare(
+        `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1`,
+      )
       .get(projectId, sceneStableId) as GenerationRow | undefined;
     return row ? parseGeneration(this.database, row) : null;
   }
@@ -332,7 +356,12 @@ export class SceneImageGenerationRepository {
       .prepare(
         `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
       )
-      .all(projectId, sceneStableId, Math.max(1, Math.min(100, limit)), Math.max(0, offset)) as GenerationRow[];
+      .all(
+        projectId,
+        sceneStableId,
+        Math.max(1, Math.min(100, limit)),
+        Math.max(0, offset),
+      ) as GenerationRow[];
     return rows.map((row) => parseGeneration(this.database, row));
   }
 
@@ -348,7 +377,8 @@ export class SceneImageGenerationRepository {
           `SELECT id FROM visual_prompt_packages WHERE id=? AND project_id=? AND scene_revision_id=? AND status='CURRENT' AND is_current=1`,
         )
         .get(input.visualPromptPackageId, input.projectId, input.sceneRevisionId);
-      if (!packageRow) throw new AppError('STALE_INPUT', 'Visual prompt package is not current', 409);
+      if (!packageRow)
+        throw new AppError('STALE_INPUT', 'Visual prompt package is not current', 409);
     }
     if (input.source === 'MANUAL' && (input.provider !== null || input.providerJobId !== null))
       throw new AppError('INVALID_INPUT', 'Manual images cannot have a provider job', 400);
@@ -404,9 +434,12 @@ export class SceneImageGenerationRepository {
 
   linkWorkflowStep(projectId: Id, generationId: Id, workflowStepId: Id): void {
     const result = this.database.sqlite
-      .prepare('UPDATE scene_image_generations SET workflow_step_id=?,updated_at=? WHERE project_id=? AND id=?')
+      .prepare(
+        'UPDATE scene_image_generations SET workflow_step_id=?,updated_at=? WHERE project_id=? AND id=?',
+      )
       .run(workflowStepId, now(), projectId, generationId);
-    if (result.changes !== 1) throw new AppError('NOT_FOUND', 'Scene image generation not found', 404);
+    if (result.changes !== 1)
+      throw new AppError('NOT_FOUND', 'Scene image generation not found', 404);
   }
 
   markRunning(projectId: Id, generationId: Id, attempt: number): void {
@@ -457,10 +490,11 @@ export class SceneImageGenerationRepository {
       const generation = this.database.sqlite
         .prepare(
           `SELECT visual_prompt_package_id as packageId,package_fingerprint as packageFingerprint,
-            settings_fingerprint as settingsFingerprint,status FROM scene_image_generations
+            settings_fingerprint as settingsFingerprint,status,metadata FROM scene_image_generations
            WHERE id=? AND project_id=? AND scene_stable_id=? AND scene_revision_id=?`,
         )
-        .get(input.generationId, input.projectId, input.sceneStableId, input.sceneRevisionId) as GenerationCommitRow | undefined;
+        .get(input.generationId, input.projectId, input.sceneStableId, input.sceneRevisionId) as
+        GenerationCommitRow | undefined;
       if (!generation || generation.status !== 'RUNNING') return false;
       const currentPackage = this.database.sqlite
         .prepare(
@@ -469,21 +503,27 @@ export class SceneImageGenerationRepository {
         )
         .get(input.projectId, input.sceneRevisionId) as CurrentPackageRow | undefined;
       const currentSettings = this.database.sqlite
-        .prepare('SELECT input_fingerprint as inputFingerprint FROM image_generation_settings WHERE project_id=?')
+        .prepare(
+          'SELECT input_fingerprint as inputFingerprint FROM image_generation_settings WHERE project_id=?',
+        )
         .get(input.projectId) as CurrentSettingsRow | undefined;
       const fresh = Boolean(
         generation.packageId &&
-          generation.packageFingerprint &&
-          currentPackage &&
-          generation.packageId === currentPackage.id &&
-          generation.packageFingerprint === currentPackage.inputFingerprint &&
-          generation.settingsFingerprint &&
-          currentSettings &&
-          generation.settingsFingerprint === currentSettings.inputFingerprint,
+        generation.packageFingerprint &&
+        currentPackage &&
+        generation.packageId === currentPackage.id &&
+        generation.packageFingerprint === currentPackage.inputFingerprint &&
+        generation.settingsFingerprint &&
+        currentSettings &&
+        generation.settingsFingerprint === currentSettings.inputFingerprint,
       );
       const stamp = now();
       const assetId = randomUUID();
       const role = sceneImageRole(input.sceneStableId);
+      const mergedMetadata = json({
+        ...parseRecord(generation.metadata),
+        ...(input.metadata ?? {}),
+      });
       if (fresh) {
         this.database.sqlite
           .prepare(
@@ -513,15 +553,30 @@ export class SceneImageGenerationRepository {
           input.sceneRevisionId,
           guard.stepId,
           generation.packageFingerprint,
-          json({ ...(input.metadata ?? {}), width: input.width, height: input.height, seed: input.seed }),
+          json({
+            ...(input.metadata ?? {}),
+            width: input.width,
+            height: input.height,
+            seed: input.seed,
+          }),
           fresh ? 1 : 0,
           stamp,
           stamp,
         );
+      if (fresh) {
+        this.database.sqlite
+          .prepare(
+            'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+          )
+          .run(stamp, input.projectId, input.sceneStableId);
+        this.database.sqlite
+          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
+          .run(stamp, input.projectId, role);
+      }
       this.database.sqlite
         .prepare(
           `UPDATE scene_image_generations SET status='COMPLETED',actual_seed=?,actual_width=?,actual_height=?,
-            asset_id=?,duration_ms=?,is_current=?,error_code=NULL,error=NULL,completed_at=?,updated_at=?
+            asset_id=?,duration_ms=?,is_current=?,error_code=NULL,error=NULL,metadata=?,completed_at=?,updated_at=?
            WHERE id=? AND project_id=? AND status='RUNNING'`,
         )
         .run(
@@ -531,6 +586,7 @@ export class SceneImageGenerationRepository {
           assetId,
           input.durationMs,
           fresh ? 1 : 0,
+          mergedMetadata,
           stamp,
           stamp,
           input.generationId,
@@ -617,12 +673,19 @@ export class SceneImageGenerationRepository {
     })();
   }
 
-  updateReview(projectId: Id, generationId: Id, value: SceneImageReviewUpdate): SceneImageGenerationDto {
+  updateReview(
+    projectId: Id,
+    generationId: Id,
+    value: SceneImageReviewUpdate,
+  ): SceneImageGenerationDto {
     const input = sceneImageReviewUpdateSchema.parse(value);
     const result = this.database.sqlite
-      .prepare('UPDATE scene_image_generations SET review_status=?,notes=?,updated_at=? WHERE project_id=? AND id=?')
+      .prepare(
+        'UPDATE scene_image_generations SET review_status=?,notes=?,updated_at=? WHERE project_id=? AND id=?',
+      )
       .run(input.status, input.notes, now(), projectId, generationId);
-    if (result.changes !== 1) throw new AppError('NOT_FOUND', 'Scene image generation not found', 404);
+    if (result.changes !== 1)
+      throw new AppError('NOT_FOUND', 'Scene image generation not found', 404);
     return this.get(projectId, generationId)!;
   }
 
@@ -640,7 +703,12 @@ export class SceneImageGenerationRepository {
            WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?`,
         )
         .get(projectId, sceneStableId, generationId) as CurrentSelectionRow | undefined;
-      if (!target || target.status !== 'COMPLETED' || !target.assetId || target.assetStatus !== 'READY')
+      if (
+        !target ||
+        target.status !== 'COMPLETED' ||
+        !target.assetId ||
+        target.assetStatus !== 'READY'
+      )
         throw new AppError('INVALID_INPUT', 'Only a completed valid image can be selected', 409);
       if (expectedSceneRevision !== undefined) {
         const scene = this.database.sqlite
@@ -652,13 +720,17 @@ export class SceneImageGenerationRepository {
       const stamp = now();
       const role = sceneImageRole(sceneStableId);
       this.database.sqlite
-        .prepare('UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?')
+        .prepare(
+          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+        )
         .run(stamp, projectId, sceneStableId);
       this.database.sqlite
         .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
         .run(stamp, projectId, role);
       this.database.sqlite
-        .prepare('UPDATE scene_image_generations SET is_current=1,updated_at=? WHERE project_id=? AND id=?')
+        .prepare(
+          'UPDATE scene_image_generations SET is_current=1,updated_at=? WHERE project_id=? AND id=?',
+        )
         .run(stamp, projectId, generationId);
       this.database.sqlite
         .prepare('UPDATE assets SET is_current=1,updated_at=? WHERE id=? AND project_id=?')
@@ -669,7 +741,9 @@ export class SceneImageGenerationRepository {
 
   private scene(projectId: Id, sceneRevisionId: Id): SceneIdentity | undefined {
     return this.database.sqlite
-      .prepare('SELECT stable_id as stableId,revision FROM scene_revisions WHERE id=? AND project_id=?')
+      .prepare(
+        'SELECT stable_id as stableId,revision FROM scene_revisions WHERE id=? AND project_id=?',
+      )
       .get(sceneRevisionId, projectId) as SceneIdentity | undefined;
   }
 }
@@ -703,7 +777,7 @@ type GenerationRow = {
   actualWidth: number | null;
   actualHeight: number | null;
   providerJobId: Id | null;
-  workflowTemplate: 'text-to-image-v1' | null;
+  workflowTemplate: ImageWorkflowTemplate | null;
   inputFingerprint: string;
   attempt: number;
   assetId: Id | null;
@@ -735,7 +809,13 @@ function parseGeneration(database: DatabaseHandle, row: GenerationRow): SceneIma
         'SELECT package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint FROM scene_image_generations WHERE id=?',
       )
       .get(row.id) as FreshnessRow | undefined;
-    if (current && stored && current.id === row.visualPromptPackageId && current.packageFingerprint === stored.packageFingerprint && current.settingsFingerprint === stored.settingsFingerprint)
+    if (
+      current &&
+      stored &&
+      current.id === row.visualPromptPackageId &&
+      current.packageFingerprint === stored.packageFingerprint &&
+      current.settingsFingerprint === stored.settingsFingerprint
+    )
       freshness = 'CURRENT';
   }
   return sceneImageGenerationDtoSchema.parse({
@@ -756,6 +836,7 @@ type GenerationCommitRow = {
   packageFingerprint: string | null;
   settingsFingerprint: string | null;
   status: string;
+  metadata: string;
 };
 type CurrentPackageRow = { id: Id; inputFingerprint: string };
 type CurrentSettingsRow = { inputFingerprint: string };

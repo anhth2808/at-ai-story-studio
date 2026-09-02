@@ -100,7 +100,7 @@ describe('VisualProfileRepository', () => {
     ).toThrow(/project not found/i);
     database.sqlite.close();
   });
-  it('validates project-owned reference asset roles before persistence', () => {
+  it('validates project-owned approved reference assets before persistence', () => {
     const database = setup();
     const repository = new VisualProfileRepository(database);
     database.sqlite
@@ -108,7 +108,9 @@ describe('VisualProfileRepository', () => {
         `INSERT INTO assets(
           id,project_id,type,role,status,path,media_type,bytes,sha256,metadata,is_current,created_at,updated_at
         ) VALUES('asset','project','CHARACTER_REFERENCE_IMAGE','CHARACTER_REFERENCE_IMAGE','READY',
-          'projects/project/character-reference.png','image/png',1,'hash','{}',1,'2026-01-01','2026-01-01')`,
+          'projects/project/character-reference.png','image/png',1,'hash','{"approval":"APPROVED"}',1,'2026-01-01','2026-01-01'),
+         ('candidate','project','CHARACTER_REFERENCE_IMAGE','CHARACTER_REFERENCE_IMAGE','READY',
+          'projects/project/character-candidate.png','image/png',1,'hash','{"approval":"CANDIDATE"}',1,'2026-01-01','2026-01-01')`,
       )
       .run();
     const saved = repository.saveCharacter({
@@ -121,11 +123,19 @@ describe('VisualProfileRepository', () => {
     expect(() =>
       repository.saveCharacter({
         projectId: 'project',
+        characterId: 'candidate-holder',
+        payload: { ...characterPayload, referenceAssetIds: ['candidate'] },
+        inputFingerprint: 'candidate-reference',
+      }),
+    ).toThrow(/APPROVED/);
+    expect(() =>
+      repository.saveCharacter({
+        projectId: 'project',
         characterId: 'other',
         payload: { ...characterPayload, referenceAssetIds: ['missing'] },
         inputFingerprint: 'invalid-reference',
       }),
-    ).toThrow(/reference assets/i);
+    ).toThrow(/APPROVED/);
     database.sqlite.close();
   });
   it('migrates the additive visual tables and Style Bible columns', () => {

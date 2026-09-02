@@ -99,7 +99,7 @@ The system SHALL provide one current, revisioned, provider-neutral Style Bible p
 - **THEN** the system SHALL reject it and retain the previous current Style Bible revision
 
 ### Requirement: Reference slots
-Visual profiles SHALL expose optional reference-asset slots for character, location, and object references. Slots MAY be empty. If a manual reference image is supported, it SHALL reuse the existing managed asset rules and SHALL not require generated reference images or an image provider.
+Visual profiles SHALL expose optional reference-asset slots for character, location, and object references. Slots MAY be empty. References SHALL reuse the existing managed asset rules without a second storage system. Character reference slots SHALL accept only project-owned, validated, `APPROVED` `CHARACTER_REFERENCE_IMAGE` assets; attaching, reordering, or removing character references SHALL create a new profile revision through the existing revision contract. The first character reference entry SHALL be the primary reference used by reference conditioning; remaining entries are additional references that this milestone's conditioning does not consume.
 
 #### Scenario: Profile without references
 - **WHEN** a profile has no reference image
@@ -108,6 +108,10 @@ Visual profiles SHALL expose optional reference-asset slots for character, locat
 #### Scenario: Manual reference asset
 - **WHEN** a user attaches a valid managed reference image to a profile
 - **THEN** the profile package/API SHALL expose the asset reference without copying it into a second storage system
+
+#### Scenario: Unapproved reference cannot attach
+- **WHEN** a user attempts to attach a `CANDIDATE` or `REJECTED` character reference to a character profile
+- **THEN** the update SHALL fail with a bounded validation error and the profile revision SHALL remain unchanged
 
 ### Requirement: Deterministic Visual Prompt Package
 For each current Scene, the system SHALL be able to build and persist a Visual Prompt Package containing the scene revision, current Style Bible revision, resolved characters and variants, scene character states, resolved location and environment state, resolved recurring objects, camera, lighting, composition, mood, full prompt, negative prompt, consistency result, input fingerprint, and prompt-template version. The structured package SHALL remain separate from optional refined prompt text.

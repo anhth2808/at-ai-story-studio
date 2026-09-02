@@ -384,6 +384,43 @@ type ImageScheduleDto = {
   jobId: string;
   generation: SceneImageGenerationDto;
 };
+type CharacterReferenceItem = {
+  id: string;
+  url: string;
+  mediaType: string;
+  bytes: number;
+  sha256: string;
+  approval: 'CANDIDATE' | 'APPROVED' | 'REJECTED';
+  displayName: string;
+  isPrimary: boolean;
+  attached: boolean;
+  createdAt: string;
+};
+type CharacterReferencesResponse = {
+  characterId: string;
+  profileRevision: number | null;
+  primaryReferenceId: string | null;
+  references: CharacterReferenceItem[];
+};
+function conditioningSummary(image: SceneImageGenerationDto | null): string {
+  if (!image) return '';
+  const request = image.metadata['request'] as
+    | {
+        conditioning?: { mode?: string; characters?: Array<{ characterId: string }> };
+        providerSettings?: { workflowTemplate?: string };
+      }
+    | undefined;
+  const conditioning = request?.conditioning;
+  if (!conditioning) return '';
+  const references = (conditioning.characters ?? []).map((entry) => entry.characterId).join(', ');
+  return [
+    conditioning.mode ?? '',
+    request?.providerSettings?.workflowTemplate ?? '',
+    references ? `tham chiếu: ${references}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
 const imageApi = {
   settings: (projectId: string) =>
     api<ImageGenerationSettingsDto>(`/api/projects/${projectId}/image-settings`),
@@ -400,20 +437,83 @@ const imageApi = {
     api<SceneImageGenerationDto[]>(
       `/api/projects/${projectId}/scenes/${sceneId}/images?limit=50&offset=0`,
     ),
-  generate: (projectId: string, sceneId: string, instructions = '') =>
+  generate: (
+    projectId: string,
+    sceneId: string,
+    instructions = '',
+    conditioningMode?: 'TEXT_ONLY' | 'REFERENCE_CONDITIONED',
+  ) =>
     api<ImageScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/images/generate`, {
       method: 'POST',
-      body: JSON.stringify({ instructions }),
+      body: JSON.stringify({
+        instructions,
+        ...(conditioningMode ? { conditioningMode } : {}),
+      }),
     }),
   regenerate: (
     projectId: string,
     sceneId: string,
     generationId: string,
     mode: 'SAME_SEED' | 'NEW_SEED',
+    conditioningMode?: 'TEXT_ONLY' | 'REFERENCE_CONDITIONED',
   ) =>
     api<ImageScheduleDto>(
       `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/regenerate`,
-      { method: 'POST', body: JSON.stringify({ mode, instructions: '' }) },
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          mode,
+          instructions: '',
+          ...(conditioningMode ? { conditioningMode } : {}),
+        }),
+      },
+    ),
+  references: (projectId: string, characterId: string) =>
+    api<CharacterReferencesResponse>(
+      `/api/projects/${projectId}/characters/${characterId}/references`,
+    ),
+  uploadReference: (projectId: string, characterId: string, file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return api<{ id: string; approval: string }>(
+      `/api/projects/${projectId}/characters/${characterId}/references`,
+      { method: 'POST', body },
+    );
+  },
+  setReferenceApproval: (
+    projectId: string,
+    characterId: string,
+    assetId: string,
+    approval: 'CANDIDATE' | 'APPROVED' | 'REJECTED',
+  ) =>
+    api<{ id: string; approval: string }>(
+      `/api/projects/${projectId}/characters/${characterId}/references/${assetId}/approval`,
+      { method: 'PATCH', body: JSON.stringify({ approval }) },
+    ),
+  setProfileReferences: (
+    projectId: string,
+    characterId: string,
+    expectedRevision: number,
+    referenceAssetIds: string[],
+  ) =>
+    api<{ revision: number }>(
+      `/api/projects/${projectId}/visual-bible/characters/${characterId}/references`,
+      { method: 'PUT', body: JSON.stringify({ expectedRevision, referenceAssetIds }) },
+    ),
+  promoteReference: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    characterId: string,
+    expectedRevision: number,
+    primary: boolean,
+  ) =>
+    api<{ assetId: string }>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/promote-reference`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ characterId, expectedRevision, primary }),
+      },
     ),
   review: (
     projectId: string,
@@ -1325,6 +1425,8 @@ function VisualBibleWorkspace({
       <div className="visual-profile-grid">
         <VisualProfileCard
           title="Nhân vật"
+          characterProjectId={projectId}
+          onRefreshed={() => run(async () => undefined)}
           candidates={blueprintCharacters.map((character) => ({
             id: character.id,
             title: character.name,
@@ -1515,18 +1617,164 @@ function VisualBibleWorkspace({
   );
 }
 
+function CharacterReferenceStrip({
+  projectId,
+  characterId,
+  profileRevision,
+  onChanged,
+}: {
+  projectId: string;
+  characterId: string;
+  profileRevision: number | null;
+  onChanged: () => void;
+}) {
+  const [references, setReferences] = useState<CharacterReferenceItem[] | null>(null);
+  const load = async (): Promise<void> => {
+    try {
+      const response = await imageApi.references(projectId, characterId);
+      setReferences(response.references);
+    } catch {
+      setReferences([]);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [projectId, characterId, profileRevision]);
+  const upload = async (file: File | undefined): Promise<void> => {
+    if (!file) return;
+    try {
+      await imageApi.uploadReference(projectId, characterId, file);
+      await load();
+      onChanged();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể tải ảnh tham chiếu');
+    }
+  };
+  const setApproval = async (
+    assetId: string,
+    approval: 'CANDIDATE' | 'APPROVED' | 'REJECTED',
+  ): Promise<void> => {
+    try {
+      await imageApi.setReferenceApproval(projectId, characterId, assetId, approval);
+      await load();
+      onChanged();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể đổi trạng thái tham chiếu');
+    }
+  };
+  const reorder = async (referenceAssetIds: string[]): Promise<void> => {
+    if (!profileRevision) {
+      window.alert('Hồ sơ nhân vật chưa tồn tại.');
+      return;
+    }
+    try {
+      await imageApi.setProfileReferences(
+        projectId,
+        characterId,
+        profileRevision,
+        referenceAssetIds,
+      );
+      await load();
+      onChanged();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể cập nhật tham chiếu hồ sơ');
+    }
+  };
+  const attached = (references ?? []).filter((item) => item.attached);
+  const setPrimary = (assetId: string): Promise<void> =>
+    reorder([assetId, ...attached.filter((item) => item.id !== assetId).map((item) => item.id)]);
+  const remove = (assetId: string): Promise<void> =>
+    reorder(attached.filter((item) => item.id !== assetId).map((item) => item.id));
+  return (
+    <div className="character-reference-strip">
+      <span className="field-label">Ảnh tham chiếu nhân vật</span>
+      <p className="muted">
+        Ảnh đầu tiên được duyệt là tham chiếu chính dùng cho conditioning. Chỉ ảnh APPROVED mới gắn
+        được vào hồ sơ.
+      </p>
+      <div className="reference-grid">
+        {(references ?? []).map((item) => (
+          <figure
+            key={item.id}
+            className={`reference-item approval-${item.approval.toLowerCase()}`}
+          >
+            <img src={`${API_BASE}${item.url}`} alt={item.displayName || 'Ảnh tham chiếu'} />
+            <figcaption>
+              <span
+                className={`status-chip ${item.approval === 'APPROVED' ? 'status-current' : 'status-warn'}`}
+              >
+                {item.approval}
+                {item.isPrimary ? ' · chính' : item.attached ? ' · phụ' : ''}
+              </span>
+              <div className="actions">
+                {item.approval !== 'APPROVED' && (
+                  <button type="button" onClick={() => void setApproval(item.id, 'APPROVED')}>
+                    Duyệt
+                  </button>
+                )}
+                {item.approval !== 'REJECTED' && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void setApproval(item.id, 'REJECTED')}
+                  >
+                    Từ chối
+                  </button>
+                )}
+                {item.attached && !item.isPrimary && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void setPrimary(item.id)}
+                  >
+                    Đặt chính
+                  </button>
+                )}
+                {item.attached && (
+                  <button type="button" className="secondary" onClick={() => void remove(item.id)}>
+                    Gỡ khỏi hồ sơ
+                  </button>
+                )}
+              </div>
+            </figcaption>
+          </figure>
+        ))}
+        {references !== null && references.length === 0 && (
+          <span className="muted">Chưa có ảnh tham chiếu.</span>
+        )}
+      </div>
+      <label className="button secondary upload-button">
+        Tải ảnh tham chiếu
+        <input
+          hidden
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(event) => {
+            void upload(event.target.files?.[0]);
+            event.target.value = '';
+          }}
+        />
+      </label>
+    </div>
+  );
+}
+
 function VisualProfileCard({
   title,
   candidates,
   onGenerate,
   onSave,
   onApprove,
+  characterProjectId,
+  onRefreshed,
 }: {
   title: string;
   candidates: Array<{ id: string; title: string; profile: VisualProfileRecord | null }>;
   onGenerate: (id: string, instructions: string) => Promise<void>;
   onSave: (id: string, profile: Record<string, unknown>) => Promise<void>;
   onApprove: (id: string, revision: number) => Promise<void>;
+  characterProjectId?: string;
+  onRefreshed?: () => Promise<void>;
 }) {
   return (
     <div className="panel visual-profile-panel">
@@ -1548,6 +1796,8 @@ function VisualProfileCard({
             onGenerate={onGenerate}
             onSave={onSave}
             onApprove={onApprove}
+            characterProjectId={characterProjectId}
+            onRefreshed={onRefreshed}
           />
         ))
       )}
@@ -1562,6 +1812,8 @@ function VisualProfileEditor({
   onGenerate,
   onSave,
   onApprove,
+  characterProjectId,
+  onRefreshed,
 }: {
   id: string;
   title: string;
@@ -1569,6 +1821,8 @@ function VisualProfileEditor({
   onGenerate: (id: string, instructions: string) => Promise<void>;
   onSave: (id: string, profile: Record<string, unknown>) => Promise<void>;
   onApprove: (id: string, revision: number) => Promise<void>;
+  characterProjectId?: string;
+  onRefreshed?: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState(JSON.stringify(profile?.payload ?? {}, null, 2));
   const [instructions, setInstructions] = useState('');
@@ -1633,6 +1887,14 @@ function VisualProfileEditor({
           </button>
         )}
       </div>
+      {characterProjectId && profile && onRefreshed && (
+        <CharacterReferenceStrip
+          projectId={characterProjectId}
+          characterId={id}
+          profileRevision={profile.revision}
+          onChanged={() => void onRefreshed()}
+        />
+      )}
     </article>
   );
 }
@@ -2488,6 +2750,12 @@ function ScenesWorkspace({
   const [sceneImages, setSceneImages] = useState<SceneImageGenerationDto[]>([]);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [imageInstructions, setImageInstructions] = useState('');
+  const [imageModeOverride, setImageModeOverride] = useState<
+    '' | 'TEXT_ONLY' | 'REFERENCE_CONDITIONED'
+  >('');
+  const [compareAId, setCompareAId] = useState<string | null>(null);
+  const [compareBId, setCompareBId] = useState<string | null>(null);
+  const [promoteCharacterId, setPromoteCharacterId] = useState('');
   const [showImageSettings, setShowImageSettings] = useState(false);
   const [density, setDensity] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('MEDIUM');
   const [targetMin, setTargetMin] = useState('');
@@ -2614,18 +2882,15 @@ function ScenesWorkspace({
                 ),
             ),
           );
-          await loadSceneChapters();
           await loadScenes();
-          if (selectedSceneId)
-            setSceneImages(await imageApi.list(projectId, selectedSceneId));
+          if (selectedSceneId) setSceneImages(await imageApi.list(projectId, selectedSceneId));
           onChanged();
           const failed = jobs.find((job) => job.status === 'FAILED');
           if (failed) setSceneFailedJob(failed);
           if (failed?.error) onError(failed.error);
         }
       } catch (cause) {
-        if (!disposed)
-          onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job nền');
+        if (!disposed) onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job');
       }
     };
     void poll();
@@ -2836,8 +3101,16 @@ function ScenesWorkspace({
       onError('Cảnh chưa có Visual Prompt Package hiện hành.');
       return;
     }
+
     try {
-      queueImage(await imageApi.generate(projectId, draft.id, imageInstructions.trim()));
+      queueImage(
+        await imageApi.generate(
+          projectId,
+          draft.id,
+          imageInstructions.trim(),
+          imageModeOverride || undefined,
+        ),
+      );
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể lên lịch tạo ảnh');
     }
@@ -2848,9 +3121,43 @@ function ScenesWorkspace({
   ): Promise<void> => {
     if (!draft) return;
     try {
-      queueImage(await imageApi.regenerate(projectId, draft.id, generationId, mode));
+      queueImage(
+        await imageApi.regenerate(
+          projectId,
+          draft.id,
+          generationId,
+          mode,
+          imageModeOverride || undefined,
+        ),
+      );
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể tạo lại ảnh');
+    }
+  };
+  const promoteDisplayedImage = async (): Promise<void> => {
+    if (!draft || !displayedImage) return;
+    if (!promoteCharacterId) {
+      onError('Chọn nhân vật để gắn ảnh làm tham chiếu.');
+      return;
+    }
+    try {
+      const refs = await imageApi.references(projectId, promoteCharacterId);
+      if (!refs.profileRevision) {
+        onError('Nhân vật chưa có hồ sơ Visual Bible để gắn tham chiếu.');
+        return;
+      }
+      await imageApi.promoteReference(
+        projectId,
+        draft.id,
+        displayedImage.id,
+        promoteCharacterId,
+        refs.profileRevision,
+        true,
+      );
+      if (selectedSceneId) setSceneImages(await imageApi.list(projectId, selectedSceneId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chuyển ảnh thành tham chiếu');
     }
   };
   const reviewImage = async (
@@ -2860,9 +3167,7 @@ function ScenesWorkspace({
     if (!draft) return;
     try {
       const saved = await imageApi.review(projectId, draft.id, generationId, status);
-      setSceneImages((current) =>
-        current.map((item) => (item.id === saved.id ? saved : item)),
-      );
+      setSceneImages((current) => current.map((item) => (item.id === saved.id ? saved : item)));
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá ảnh');
     }
@@ -2981,10 +3286,7 @@ function ScenesWorkspace({
           <button className="secondary" onClick={() => setShowStyle((current) => !current)}>
             {showStyle ? 'Ẩn phong cách' : 'Phong cách hình ảnh'}
           </button>
-          <button
-            className="secondary"
-            onClick={() => setShowImageSettings((current) => !current)}
-          >
+          <button className="secondary" onClick={() => setShowImageSettings((current) => !current)}>
             {showImageSettings ? 'Ẩn cài đặt tạo ảnh' : 'Cài đặt tạo ảnh'}
           </button>
           <button
@@ -3134,7 +3436,8 @@ function ScenesWorkspace({
                       ? {
                           ...current,
                           seedMode: event.target.value as ImageGenerationSettingsDto['seedMode'],
-                          fixedSeed: event.target.value === 'FIXED' ? (current.fixedSeed ?? 0) : null,
+                          fixedSeed:
+                            event.target.value === 'FIXED' ? (current.fixedSeed ?? 0) : null,
                         }
                       : current,
                   )
@@ -3445,7 +3748,9 @@ function ScenesWorkspace({
                   <div className="chip-row">
                     {displayedImage && (
                       <>
-                        <span className={`status-chip status-${displayedImage.status.toLowerCase()}`}>
+                        <span
+                          className={`status-chip status-${displayedImage.status.toLowerCase()}`}
+                        >
                           {displayedImage.status}
                         </span>
                         <span
@@ -3504,6 +3809,25 @@ function ScenesWorkspace({
                     onChange={(event) => setImageInstructions(event.target.value)}
                   />
                 </label>
+                <label className="field">
+                  <span>Chế độ tạo ảnh</span>
+                  <select
+                    value={imageModeOverride}
+                    onChange={(event) =>
+                      setImageModeOverride(
+                        event.target.value as '' | 'TEXT_ONLY' | 'REFERENCE_CONDITIONED',
+                      )
+                    }
+                  >
+                    <option value="">
+                      Mặc định dự án ({imageSettings?.conditioningMode ?? 'TEXT_ONLY'})
+                    </option>
+                    <option value="TEXT_ONLY">Chỉ văn bản (TEXT_ONLY)</option>
+                    <option value="REFERENCE_CONDITIONED">
+                      Theo ảnh tham chiếu (REFERENCE_CONDITIONED)
+                    </option>
+                  </select>
+                </label>
                 <div className="actions">
                   {!scenePackage && (
                     <button
@@ -3522,26 +3846,27 @@ function ScenesWorkspace({
                   >
                     Tạo ảnh
                   </button>
-                  {displayedImage?.status === 'COMPLETED' && displayedImage.source === 'GENERATED' && (
-                    <>
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={imageGenerationActive}
-                        onClick={() => void regenerateImage(displayedImage.id, 'SAME_SEED')}
-                      >
-                        Tạo lại cùng seed
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={imageGenerationActive}
-                        onClick={() => void regenerateImage(displayedImage.id, 'NEW_SEED')}
-                      >
-                        Tạo lại seed mới
-                      </button>
-                    </>
-                  )}
+                  {displayedImage?.status === 'COMPLETED' &&
+                    displayedImage.source === 'GENERATED' && (
+                      <>
+                        <button
+                          type="button"
+                          className="secondary"
+                          disabled={imageGenerationActive}
+                          onClick={() => void regenerateImage(displayedImage.id, 'SAME_SEED')}
+                        >
+                          Tạo lại cùng seed
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          disabled={imageGenerationActive}
+                          onClick={() => void regenerateImage(displayedImage.id, 'NEW_SEED')}
+                        >
+                          Tạo lại seed mới
+                        </button>
+                      </>
+                    )}
                   <label className="button secondary upload-button">
                     Thay ảnh thủ công
                     <input
@@ -3579,6 +3904,39 @@ function ScenesWorkspace({
                     </>
                   )}
                 </div>
+                {displayedImage && conditioningSummary(displayedImage) && (
+                  <p className="muted conditioning-info">
+                    Conditioning: {conditioningSummary(displayedImage)}
+                  </p>
+                )}
+                {displayedImage?.status === 'COMPLETED' && draft.characters.length > 0 && (
+                  <div className="promote-reference actions">
+                    <select
+                      value={promoteCharacterId}
+                      onChange={(event) => setPromoteCharacterId(event.target.value)}
+                      aria-label="Nhân vật dùng ảnh làm tham chiếu"
+                    >
+                      <option value="">Chọn nhân vật...</option>
+                      {draft.characters.map((character) => (
+                        <option
+                          key={character.characterId ?? character.displayName}
+                          value={character.characterId ?? ''}
+                          disabled={character.resolutionStatus !== 'RESOLVED'}
+                        >
+                          {character.displayName}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={!promoteCharacterId}
+                      onClick={() => void promoteDisplayedImage()}
+                    >
+                      Dùng làm tham chiếu nhân vật
+                    </button>
+                  </div>
+                )}
                 {sceneImages.length > 1 && (
                   <div className="scene-image-history" aria-label="Lịch sử ảnh cảnh">
                     {sceneImages.map((image) => (
@@ -3588,10 +3946,73 @@ function ScenesWorkspace({
                         key={image.id}
                         onClick={() => setSelectedImageId(image.id)}
                       >
-                        v{image.revision} · {image.status} · {image.actualSeed ?? image.requestedSeed ?? 'n/a'}
+                        v{image.revision} · {image.status} ·{' '}
+                        {image.actualSeed ?? image.requestedSeed ?? 'n/a'}
                         {image.isCurrent ? ' · hiện hành' : ''}
                       </button>
                     ))}
+                  </div>
+                )}
+                {sceneImages.filter((image) => image.status === 'COMPLETED' && image.assetUrl)
+                  .length >= 2 && (
+                  <div className="scene-image-compare">
+                    <span className="field-label">So sánh hai bản tạo</span>
+                    <div className="compare-pickers">
+                      <select
+                        value={compareAId ?? ''}
+                        onChange={(event) => setCompareAId(event.target.value || null)}
+                        aria-label="Ảnh bên trái"
+                      >
+                        <option value="">Ảnh A...</option>
+                        {sceneImages
+                          .filter((image) => image.status === 'COMPLETED' && image.assetUrl)
+                          .map((image) => (
+                            <option key={image.id} value={image.id}>
+                              v{image.revision} ·{' '}
+                              {conditioningSummary(image).split(' · ')[0] || 'Không conditioning'}
+                            </option>
+                          ))}
+                      </select>
+                      <select
+                        value={compareBId ?? ''}
+                        onChange={(event) => setCompareBId(event.target.value || null)}
+                        aria-label="Ảnh bên phải"
+                      >
+                        <option value="">Ảnh B...</option>
+                        {sceneImages
+                          .filter((image) => image.status === 'COMPLETED' && image.assetUrl)
+                          .map((image) => (
+                            <option key={image.id} value={image.id}>
+                              v{image.revision} ·{' '}
+                              {conditioningSummary(image).split(' · ')[0] || 'Không conditioning'}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                    <div className="compare-grid">
+                      {[compareAId, compareBId].map((id, index) => {
+                        const image = sceneImages.find((item) => item.id === id) ?? null;
+                        return (
+                          <figure key={index} className="compare-item">
+                            {image?.assetUrl ? (
+                              <img
+                                src={`${API_BASE}${image.assetUrl}`}
+                                alt={`So sánh ${index === 0 ? 'A' : 'B'}`}
+                              />
+                            ) : (
+                              <div className="scene-image-empty">Chưa chọn</div>
+                            )}
+                            <figcaption className="muted">
+                              {image
+                                ? `v${image.revision} · seed ${image.actualSeed ?? image.requestedSeed ?? 'n/a'} · ${
+                                    conditioningSummary(image) || 'Thủ công'
+                                  }`
+                                : `Ảnh ${index === 0 ? 'A' : 'B'}`}
+                            </figcaption>
+                          </figure>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </section>
