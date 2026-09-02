@@ -1,5 +1,5 @@
-import { StrictMode, useEffect, useState } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
+import { StrictMode, useEffect, useRef, useState } from 'react';
+import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { DEFAULT_OMP_MODEL } from '@studio/shared';
 
@@ -32,6 +32,10 @@ import type {
   ImageGenerationSettingsDto,
   ImageReadiness,
   SceneImageGenerationDto,
+  ChapterTimeline,
+  MotionPlan,
+  RenderPlan,
+  SceneTimingUpdate,
 } from '@studio/shared';
 import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -259,6 +263,89 @@ const sceneApi = {
   updateLocation: (projectId: string, locationId: string, input: Record<string, unknown>) =>
     api<LocationDto>(`/api/projects/${projectId}/locations/${locationId}`, {
       method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+};
+type TimelineRenderRequest = {
+  source: 'SCENES';
+  scope:
+    | { kind: 'SCENE'; sceneId: string }
+    | { kind: 'CHAPTER'; chapterId: string }
+    | { kind: 'CHAPTER_RANGE'; startChapterNumber: number; endChapterNumber: number }
+    | { kind: 'SELECTED_CHAPTERS'; chapterIds: string[] }
+    | { kind: 'FULL_STORY' };
+  autoBuild: boolean;
+  fallbackPolicy: 'FAIL' | 'HOLD_PREVIOUS' | 'BLACK' | 'PROJECT_BACKGROUND';
+  qualityPreset?: 'FAST_PREVIEW' | 'STANDARD' | 'HIGH';
+  fitMode?: 'COVER' | 'CONTAIN';
+};
+type TimelineRenderResponse = {
+  executionId: string;
+  jobIds: string[];
+  jobId: string | null;
+  plan: RenderPlan;
+};
+const timelineApi = {
+  get: (projectId: string, chapterId: string) =>
+    api<ChapterTimeline | null>(`/api/projects/${projectId}/chapters/${chapterId}/timeline`),
+  buildTiming: (projectId: string, chapterId: string) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/chapters/${chapterId}/timeline/timing`, {
+      method: 'POST',
+    }),
+  buildMotion: (projectId: string, chapterId: string, replace = false) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/chapters/${chapterId}/timeline/motion`, {
+      method: 'POST',
+      body: JSON.stringify({ replace }),
+    }),
+  saveTiming: (projectId: string, chapterId: string, input: SceneTimingUpdate) =>
+    api<StoryJobScheduleDto>(`/api/projects/${projectId}/chapters/${chapterId}/timeline`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+  saveMotion: (projectId: string, chapterId: string, sceneId: string, motion: MotionPlan) =>
+    api<MotionPlan>(`/api/projects/${projectId}/chapters/${chapterId}/timeline/motion`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        sceneId,
+        expectedRevision: motion.revision,
+        motionType: motion.motionType,
+        startScale: motion.startScale,
+        endScale: motion.endScale,
+        startPosition: motion.startPosition,
+        endPosition: motion.endPosition,
+        easing: motion.easing,
+        focusPoint: motion.focusPoint,
+        intensity: motion.intensity,
+      }),
+    }),
+  plan: (projectId: string, input: TimelineRenderRequest) => {
+    const scopeQuery: Record<string, string> =
+      input.scope.kind === 'SCENE'
+        ? { scopeKind: 'SCENE', sceneId: input.scope.sceneId }
+        : input.scope.kind === 'CHAPTER'
+          ? { scopeKind: 'CHAPTER', chapterId: input.scope.chapterId }
+          : input.scope.kind === 'CHAPTER_RANGE'
+            ? {
+                scopeKind: 'CHAPTER_RANGE',
+                startChapterNumber: String(input.scope.startChapterNumber),
+                endChapterNumber: String(input.scope.endChapterNumber),
+              }
+            : input.scope.kind === 'SELECTED_CHAPTERS'
+              ? { scopeKind: 'SELECTED_CHAPTERS', chapterIds: input.scope.chapterIds.join(',') }
+              : { scopeKind: 'FULL_STORY' };
+    const query = new URLSearchParams({
+      source: input.source,
+      autoBuild: String(input.autoBuild),
+      fallbackPolicy: input.fallbackPolicy,
+      ...scopeQuery,
+      ...(input.qualityPreset ? { qualityPreset: input.qualityPreset } : {}),
+      ...(input.fitMode ? { fitMode: input.fitMode } : {}),
+    });
+    return api<RenderPlan>(`/api/projects/${projectId}/render/plan?${query.toString()}`);
+  },
+  render: (projectId: string, input: TimelineRenderRequest) =>
+    api<TimelineRenderResponse>(`/api/projects/${projectId}/render`, {
+      method: 'POST',
       body: JSON.stringify(input),
     }),
 };
@@ -569,7 +656,9 @@ const imageApi = {
     ),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
-  const asset = await api<RenderAsset>(`/api/projects/${projectId}/render`).catch(() => null);
+  const asset = await api<RenderAsset>(`/api/projects/${projectId}/video`)
+    .catch(() => api<RenderAsset>(`/api/projects/${projectId}/render`))
+    .catch(() => null);
   return asset
     ? { ...asset, url: asset.url.startsWith('http') ? asset.url : `${API_BASE}${asset.url}` }
     : null;
@@ -587,20 +676,27 @@ function App() {
   const [audio, setAudio] = useState<AudioAsset | null>(null);
   const [subtitle, setSubtitle] = useState<SubtitleAsset | null>(null);
   const [render, setRender] = useState<RenderAsset | null>(null);
+  const [timeline, setTimeline] = useState<ChapterTimeline | null>(null);
+  const [renderPlan, setRenderPlan] = useState<RenderPlan | null>(null);
+  const [timelineError, setTimelineError] = useState('');
   const [error, setError] = useState('');
   const [tab, setTab] = useState('Story');
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [chapterOffset, setChapterOffset] = useState(0);
   const [chapterSearch, setChapterSearch] = useState('');
   const [chapterStatus, setChapterStatus] = useState<ChapterStatusFilter>('');
+  const refreshSequence = useRef(0);
   const chapterPageSize = 25;
 
   const refresh = async (): Promise<void> => {
+    const sequence = ++refreshSequence.current;
+    const isCurrent = (): boolean => sequence === refreshSequence.current;
     try {
       const [nextHealth, nextProjects] = await Promise.all([
         api<Health>('/api/health'),
         api<ProjectDto[]>('/api/projects'),
       ]);
+      if (!isCurrent()) return;
       setHealth(nextHealth);
       setProjects(nextProjects);
       const savedProjectId = window.localStorage.getItem(SELECTED_PROJECT_STORAGE_KEY);
@@ -625,29 +721,39 @@ function App() {
           api<ProjectDetail>(`/api/projects/${selected.id}?includeChapters=false`),
           api<ChapterDto[]>(`/api/projects/${selected.id}/chapters?${chapterQuery.toString()}`),
         ]);
+        if (!isCurrent()) return;
         setSelected(detail.project);
         setChapters(nextChapters);
-        setStory(await storyApi.snapshot(selected.id));
+        const nextStory = await storyApi.snapshot(selected.id);
+        if (!isCurrent()) return;
+        setStory(nextStory);
         const chapterId =
           activeChapterId && nextChapters.some((chapter) => chapter.id === activeChapterId)
             ? activeChapterId
             : nextChapters[0]?.id;
         setActiveChapterId(chapterId ?? null);
-        setStatus(
-          await api<StatusSummary>(
-            chapterId ? `/api/chapters/${chapterId}/status` : `/api/projects/${selected.id}/status`,
-          ),
+        const nextStatus = await api<StatusSummary>(
+          chapterId ? `/api/chapters/${chapterId}/status` : `/api/projects/${selected.id}/status`,
         );
+        if (!isCurrent()) return;
+        setStatus(nextStatus);
         const currentJobs = await Promise.all(
           jobs.map((job) => api<JobDto>(`/api/jobs/${job.id}`).catch(() => job)),
         );
+        if (!isCurrent()) return;
         setJobs(currentJobs);
-        setRender(await loadRender(selected.id));
+        const nextRender = await loadRender(selected.id);
+        if (!isCurrent()) return;
+        setRender(nextRender);
         if (chapterId) {
-          const [nextAudio, nextSubtitle] = await Promise.all([
+          const [nextAudio, nextSubtitle, nextTimeline] = await Promise.all([
             api<AudioAsset>(`/api/chapters/${chapterId}/audio`).catch(() => null),
             apiText(`/api/chapters/${chapterId}/subtitles`).catch(() => null),
+            timelineApi.get(selected.id, chapterId).catch(() => null),
           ]);
+          if (!isCurrent()) return;
+          setTimeline(nextTimeline);
+          setTimelineError('');
           setAudio(
             nextAudio
               ? {
@@ -667,14 +773,22 @@ function App() {
           setAudio(null);
           setSubtitle(null);
         }
-        setRenderConfig(await api<RenderConfig>(`/api/projects/${selected.id}/render-config`));
+        const nextRenderConfig = await api<RenderConfig>(
+          `/api/projects/${selected.id}/render-config`,
+        );
+        if (!isCurrent()) return;
+        setRenderConfig(nextRenderConfig);
       } else {
         setStory(null);
         setAudio(null);
+        setTimeline(null);
+        setRenderPlan(null);
         setSubtitle(null);
       }
+      if (!isCurrent()) return;
       setError('');
     } catch (cause) {
+      if (!isCurrent()) return;
       setError(cause instanceof Error ? cause.message : 'Không thể kết nối API');
     }
   };
@@ -831,6 +945,50 @@ function App() {
     });
     await track([result.jobId]);
   };
+  const rebuildTiming = async (): Promise<void> => {
+    if (!selected || !activeChapter) return;
+    const result = await timelineApi.buildTiming(selected.id, activeChapter.id);
+    const ids = result.jobIds ?? (result.jobId ? [result.jobId] : []);
+    await track(ids);
+  };
+  const rebuildMotion = async (): Promise<void> => {
+    if (!selected || !activeChapter) return;
+    const result = await timelineApi.buildMotion(selected.id, activeChapter.id);
+    const ids = result.jobIds ?? (result.jobId ? [result.jobId] : []);
+    await track(ids);
+  };
+  const saveTimelineTiming = async (input: SceneTimingUpdate): Promise<void> => {
+    if (!selected || !activeChapter) return;
+    const result = await timelineApi.saveTiming(selected.id, activeChapter.id, input);
+    const ids = result.jobIds ?? (result.jobId ? [result.jobId] : []);
+    await track(ids);
+  };
+  const saveTimelineMotion = async (sceneId: string, motion: MotionPlan): Promise<void> => {
+    if (!selected || !activeChapter) return;
+    await timelineApi.saveMotion(selected.id, activeChapter.id, sceneId, motion);
+    await refresh();
+  };
+  const selectTimelineImage = async (
+    sceneId: string,
+    generationId: string,
+    expectedSceneRevision: number,
+  ): Promise<void> => {
+    if (!selected) return;
+    await imageApi.setCurrent(selected.id, sceneId, generationId, expectedSceneRevision);
+    await refresh();
+  };
+  const loadTimelinePlan = async (input: TimelineRenderRequest): Promise<void> => {
+    if (!selected) return;
+    setRenderPlan(await timelineApi.plan(selected.id, input));
+    setTimelineError('');
+  };
+  const renderTimeline = async (input: TimelineRenderRequest): Promise<void> => {
+    if (!selected) return;
+    const result = await timelineApi.render(selected.id, input);
+    setRenderPlan(result.plan);
+    await track(result.jobIds);
+    await refresh();
+  };
   const updateRenderConfig = async (patch: Partial<RenderConfig>): Promise<void> => {
     if (!selected || !renderConfig) return;
     const next = { ...renderConfig, ...patch };
@@ -908,7 +1066,16 @@ function App() {
                 </button>
               </div>
               <div className="tabs">
-                {['Story', 'Scenes', 'Visual Bible', 'Audio', 'Video', 'Render'].map((item) => (
+                {[
+                  'Story',
+                  'Scenes',
+                  'Visual Bible',
+                  'Images',
+                  'Timeline',
+                  'Audio',
+                  'Video',
+                  'Render',
+                ].map((item) => (
                   <button
                     className={tab === item ? 'selected' : ''}
                     key={item}
@@ -974,7 +1141,7 @@ function App() {
                 />
               </>
             )}
-            {tab === 'Scenes' && (
+            {(tab === 'Scenes' || tab === 'Images') && (
               <ScenesWorkspace
                 projectId={selected.id}
                 activeChapterId={activeChapter?.id ?? null}
@@ -989,6 +1156,37 @@ function App() {
                 activeChapterId={activeChapter?.id ?? null}
                 onError={setError}
                 onChanged={() => void refresh()}
+              />
+            )}
+            {tab === 'Timeline' && (
+              <TimelinePanel
+                projectId={selected.id}
+                chapters={chapters}
+                chapter={activeChapter ?? null}
+                timeline={timeline}
+                jobs={jobs.filter(
+                  (job) =>
+                    job.type === 'BUILD_SCENE_TIMING' ||
+                    job.type === 'BUILD_MOTION_PLAN' ||
+                    job.type === 'RENDER_SCENE_CLIP' ||
+                    job.type === 'RENDER_CHAPTER_VIDEO' ||
+                    job.type === 'RENDER_PROJECT_VIDEO',
+                )}
+                renderPlan={renderPlan}
+                timelineProgress={status?.timeline ?? null}
+                renderConfig={renderConfig}
+                render={render}
+                error={timelineError}
+                onError={setTimelineError}
+                onBuildTiming={rebuildTiming}
+                onBuildMotion={rebuildMotion}
+                onSaveTiming={saveTimelineTiming}
+                onSaveMotion={saveTimelineMotion}
+                onSelectImage={selectTimelineImage}
+                onPlan={loadTimelinePlan}
+                onRender={renderTimeline}
+                onRefresh={refresh}
+                onUpdateRenderConfig={updateRenderConfig}
               />
             )}
             {tab === 'Audio' && (
@@ -1155,6 +1353,957 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+type TimelinePanelProps = {
+  projectId: string;
+  chapter: ChapterDto | null;
+  chapters: ChapterDto[];
+  timeline: ChapterTimeline | null;
+  jobs: JobDto[];
+  timelineProgress: StatusSummary['timeline'];
+  renderPlan: RenderPlan | null;
+  renderConfig: RenderConfig | null;
+  render: RenderAsset | null;
+  error: string;
+  onError: (message: string) => void;
+  onBuildTiming: () => Promise<void>;
+  onBuildMotion: () => Promise<void>;
+  onSaveTiming: (input: SceneTimingUpdate) => Promise<void>;
+  onSaveMotion: (sceneId: string, motion: MotionPlan) => Promise<void>;
+  onSelectImage: (
+    sceneId: string,
+    generationId: string,
+    expectedSceneRevision: number,
+  ) => Promise<void>;
+  onPlan: (input: TimelineRenderRequest) => Promise<void>;
+  onRender: (input: TimelineRenderRequest) => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onUpdateRenderConfig: (patch: Partial<RenderConfig>) => Promise<void>;
+};
+
+const timelineMotionTypes: MotionPlan['motionType'][] = [
+  'STATIC',
+  'ZOOM_IN',
+  'ZOOM_OUT',
+  'PAN_LEFT',
+  'PAN_RIGHT',
+  'PAN_UP',
+  'PAN_DOWN',
+  'PAN_ZOOM',
+  'SLOW_PUSH_IN',
+];
+
+function timelineTime(ms: number): string {
+  return `${(ms / 1_000).toFixed(2)}s`;
+}
+
+function TimelinePanel({
+  projectId,
+  chapters,
+  chapter,
+  jobs,
+  timeline,
+  timelineProgress,
+  renderPlan,
+  renderConfig,
+  render,
+  error,
+  onError,
+  onBuildTiming,
+  onBuildMotion,
+  onSaveTiming,
+  onSaveMotion,
+  onSelectImage,
+  onPlan,
+  onRender,
+  onRefresh,
+  onUpdateRenderConfig,
+}: TimelinePanelProps) {
+  const [timingDraft, setTimingDraft] = useState<SceneTimingUpdate['items']>([]);
+  const [timingEditing, setTimingEditing] = useState(false);
+  const [motionDrafts, setMotionDrafts] = useState<Record<string, MotionPlan>>({});
+  const [fallbackPolicy, setFallbackPolicy] =
+    useState<TimelineRenderRequest['fallbackPolicy']>('FAIL');
+  const [qualityPreset, setQualityPreset] =
+    useState<NonNullable<TimelineRenderRequest['qualityPreset']>>('STANDARD');
+  const [fitMode, setFitMode] = useState<NonNullable<TimelineRenderRequest['fitMode']>>('COVER');
+  const [scope, setScope] = useState<TimelineRenderRequest['scope']['kind']>('CHAPTER');
+  const [sceneScopeId, setSceneScopeId] = useState('');
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(1);
+  const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([]);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [imageOptions, setImageOptions] = useState<Record<string, SceneImageGenerationDto[]>>({});
+  const [selectedImageIds, setSelectedImageIds] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!timeline) {
+      setTimingDraft([]);
+      setMotionDrafts({});
+      setImageOptions({});
+      setSelectedImageIds({});
+      return;
+    }
+    setTimingDraft(
+      timeline.items.map((item) => ({
+        sceneId: item.sceneId,
+        startMs: item.startMs,
+        endMs: item.endMs,
+      })),
+    );
+    setTimingEditing(timeline.mode === 'MANUAL');
+    setMotionDrafts(
+      Object.fromEntries(
+        timeline.items.flatMap((item) =>
+          item.motionPlan ? [[item.sceneId, item.motionPlan] as const] : [],
+        ),
+      ) as Record<string, MotionPlan>,
+    );
+  }, [timeline?.id, timeline?.fingerprint]);
+
+  useEffect(() => {
+    if (!chapter) {
+      setSceneScopeId('');
+      setSelectedChapterIds([]);
+      return;
+    }
+    setRangeStart(chapter.number);
+    setRangeEnd(chapter.number);
+    setSelectedChapterIds([chapter.id]);
+    setSceneScopeId(timeline?.items[0]?.sceneId ?? '');
+  }, [chapter?.id, chapter?.number, timeline?.id]);
+
+  useEffect(() => {
+    if (!renderConfig) return;
+    setQualityPreset(renderConfig.qualityPreset);
+    setFitMode(renderConfig.fitMode);
+  }, [renderConfig?.qualityPreset, renderConfig?.fitMode]);
+
+  const run = async (name: string, action: () => Promise<void>): Promise<void> => {
+    setBusy(name);
+    try {
+      await action();
+      onError('');
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Thao tác Timeline thất bại');
+    } finally {
+      setBusy('');
+    }
+  };
+  const loadImageOptions = async (sceneId: string): Promise<void> => {
+    const options = await imageApi.list(projectId, sceneId);
+    const validOptions = options.filter(
+      (option) =>
+        option.status === 'COMPLETED' &&
+        option.assetId !== null &&
+        option.reviewStatus !== 'REJECTED' &&
+        option.freshness === 'CURRENT' &&
+        option.productionReady,
+    );
+    setImageOptions((current) => ({ ...current, [sceneId]: validOptions }));
+    const currentOption = validOptions.find((option) => option.isCurrent) ?? validOptions[0];
+    if (currentOption) {
+      setSelectedImageIds((current) => ({ ...current, [sceneId]: currentOption.id }));
+    }
+  };
+  const request = (): TimelineRenderRequest | null => {
+    if (scope === 'SCENE') {
+      const sceneId = sceneScopeId || timeline?.items[0]?.sceneId;
+      return sceneId
+        ? {
+            source: 'SCENES',
+            scope: { kind: 'SCENE', sceneId },
+            autoBuild: true,
+            fallbackPolicy,
+            qualityPreset,
+            fitMode,
+          }
+        : null;
+    }
+    if (scope === 'CHAPTER') {
+      return chapter
+        ? {
+            source: 'SCENES',
+            scope: { kind: 'CHAPTER', chapterId: chapter.id },
+            autoBuild: true,
+            fallbackPolicy,
+            qualityPreset,
+            fitMode,
+          }
+        : null;
+    }
+    if (scope === 'CHAPTER_RANGE') {
+      return rangeStart <= rangeEnd
+        ? {
+            source: 'SCENES',
+            scope: {
+              kind: 'CHAPTER_RANGE',
+              startChapterNumber: rangeStart,
+              endChapterNumber: rangeEnd,
+            },
+            autoBuild: true,
+            fallbackPolicy,
+            qualityPreset,
+            fitMode,
+          }
+        : null;
+    }
+    if (scope === 'SELECTED_CHAPTERS') {
+      return selectedChapterIds.length
+        ? {
+            source: 'SCENES',
+            scope: { kind: 'SELECTED_CHAPTERS', chapterIds: selectedChapterIds },
+            autoBuild: true,
+            fallbackPolicy,
+            qualityPreset,
+            fitMode,
+          }
+        : null;
+    }
+    return {
+      source: 'SCENES',
+      scope: { kind: 'FULL_STORY' },
+      autoBuild: true,
+      fallbackPolicy,
+      qualityPreset,
+      fitMode,
+    };
+  };
+
+  const saveTiming = (): Promise<void> => {
+    if (!timeline || !timingEditing || timingDraftError) return Promise.resolve();
+    return run('timing-save', () =>
+      onSaveTiming({
+        expectedRevision: timeline.timingRevision,
+        mode: 'MANUAL',
+        items: timingDraft,
+      }),
+    );
+  };
+
+  const updateTiming = (sceneId: string, field: 'startMs' | 'endMs', value: number): void => {
+    setTimingDraft((current) =>
+      current.map((item) => (item.sceneId === sceneId ? { ...item, [field]: value } : item)),
+    );
+  };
+
+  const updateMotion = (sceneId: string, patch: Partial<MotionPlan>): void => {
+    setMotionDrafts((current) => ({
+      ...current,
+      [sceneId]: { ...current[sceneId], ...patch } as MotionPlan,
+    }));
+  };
+
+  const updateMotionPoint = (
+    sceneId: string,
+    field: 'startPosition' | 'endPosition',
+    axis: 'x' | 'y',
+    value: number,
+  ): void => {
+    const motion = motionDrafts[sceneId];
+    if (!motion) return;
+    updateMotion(sceneId, { [field]: { ...motion[field], [axis]: value } });
+  };
+  let timingDraftError = '';
+  if (timeline && timingDraft.length > 0) {
+    let cursor = 0;
+    for (const item of timingDraft) {
+      if (
+        !Number.isInteger(item.startMs) ||
+        !Number.isInteger(item.endMs) ||
+        item.startMs !== cursor
+      ) {
+        timingDraftError = 'Các cảnh phải nối tiếp, không có khoảng trống hoặc chồng lấn.';
+        break;
+      }
+      if (item.endMs <= item.startMs || item.endMs > timeline.durationMs) {
+        timingDraftError = 'Mỗi cảnh phải có thời lượng dương và nằm trong thời lượng narration.';
+        break;
+      }
+      cursor = item.endMs;
+    }
+    if (!timingDraftError && cursor !== timeline.durationMs)
+      timingDraftError = 'Timing phải phủ kín toàn bộ narration của chương.';
+  }
+
+  const previewItem = timeline?.items[0] ?? null;
+  const previewMotion = previewItem
+    ? (motionDrafts[previewItem.sceneId] ?? previewItem.motionPlan)
+    : null;
+  const previewStyle = previewMotion
+    ? ({
+        '--timeline-start-transform': `translate(${(0.5 - previewMotion.startPosition.x) * 12}%, ${(0.5 - previewMotion.startPosition.y) * 12}%) scale(${previewMotion.startScale})`,
+        '--timeline-end-transform': `translate(${(0.5 - previewMotion.endPosition.x) * 12}%, ${(0.5 - previewMotion.endPosition.y) * 12}%) scale(${previewMotion.endScale})`,
+      } as CSSProperties)
+    : undefined;
+  const renderRequest = request();
+  const planTimeline = (): void => {
+    if (!renderRequest) return;
+    void run('plan', () => onPlan(renderRequest));
+  };
+  const renderTimeline = (): void => {
+    if (!renderRequest) return;
+    void run('render', () => onRender(renderRequest));
+  };
+
+  return (
+    <div className="timeline-workspace">
+      <div className="panel timeline-toolbar">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">SCENE TIMELINE</p>
+            <h3>{chapter ? chapter.title : 'Chưa chọn chương'}</h3>
+          </div>
+          <button
+            className="secondary"
+            onClick={() => void run('refresh', onRefresh)}
+            disabled={Boolean(busy)}
+          >
+            Làm mới
+          </button>
+        </div>
+        <p className="muted">
+          Timing lấy từ đoạn narration thực tế. Motion Plan chỉ điều khiển crop/pan bounded trong
+          FFmpeg.
+        </p>
+        {error && <div className="error timeline-error">{error}</div>}
+        {timelineProgress && (
+          <div className="timeline-progress" role="status">
+            <strong>{timelineProgress.stage}</strong>
+            <span>{timelineProgress.status}</span>
+            <span>{Math.round(timelineProgress.progress * 100)}%</span>
+            {timelineProgress.error && <em>{timelineProgress.error}</em>}
+            {timelineProgress.levels && timelineProgress.levels.length > 0 && (
+              <div className="timeline-progress-levels">
+                {timelineProgress.levels.map((level) => (
+                  <span key={level.stage}>
+                    {level.stage}: {level.completed}/{level.total}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {timeline && (
+          <div className="timeline-lock" role="status">
+            <strong>
+              {timingEditing ? 'MANUAL - đang mở khóa' : `${timeline.mode} - đã khóa`}
+            </strong>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setTimingEditing((value) => !value)}
+              disabled={Boolean(busy)}
+            >
+              {timingEditing ? 'Khóa timing' : 'Mở khóa timing'}
+            </button>
+          </div>
+        )}
+        {timingDraftError && <div className="error timeline-error">{timingDraftError}</div>}
+        <div className="actions">
+          <button
+            onClick={() => void run('timing-build', onBuildTiming)}
+            disabled={!chapter || Boolean(busy)}
+          >
+            {busy === 'timing-build' ? 'Đang dựng timing...' : 'Tạo Scene Timing tự động'}
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void run('motion-build', onBuildMotion)}
+            disabled={!timeline || Boolean(busy)}
+          >
+            {busy === 'motion-build' ? 'Đang dựng Motion...' : 'Tạo Motion Plan'}
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void run('timing-save', saveTiming)}
+            disabled={
+              !timeline ||
+              !timingDraft.length ||
+              !timingEditing ||
+              Boolean(timingDraftError) ||
+              Boolean(busy)
+            }
+          >
+            Lưu timing thủ công
+          </button>
+        </div>
+      </div>
+
+      {!chapter ? (
+        <div className="placeholder">
+          <h3>Chọn một chương để bắt đầu</h3>
+          <p className="muted">
+            Scene Timing và Motion Plan được lưu riêng theo từng revision của chương.
+          </p>
+        </div>
+      ) : !timeline ? (
+        <div className="placeholder">
+          <h3>Chưa có Scene Timing</h3>
+          <p className="muted">Tạo narration trước, sau đó dựng timing tự động từ source range.</p>
+        </div>
+      ) : (
+        <>
+          <div className="timeline-summary">
+            <span>{timeline.items.length} scenes</span>
+            <span>{timelineTime(timeline.durationMs)} narration</span>
+            <span>Revision {timeline.timingRevision}</span>
+            <span className={timeline.warnings.length ? 'timeline-warning' : ''}>
+              {timeline.warnings.length ? `${timeline.warnings.length} cảnh báo` : 'Timing hợp lệ'}
+            </span>
+          </div>
+
+          <div className="timeline-preview-grid">
+            <div className="panel timeline-preview-panel">
+              <div className="section-head">
+                <h3>Preview chuyển động</h3>
+                <button
+                  className="secondary"
+                  onClick={() => setPreviewPlaying((value) => !value)}
+                  disabled={!previewMotion}
+                >
+                  {previewPlaying ? 'Dừng preview' : 'Chạy preview'}
+                </button>
+              </div>
+              <div className="timeline-preview-frame">
+                {previewItem?.imageAssetUrl ? (
+                  <img
+                    className={`timeline-preview-image ${previewPlaying ? 'playing' : ''}`}
+                    src={
+                      previewItem.imageAssetUrl.startsWith('http')
+                        ? previewItem.imageAssetUrl
+                        : `${API_BASE}${previewItem.imageAssetUrl}`
+                    }
+                    alt={`Preview scene ${previewItem.sceneNumber}`}
+                    style={previewStyle}
+                  />
+                ) : (
+                  <div className="timeline-preview-black">BLACK / fallback</div>
+                )}
+              </div>
+              <p className="muted">
+                {previewItem
+                  ? `Scene ${previewItem.sceneNumber} · ${previewMotion?.motionType ?? 'Chưa có Motion Plan'}`
+                  : 'Chưa có scene'}
+              </p>
+            </div>
+            <div className="panel timeline-render-panel">
+              <h3>Render timeline</h3>
+              <div className="timeline-controls">
+                <label>
+                  Phạm vi
+                  <select
+                    value={scope}
+                    onChange={(event) => setScope(event.target.value as typeof scope)}
+                  >
+                    <option value="SCENE">Một Scene</option>
+                    <option value="CHAPTER">Chương hiện tại</option>
+                    <option value="CHAPTER_RANGE">Khoảng chương</option>
+                    <option value="SELECTED_CHAPTERS">Các chương đã chọn</option>
+                    <option value="FULL_STORY">Toàn bộ Story</option>
+                  </select>
+                </label>
+                {scope === 'SCENE' && (
+                  <label>
+                    Scene
+                    <select
+                      value={sceneScopeId}
+                      onChange={(event) => setSceneScopeId(event.target.value)}
+                    >
+                      {timeline.items.map((item) => (
+                        <option key={item.sceneId} value={item.sceneId}>
+                          Scene {item.sceneNumber} - {item.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {scope === 'CHAPTER_RANGE' && (
+                  <>
+                    <label>
+                      Từ chương
+                      <input
+                        type="number"
+                        min={1}
+                        value={rangeStart}
+                        onChange={(event) => setRangeStart(Number(event.target.value))}
+                      />
+                    </label>
+                    <label>
+                      Đến chương
+                      <input
+                        type="number"
+                        min={rangeStart}
+                        value={rangeEnd}
+                        onChange={(event) => setRangeEnd(Number(event.target.value))}
+                      />
+                    </label>
+                  </>
+                )}
+                {scope === 'SELECTED_CHAPTERS' && (
+                  <label>
+                    Chọn chương
+                    <select
+                      multiple
+                      size={Math.min(5, Math.max(2, chapters.length))}
+                      value={selectedChapterIds}
+                      onChange={(event) =>
+                        setSelectedChapterIds(
+                          Array.from(event.target.selectedOptions, (option) => option.value),
+                        )
+                      }
+                    >
+                      {chapters.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          Chương {option.number} - {option.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label>
+                  Fallback
+                  <select
+                    value={fallbackPolicy}
+                    onChange={(event) =>
+                      setFallbackPolicy(
+                        event.target.value as TimelineRenderRequest['fallbackPolicy'],
+                      )
+                    }
+                  >
+                    <option value="FAIL">FAIL - dừng khi thiếu ảnh</option>
+                    <option value="HOLD_PREVIOUS">HOLD_PREVIOUS - giữ ảnh cũ</option>
+                    <option value="BLACK">BLACK - chèn khung đen</option>
+                    <option value="PROJECT_BACKGROUND">PROJECT_BACKGROUND - dùng nền dự án</option>
+                  </select>
+                </label>
+                <label>
+                  Quality
+                  <select
+                    value={qualityPreset}
+                    onChange={(event) =>
+                      setQualityPreset(
+                        event.target.value as NonNullable<TimelineRenderRequest['qualityPreset']>,
+                      )
+                    }
+                  >
+                    <option value="FAST_PREVIEW">Fast preview</option>
+                    <option value="STANDARD">Standard</option>
+                    <option value="HIGH">High</option>
+                  </select>
+                </label>
+                <label>
+                  Fit
+                  <select
+                    value={fitMode}
+                    onChange={(event) =>
+                      setFitMode(
+                        event.target.value as NonNullable<TimelineRenderRequest['fitMode']>,
+                      )
+                    }
+                  >
+                    <option value="COVER">Cover</option>
+                    <option value="CONTAIN">Contain</option>
+                  </select>
+                </label>
+                <label>
+                  Chuyển cảnh
+                  <select
+                    value={renderConfig?.transition ?? 'CUT'}
+                    disabled={Boolean(busy)}
+                    onChange={(event) => {
+                      const transition = event.target.value as RenderConfig['transition'];
+                      void run('config', () =>
+                        onUpdateRenderConfig({
+                          transition,
+                          transitionDurationMs:
+                            transition === 'CUT'
+                              ? 0
+                              : Math.max(renderConfig?.transitionDurationMs ?? 600, 300),
+                        }),
+                      );
+                    }}
+                  >
+                    <option value="CUT">CUT</option>
+                    <option value="CROSSFADE">CROSSFADE</option>
+                    <option value="FADE">FADE</option>
+                  </select>
+                </label>
+                <label>
+                  Thời lượng chuyển cảnh (ms)
+                  <input
+                    type="number"
+                    min={renderConfig?.transition === 'CUT' ? 0 : 300}
+                    max={800}
+                    step={50}
+                    value={renderConfig?.transitionDurationMs ?? 0}
+                    disabled={!renderConfig || renderConfig.transition === 'CUT' || Boolean(busy)}
+                    onChange={(event) =>
+                      void run('config', () =>
+                        onUpdateRenderConfig({ transitionDurationMs: Number(event.target.value) }),
+                      )
+                    }
+                  />
+                </label>
+              </div>
+              <div className="actions">
+                <button
+                  className="secondary"
+                  disabled={!renderRequest || Boolean(busy)}
+                  onClick={planTimeline}
+                >
+                  {busy === 'plan' ? 'Đang lập kế hoạch...' : 'Lập RenderPlan'}
+                </button>
+                <button disabled={!renderRequest || Boolean(busy)} onClick={renderTimeline}>
+                  {busy === 'render' ? 'Đang xếp hàng render...' : 'Render timeline MP4'}
+                </button>
+              </div>
+              {renderPlan && (
+                <div className="timeline-plan">
+                  <div className="timeline-plan-grid">
+                    <span>
+                      Scene: {renderPlan.scenes.reusable}/{renderPlan.scenes.total} dùng lại
+                    </span>
+                    <span>
+                      Chapter: {renderPlan.chapters.reusable}/{renderPlan.chapters.total} dùng lại
+                    </span>
+                    <span>
+                      {renderPlan.project.reusable
+                        ? 'Project video dùng lại'
+                        : 'Project video sẽ dựng mới'}
+                    </span>
+                    <span>
+                      Dự kiến:{' '}
+                      {renderPlan.expectedDurationMs
+                        ? timelineTime(renderPlan.expectedDurationMs)
+                        : 'chưa biết'}
+                    </span>
+                  </div>
+                  {renderPlan.blockers.length > 0 && (
+                    <ul className="timeline-blockers">
+                      {renderPlan.blockers.map((blocker) => (
+                        <li key={`${blocker.code}-${blocker.entityId ?? 'project'}`}>
+                          <strong>{blocker.code}</strong>: {blocker.message}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              {render && <video className="video" controls preload="metadata" src={render.url} />}
+            </div>
+          </div>
+
+          <div className="timeline-scene-list">
+            {timeline.items.map((item, index) => {
+              const timing = timingDraft[index] ?? {
+                sceneId: item.sceneId,
+                startMs: item.startMs,
+                endMs: item.endMs,
+              };
+              const motion = motionDrafts[item.sceneId] ?? item.motionPlan;
+              const options = imageOptions[item.sceneId];
+              const selectedImageId = selectedImageIds[item.sceneId] ?? '';
+              return (
+                <article className="panel timeline-scene" key={item.sceneId}>
+                  <div className="section-head">
+                    <div>
+                      <p className="eyebrow">SCENE {item.sceneNumber}</p>
+                      <h3>
+                        {timelineTime(item.startMs)} - {timelineTime(item.endMs)}
+                      </h3>
+                    </div>
+                    <span
+                      className={
+                        item.blockers.length ? 'timeline-status blocked' : 'timeline-status'
+                      }
+                    >
+                      {item.blockers.length ? 'Cần xử lý' : 'Sẵn sàng'}
+                    </span>
+                  </div>
+                  <div className="timeline-scene-grid">
+                    <div>
+                      <div className="timeline-scene-visual">
+                        {item.imageAssetUrl ? (
+                          <img
+                            src={
+                              item.imageAssetUrl.startsWith('http')
+                                ? item.imageAssetUrl
+                                : `${API_BASE}${item.imageAssetUrl}`
+                            }
+                            alt={`Ảnh hiện tại của Scene ${item.sceneNumber}`}
+                          />
+                        ) : (
+                          <div className="timeline-scene-missing">
+                            {item.blockers.includes('SCENE_IMAGE_REQUIRED')
+                              ? 'Thiếu ảnh hiện tại'
+                              : 'Đang dùng fallback'}
+                          </div>
+                        )}
+                      </div>
+                      <div className="timeline-image-picker">
+                        <button
+                          className="secondary"
+                          disabled={Boolean(busy)}
+                          onClick={() =>
+                            void run(`images-${item.sceneId}`, () => loadImageOptions(item.sceneId))
+                          }
+                        >
+                          {busy === `images-${item.sceneId}`
+                            ? 'Đang tải ảnh...'
+                            : 'Chọn ảnh hiện tại'}
+                        </button>
+                        {options &&
+                          (options.length > 0 ? (
+                            <>
+                              <label>
+                                Ảnh hợp lệ
+                                <select
+                                  value={selectedImageId}
+                                  disabled={Boolean(busy)}
+                                  onChange={(event) =>
+                                    setSelectedImageIds((current) => ({
+                                      ...current,
+                                      [item.sceneId]: event.target.value,
+                                    }))
+                                  }
+                                >
+                                  {options.map((option) => (
+                                    <option key={option.id} value={option.id}>
+                                      {option.isCurrent ? 'Đang chọn - ' : ''}
+                                      Bản {option.revision} · {option.source}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <button
+                                className="secondary"
+                                disabled={!selectedImageId || Boolean(busy)}
+                                onClick={() => {
+                                  const option = options.find(
+                                    (candidate) => candidate.id === selectedImageId,
+                                  );
+                                  if (!option) return;
+                                  void run(`image-select-${item.sceneId}`, () =>
+                                    onSelectImage(item.sceneId, option.id, item.sceneRevision),
+                                  );
+                                }}
+                              >
+                                {busy === `image-select-${item.sceneId}`
+                                  ? 'Đang chọn...'
+                                  : 'Dùng ảnh này'}
+                              </button>
+                            </>
+                          ) : (
+                            <span className="muted">Không có ảnh hoàn tất hợp lệ.</span>
+                          ))}
+                      </div>
+                      <h4>{item.title}</h4>
+                      <p className="timeline-source-excerpt">
+                        {item.sourceExcerpt || 'Không có trích đoạn nguồn.'}
+                      </p>
+                      <p className="muted">
+                        Source chars: {item.sourceRange.start} - {item.sourceRange.end} ·{' '}
+                        {item.transition}
+                      </p>
+                      <div className="timeline-timing-inputs">
+                        <label>
+                          Bắt đầu (ms)
+                          <input
+                            type="number"
+                            min={0}
+                            value={timing.startMs}
+                            disabled={!timingEditing || Boolean(busy)}
+                            onChange={(event) =>
+                              updateTiming(item.sceneId, 'startMs', Number(event.target.value))
+                            }
+                          />
+                        </label>
+                        <label>
+                          Kết thúc (ms)
+                          <input
+                            type="number"
+                            min={1}
+                            value={timing.endMs}
+                            disabled={!timingEditing || Boolean(busy)}
+                            onChange={(event) =>
+                              updateTiming(item.sceneId, 'endMs', Number(event.target.value))
+                            }
+                          />
+                        </label>
+                      </div>
+                      {item.blockers.length > 0 && (
+                        <ul className="timeline-blockers">
+                          {item.blockers.map((blocker) => (
+                            <li key={blocker}>{blocker}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="timeline-motion-editor">
+                      <div className="section-head">
+                        <strong>Motion Plan</strong>
+                        <button
+                          className="secondary"
+                          disabled={!motion || Boolean(busy)}
+                          onClick={() =>
+                            motion &&
+                            void run(`motion-save-${item.sceneId}`, () =>
+                              onSaveMotion(item.sceneId, motion),
+                            )
+                          }
+                        >
+                          {busy === `motion-save-${item.sceneId}` ? 'Đang lưu...' : 'Lưu Motion'}
+                        </button>
+                      </div>
+                      {motion ? (
+                        <>
+                          <div className="timeline-motion-fields">
+                            <label>
+                              Kiểu chuyển động
+                              <select
+                                value={motion.motionType}
+                                onChange={(event) =>
+                                  updateMotion(item.sceneId, {
+                                    motionType: event.target.value as MotionPlan['motionType'],
+                                  })
+                                }
+                              >
+                                {timelineMotionTypes.map((type) => (
+                                  <option key={type} value={type}>
+                                    {type}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              Easing
+                              <select
+                                value={motion.easing}
+                                onChange={(event) =>
+                                  updateMotion(item.sceneId, {
+                                    easing: event.target.value as MotionPlan['easing'],
+                                  })
+                                }
+                              >
+                                <option value="LINEAR">Linear</option>
+                                <option value="EASE_IN_OUT">Ease in/out</option>
+                              </select>
+                            </label>
+                            <label>
+                              Intensity
+                              <input
+                                type="number"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={motion.intensity}
+                                onChange={(event) =>
+                                  updateMotion(item.sceneId, {
+                                    intensity: Number(event.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              Scale đầu
+                              <input
+                                type="number"
+                                min={1}
+                                max={1.25}
+                                step={0.01}
+                                value={motion.startScale}
+                                onChange={(event) =>
+                                  updateMotion(item.sceneId, {
+                                    startScale: Number(event.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              Scale cuối
+                              <input
+                                type="number"
+                                min={1}
+                                max={1.25}
+                                step={0.01}
+                                value={motion.endScale}
+                                onChange={(event) =>
+                                  updateMotion(item.sceneId, {
+                                    endScale: Number(event.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                          </div>
+                          <div className="timeline-point-fields">
+                            {(['startPosition', 'endPosition'] as const).map((field) => (
+                              <label key={field}>
+                                {field === 'startPosition' ? 'Vị trí đầu' : 'Vị trí cuối'} (x, y)
+                                <span className="timeline-point-inputs">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={motion[field].x}
+                                    aria-label={`${field} x`}
+                                    onChange={(event) =>
+                                      updateMotionPoint(
+                                        item.sceneId,
+                                        field,
+                                        'x',
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                  />
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={motion[field].y}
+                                    aria-label={`${field} y`}
+                                    onChange={(event) =>
+                                      updateMotionPoint(
+                                        item.sceneId,
+                                        field,
+                                        'y',
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                  />
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="muted">Chưa có Motion Plan. Bấm “Tạo Motion Plan”.</p>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      )}
+      {jobs.length > 0 && (
+        <div className="panel timeline-jobs">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">TIMELINE JOBS</p>
+              <h3>Render và xử lý nền</h3>
+            </div>
+          </div>
+          <JobList jobs={jobs} onChanged={() => void onRefresh()} />
+        </div>
+      )}
+    </div>
   );
 }
 

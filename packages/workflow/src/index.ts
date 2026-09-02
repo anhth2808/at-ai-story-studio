@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import {
   AssetRepository,
   ChapterRepository,
@@ -21,13 +21,19 @@ import {
 import {
   FfmpegTools,
   ProcessRunner,
+  buildChapterVideoArguments,
   buildConcatArguments,
+  buildProjectVideoArguments,
   buildRenderArguments,
+  buildSceneClipArguments,
+  promoteManagedFile,
+  safeWorkspacePath,
   type WorkspacePaths,
   initializeWorkspace,
   promoteFile,
   relativeAssetPath,
   sha256File,
+  validateHierarchicalVideo,
 } from '@studio/media';
 import {
   AppError,
@@ -36,6 +42,8 @@ import {
   sceneBatchRequestSchema,
   sceneEditSchema,
   sceneGenerationRequestSchema,
+  motionPlanUpdateSchema,
+  sceneTimingUpdateSchema,
   scenePromptRequestSchema,
   sceneRegenerationRequestSchema,
   visualProfileGenerateRequestSchema,
@@ -50,6 +58,8 @@ import {
   type JobDto,
   type ProjectDto,
   type ProjectInput,
+  type RenderPlan,
+  type RenderRequest,
   type SceneDto,
   type SceneStatus,
   type StatusSummary,
@@ -60,9 +70,10 @@ import {
   type StoryPlanWindowResult,
   type VisualProfileGenerationKind,
   type WorkflowStatus,
+  type SceneTimingUpdate,
   renderConfigSchema,
 } from '@studio/shared';
-import { cleanNarrationText, segmentText, serializeSrt, subtitlesFromSegments } from './text.js';
+import { segmentNarrationText, serializeSrt, subtitlesFromSegments } from './text.js';
 import {
   buildChapterGenerationContextV2,
   planWindowBoundary,
@@ -96,11 +107,19 @@ import {
   renderScenePromptRefreshPrompt,
   renderSceneRegenerationPrompt,
 } from './story-prompts.js';
+import {
+  projectVideoRole,
+  renderChapterPayloadSchema,
+  renderProjectPayloadSchema,
+  renderSceneClipPayloadSchema,
+  TimelineWorkflowService,
+} from './timeline-workflow.js';
 export {
   imageGenerationFingerprint,
   imageSettingsFingerprint,
   resolveImageSeed,
 } from './image-generation.js';
+export { projectVideoRole } from './timeline-workflow.js';
 export type StudioContext = {
   database: DatabaseHandle;
   workspace: WorkspacePaths;
@@ -122,6 +141,7 @@ export class StudioService {
   readonly visualPackages: VisualPromptPackageRepository;
   readonly visual: VisualConsistencyService;
   readonly images: ImageGenerationService;
+  readonly timeline: TimelineWorkflowService;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
@@ -143,6 +163,7 @@ export class StudioService {
       this.assets,
     );
     this.images = createImageGenerationService(context);
+    this.timeline = new TimelineWorkflowService(context);
   }
   createProject(input: ProjectInput): ProjectDto {
     return this.projects.create(input);
@@ -186,7 +207,8 @@ export class StudioService {
   updateChapter(id: Id, input: ChapterInput): ChapterDto {
     const current = this.chapters.get(id);
     if (!current) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
-    const sourceChanged = input.content !== current.content || input.title !== current.title;
+    const sceneChanged = input.content !== current.content || input.title !== current.title;
+    const narrationChanged = input.content !== current.content;
     let chapter: ChapterDto;
     try {
       chapter = this.chapters.update(id, input);
@@ -195,9 +217,10 @@ export class StudioService {
         throw new AppError('REVISION_CONFLICT', error.message, 409);
       throw error;
     }
-    if (sourceChanged) {
-      this.invalidateChapterDescendants(chapter.projectId, chapter.id);
+    if (sceneChanged) {
+      if (narrationChanged) this.invalidateChapterDescendants(chapter.projectId, chapter.id);
       this.scenes.markChapterStale(chapter.id);
+      this.timeline.timeline.invalidateSceneTiming(chapter.id, 'Chapter content changed');
       this.invalidateSceneWorkflowForChapter(chapter.id);
       this.story.markManualContinuityReview(chapter.projectId, chapter.number);
     }
@@ -220,8 +243,12 @@ export class StudioService {
     }
   }
   setRenderConfig(projectId: Id, input: unknown): void {
-    this.projects.setRenderConfig(projectId, renderConfigSchema.parse(input));
+    const current = this.getRenderConfig(projectId);
+    const next = renderConfigSchema.parse(input);
+    this.projects.setRenderConfig(projectId, next);
     this.invalidateRender(projectId);
+    if (JSON.stringify(current) !== JSON.stringify(next))
+      this.timeline.invalidateRenderOutputs(projectId);
   }
   getScenePlan(projectId: Id, chapterId: Id) {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
@@ -621,11 +648,10 @@ export class StudioService {
     );
     return {
       executionId,
-      stepId,
       jobId: this.workflow.createJob('BUILD_VISUAL_PROMPT', scene.id, stepId),
+      stepId,
     };
   }
-
   scheduleVisualPromptBatch(
     projectId: Id,
     chapterId: Id,
@@ -1196,6 +1222,30 @@ export class StudioService {
       ...this.projects.getRenderConfig(projectId),
     });
   }
+  getChapterTimeline(projectId: Id, chapterId: Id) {
+    return this.timeline.getChapterTimeline(projectId, chapterId);
+  }
+  scheduleSceneTiming(chapterId: Id, update?: SceneTimingUpdate) {
+    return this.timeline.scheduleSceneTiming(chapterId, update);
+  }
+  scheduleMotionPlan(chapterId: Id, replace = false) {
+    return this.timeline.scheduleMotionPlan(chapterId, replace);
+  }
+  async buildSceneTiming(chapterId: Id, update?: SceneTimingUpdate) {
+    return await this.timeline.buildSceneTiming(chapterId, update);
+  }
+  buildMotionPlans(chapterId: Id, replace = false) {
+    return this.timeline.buildMotionPlans(chapterId, replace);
+  }
+  getRenderPlan(projectId: Id, request: RenderRequest): RenderPlan {
+    return this.timeline.getRenderPlan(projectId, request);
+  }
+  async scheduleTimelineRender(projectId: Id, request: RenderRequest) {
+    return this.timeline.scheduleRender(projectId, request);
+  }
+  updateMotionPlan(projectId: Id, sceneId: Id, input: unknown) {
+    return this.timeline.updateMotionPlan(projectId, sceneId, motionPlanUpdateSchema.parse(input));
+  }
   getStatus(projectId: Id, chapterId?: Id): StatusSummary {
     if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
     if (chapterId) {
@@ -1224,6 +1274,7 @@ export class StudioService {
       subtitles: chapterId ? latestStep('SUBTITLE', chapterId) : 'PENDING',
       background: background ? 'COMPLETED' : 'PENDING',
       render: latestStep('RENDER', projectId),
+      timeline: this.timeline.status(projectId, chapterId),
       jobs,
       story: this.story.getLongStoryCounts(projectId),
     };
@@ -1240,7 +1291,7 @@ export class StudioService {
       fingerprint({ chapterId, content: chapter.content }),
     );
     this.workflow.markCompleted(cleanId);
-    const segments = segmentText(cleanNarrationText(chapter.content).text);
+    const segments = segmentNarrationText(chapter.content);
     const jobIds: Id[] = [];
     let prior = cleanId;
     for (const segment of segments) {
@@ -1263,18 +1314,31 @@ export class StudioService {
         this.workflow.markCompleted(stepId);
         this.context.database.sqlite
           .prepare(
-            "UPDATE tts_segments SET id=?,status='COMPLETED',fingerprint=?,error=NULL WHERE chapter_id=? AND segment_index=?",
+            "UPDATE tts_segments SET id=?,status='COMPLETED',fingerprint=?,chapter_revision=?,source_start_offset=?,source_end_offset=?,source_text=?,error=NULL WHERE chapter_id=? AND segment_index=?",
           )
-          .run(stepId, segmentFingerprint, chapter.id, segment.index);
+          .run(
+            stepId,
+            segmentFingerprint,
+            chapter.revision,
+            segment.sourceStartOffset,
+            segment.sourceEndOffset,
+            segment.sourceText,
+            chapter.id,
+            segment.index,
+          );
       } else if (existing) {
         this.context.database.sqlite
           .prepare(
-            "UPDATE tts_segments SET id=?,text=?,text_hash=?,status='PENDING',audio_asset_id=NULL,duration_ms=NULL,error=NULL,fingerprint=? WHERE chapter_id=? AND segment_index=?",
+            "UPDATE tts_segments SET id=?,text=?,text_hash=?,chapter_revision=?,source_start_offset=?,source_end_offset=?,source_text=?,status='PENDING',audio_asset_id=NULL,duration_ms=NULL,error=NULL,fingerprint=? WHERE chapter_id=? AND segment_index=?",
           )
           .run(
             stepId,
             segment.text,
             segment.textHash,
+            chapter.revision,
+            segment.sourceStartOffset,
+            segment.sourceEndOffset,
+            segment.sourceText,
             segmentFingerprint,
             chapter.id,
             segment.index,
@@ -1283,7 +1347,7 @@ export class StudioService {
       } else {
         this.context.database.sqlite
           .prepare(
-            'INSERT INTO tts_segments(id,chapter_id,segment_index,text,text_hash,status,fingerprint) VALUES(?,?,?,?,?,?,?)',
+            'INSERT INTO tts_segments(id,chapter_id,segment_index,text,text_hash,chapter_revision,source_start_offset,source_end_offset,source_text,status,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
           )
           .run(
             stepId,
@@ -1291,6 +1355,10 @@ export class StudioService {
             segment.index,
             segment.text,
             segment.textHash,
+            chapter.revision,
+            segment.sourceStartOffset,
+            segment.sourceEndOffset,
+            segment.sourceText,
             'PENDING',
             segmentFingerprint,
           );
@@ -1381,6 +1449,7 @@ export class EdgeTtsProvider implements TtsProvider {
 }
 export class WorkerExecutor {
   private readonly workflow: WorkflowRepository;
+  private readonly timeline: TimelineWorkflowService;
   constructor(
     private readonly context: StudioContext,
     private readonly workerId: string,
@@ -1391,6 +1460,7 @@ export class WorkerExecutor {
     private readonly imageService?: ImageGenerationService,
   ) {
     this.workflow = new WorkflowRepository(context.database);
+    this.timeline = new TimelineWorkflowService(context);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     if (step.type === 'GENERATE_SCENE_IMAGE') {
@@ -1538,6 +1608,27 @@ export class WorkerExecutor {
       });
       return;
     }
+    if (step.type === 'BUILD_SCENE_TIMING') {
+      const payload = this.parseStepPayload(step);
+      if (fingerprint(payload) !== step.input_fingerprint || !this.stepIsCurrent(step))
+        throw new AppError('STALE_INPUT', 'Scene timing input is stale', 409);
+      const update =
+        payload.update === undefined ? undefined : sceneTimingUpdateSchema.parse(payload.update);
+      this.workflow.progress(step, 0.1, 'Measuring chapter audio and mapping TTS source spans');
+      await this.timeline.buildSceneTiming(this.stepString(payload, 'chapterId'), update);
+      this.workflow.progress(step, 1, 'Scene timing is current');
+      return;
+    }
+    if (step.type === 'BUILD_MOTION_PLAN') {
+      const payload = this.parseStepPayload(step);
+      if (fingerprint(payload) !== step.input_fingerprint || !this.stepIsCurrent(step))
+        throw new AppError('STALE_INPUT', 'Motion Plan input is stale', 409);
+      const replace = payload.replace === true;
+      this.workflow.progress(step, 0.1, 'Building deterministic Motion Plans');
+      const plans = this.timeline.buildMotionPlans(this.stepString(payload, 'chapterId'), replace);
+      this.workflow.progress(step, 1, `${plans.length} Motion Plans are current`);
+      return;
+    }
     if (step.type === 'CLEAN_TEXT') return;
     if (step.type === 'TTS_SEGMENT') {
       await this.executeTts(step, signal);
@@ -1549,6 +1640,18 @@ export class WorkerExecutor {
     }
     if (step.type === 'SUBTITLE') {
       await this.executeSubtitle(step);
+      return;
+    }
+    if (step.type === 'RENDER_SCENE_CLIP') {
+      await this.executeSceneClipRender(step, signal);
+      return;
+    }
+    if (step.type === 'RENDER_CHAPTER_VIDEO') {
+      await this.executeChapterVideoRender(step, signal);
+      return;
+    }
+    if (step.type === 'RENDER_PROJECT_VIDEO') {
+      await this.executeProjectVideoRender(step, signal);
       return;
     }
     if (step.type === 'RENDER') {
@@ -1812,6 +1915,520 @@ export class WorkerExecutor {
       throw new Error('Subtitle input changed before promotion');
     }
   }
+  private renderJob(step: ClaimedStep) {
+    const job = this.timeline.renderJobs.getByStep(step.id);
+    if (!job) throw new AppError('RENDER_JOB_NOT_FOUND', 'Render job is missing', 500);
+    return job;
+  }
+  private async recoverRegisteredRender(
+    step: ClaimedStep,
+    assetType: 'SCENE_VIDEO_CLIP' | 'CHAPTER_VIDEO' | 'PROJECT_VIDEO',
+  ): Promise<boolean> {
+    const row = this.context.database.sqlite
+      .prepare(
+        `SELECT id,path,metadata
+         FROM assets
+         WHERE source_step_id=? AND input_fingerprint=? AND type=? AND status='READY' AND is_current=1
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(step.id, step.input_fingerprint, assetType) as
+      { id: string; path: string; metadata: string } | undefined;
+    if (!row) return false;
+    try {
+      await stat(safeWorkspacePath(this.context.workspace.root, row.path));
+    } catch {
+      return false;
+    }
+    let metadata: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(row.metadata);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        metadata = parsed as Record<string, unknown>;
+    } catch {
+      metadata = {};
+    }
+    const durationMs =
+      typeof metadata.durationMs === 'number' && Number.isInteger(metadata.durationMs)
+        ? metadata.durationMs
+        : null;
+    const job = this.renderJob(step);
+    this.timeline.renderJobs.linkAssets(job.id, null, row.id);
+    if (durationMs !== null)
+      this.timeline.renderJobs.updateProgress(job.id, durationMs, durationMs);
+    return true;
+  }
+
+  private reportRenderProgress(
+    step: ClaimedStep,
+    jobId: Id,
+    timeMs: number | null,
+    durationMs: number,
+  ): void {
+    if (timeMs === null) return;
+    const progress = Math.max(0, Math.min(1, timeMs / durationMs));
+    this.workflow.progress(step, progress, `FFmpeg ${Math.round(progress * 100)}%`);
+    this.timeline.renderJobs.updateProgress(jobId, Math.max(0, Math.round(timeMs)));
+  }
+
+  private async executeSceneClipRender(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    const payload = renderSceneClipPayloadSchema.parse(this.parseStepPayload(step));
+    if (
+      payload.fingerprint !== step.input_fingerprint ||
+      payload.sceneId !== step.entity_id ||
+      !this.stepIsCurrent(step)
+    )
+      throw new AppError('STALE_INPUT', 'Scene Clip inputs are stale', 409);
+    if (await this.recoverRegisteredRender(step, 'SCENE_VIDEO_CLIP')) return;
+    const assets = new AssetRepository(this.context.database);
+    const currentImage = assets.currentRenderableSceneImage(
+      payload.projectId,
+      payload.sceneStableId,
+    );
+    const sourceAsset = payload.imagePath
+      ? (this.context.database.sqlite
+          .prepare(
+            `SELECT id,path,role,type,sha256,input_fingerprint as inputFingerprint,metadata
+             FROM assets WHERE project_id=? AND path=? AND sha256=? AND status='READY' LIMIT 1`,
+          )
+          .get(payload.projectId, payload.imagePath, payload.imageSha256) as
+          | {
+              id: Id;
+              path: string;
+              role: string;
+              type: string;
+              sha256: string;
+              inputFingerprint: string | null;
+              metadata: string;
+            }
+          | undefined)
+      : null;
+    if (payload.imagePath && !sourceAsset)
+      throw new AppError('STALE_INPUT', 'Scene fallback asset is no longer available', 409);
+    if (payload.fallbackPolicy === 'BLACK' && payload.imagePath)
+      throw new AppError(
+        'RENDER_INPUT_INVALID',
+        'BLACK fallback cannot include an image source',
+        409,
+      );
+    if (sourceAsset) {
+      const expectedCurrent =
+        sourceAsset.role === `scene:${payload.sceneStableId}:image`
+          ? currentImage
+          : sourceAsset.role === 'project:background'
+            ? assets.current(payload.projectId, 'project:background')
+            : null;
+      const historicalHold =
+        payload.fallbackPolicy === 'HOLD_PREVIOUS' &&
+        sourceAsset.role === `scene:${payload.sceneStableId}:image` &&
+        !currentImage;
+      if (!historicalHold && (!expectedCurrent || expectedCurrent.sha256 !== sourceAsset.sha256))
+        throw new AppError('STALE_INPUT', 'Scene image fallback changed before rendering', 409);
+    }
+    const sourcePath = payload.imagePath
+      ? safeWorkspacePath(this.context.workspace.root, payload.imagePath)
+      : null;
+    if (sourcePath && payload.imageSha256) {
+      const sourceDigest = await sha256File(sourcePath);
+      if (sourceDigest.hash !== payload.imageSha256)
+        throw new AppError('STALE_INPUT', 'Scene image content changed before rendering', 409);
+    }
+    const stagingRelativePath = `staging/${step.attemptId}/scene-clip.mp4`;
+    const stagingPath = safeWorkspacePath(this.context.workspace.root, stagingRelativePath);
+    await mkdir(dirname(stagingPath), { recursive: true });
+    const job = this.renderJob(step);
+    await this.context.media.runWithProgress(
+      buildSceneClipArguments({
+        sourcePath,
+        outputPath: stagingPath,
+        durationMs: payload.timing.durationMs,
+        sourceWidth: payload.imageWidth,
+        sourceHeight: payload.imageHeight,
+        profile: {
+          width: payload.config.width,
+          height: payload.config.height,
+          fps: payload.config.fps,
+          qualityPreset: payload.config.qualityPreset,
+        },
+        fitMode: payload.config.fitMode,
+        motionPlan: payload.motionPlan,
+        fallback: payload.fallbackPolicy === 'BLACK' ? 'BLACK' : undefined,
+      }),
+      (update) =>
+        this.reportRenderProgress(step, job.id, update.outTimeMs, payload.timing.durationMs),
+      { cwd: this.context.workspace.root, signal },
+    );
+    const probe = await validateHierarchicalVideo(this.context.media, stagingPath, {
+      width: payload.config.width,
+      height: payload.config.height,
+      fps: payload.config.fps,
+      expectedDurationMs: payload.timing.durationMs,
+      durationToleranceMs: 250,
+      requireAudio: false,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      container: 'mp4',
+    });
+    if (!this.stepIsCurrent(step))
+      throw new AppError('STALE_INPUT', 'Scene Clip inputs changed during rendering', 409);
+    const promoted = await promoteManagedFile(
+      this.context.workspace,
+      stagingRelativePath,
+      payload.outputPath,
+    );
+    const outputPath = safeWorkspacePath(this.context.workspace.root, payload.outputPath);
+    if (!this.stepIsCurrent(step)) {
+      await rm(outputPath, { force: true });
+      throw new AppError('STALE_INPUT', 'Scene Clip inputs changed before promotion', 409);
+    }
+    const outputAssetId = randomUUID();
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: outputAssetId,
+        projectId: payload.projectId,
+        type: 'SCENE_VIDEO_CLIP',
+        role: `scene:${payload.sceneStableId}:video`,
+        path: promoted.relativePath,
+        mediaType: 'video/mp4',
+        bytes: promoted.bytes,
+        sha256: promoted.hash,
+        sourceEntityId: payload.sceneId,
+        sourceStepId: step.id,
+        inputFingerprint: payload.fingerprint,
+        metadata: {
+          durationMs: payload.timing.durationMs,
+          sceneRevision: payload.motionPlan.sceneRevision,
+          timingRevision: payload.timingRevision,
+          motionPlanId: payload.motionPlan.id,
+          fallbackPolicy: payload.fallbackPolicy,
+          probe,
+        },
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(outputPath, { force: true });
+      throw new AppError('STALE_INPUT', 'Scene Clip inputs changed before asset registration', 409);
+    }
+    if (sourceAsset) {
+      assets.addDependency({
+        assetId: outputAssetId,
+        dependsOnAssetId: sourceAsset.id,
+        role: payload.fallbackPolicy === 'HOLD_PREVIOUS' ? 'SCENE_IMAGE_FALLBACK' : 'SCENE_IMAGE',
+        sourceHash: sourceAsset.sha256,
+      });
+    }
+    this.timeline.renderJobs.linkAssets(job.id, null, outputAssetId);
+    this.timeline.renderJobs.updateProgress(
+      job.id,
+      payload.timing.durationMs,
+      payload.timing.durationMs,
+    );
+  }
+
+  private async executeChapterVideoRender(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    const payload = renderChapterPayloadSchema.parse(this.parseStepPayload(step));
+    if (
+      payload.fingerprint !== step.input_fingerprint ||
+      payload.chapterId !== step.entity_id ||
+      !this.stepIsCurrent(step)
+    )
+      throw new AppError('STALE_INPUT', 'Chapter Video inputs are stale', 409);
+    if (await this.recoverRegisteredRender(step, 'CHAPTER_VIDEO')) return;
+    const assets = new AssetRepository(this.context.database);
+    const clips = payload.clips.map((clip) => {
+      const asset = assets.current(payload.projectId, `scene:${clip.sceneStableId}:video`);
+      if (!asset || asset.inputFingerprint !== clip.fingerprint)
+        throw new AppError('STALE_INPUT', `Scene Clip ${clip.sceneId} is not current`, 409);
+      return { asset, durationMs: clip.durationMs };
+    });
+    const narration = assets.current(payload.projectId, `chapter:${payload.chapterId}:audio`);
+    const subtitle = assets.current(payload.projectId, `chapter:${payload.chapterId}:subtitle`);
+    if (
+      !narration ||
+      !subtitle ||
+      narration.path !== payload.narrationPath ||
+      subtitle.path !== payload.subtitlePath ||
+      narration.sha256 !== payload.narrationSha256 ||
+      subtitle.sha256 !== payload.subtitleSha256
+    )
+      throw new AppError(
+        'STALE_INPUT',
+        'Chapter narration or subtitles changed before rendering',
+        409,
+      );
+    const stagingRelativePath = `staging/${step.attemptId}/chapter-video.mp4`;
+    const stagingPath = safeWorkspacePath(this.context.workspace.root, stagingRelativePath);
+    await mkdir(dirname(stagingPath), { recursive: true });
+    const job = this.renderJob(step);
+    await this.context.media.runWithProgress(
+      buildChapterVideoArguments({
+        clips: clips.map(({ asset, durationMs }) => ({
+          path: safeWorkspacePath(this.context.workspace.root, asset.path),
+          durationMs,
+        })),
+        narrationPath: safeWorkspacePath(this.context.workspace.root, narration.path),
+        subtitlePath: safeWorkspacePath(this.context.workspace.root, subtitle.path),
+        outputPath: stagingPath,
+        durationMs: payload.durationMs,
+        profile: {
+          width: payload.config.width,
+          height: payload.config.height,
+          fps: payload.config.fps,
+          qualityPreset: payload.config.qualityPreset,
+        },
+        transition: payload.config.transition,
+        transitionDurationMs: payload.config.transitionDurationMs,
+        subtitleStyle: {
+          position: payload.config.subtitlePosition,
+          fontSize: payload.config.subtitleFontSize,
+          outlineWidth: payload.config.subtitleOutlineWidth,
+        },
+        narrationVolume: payload.config.narrationVolume,
+      }),
+      (update) => this.reportRenderProgress(step, job.id, update.outTimeMs, payload.durationMs),
+      { cwd: this.context.workspace.root, signal },
+    );
+    const probe = await validateHierarchicalVideo(this.context.media, stagingPath, {
+      width: payload.config.width,
+      height: payload.config.height,
+      fps: payload.config.fps,
+      expectedDurationMs: payload.durationMs,
+      durationToleranceMs: 350,
+      requireAudio: true,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      audioSampleRate: 48_000,
+      container: 'mp4',
+    });
+    if (!this.stepIsCurrent(step))
+      throw new AppError('STALE_INPUT', 'Chapter Video inputs changed during rendering', 409);
+    const promoted = await promoteManagedFile(
+      this.context.workspace,
+      stagingRelativePath,
+      payload.outputPath,
+    );
+    const outputPath = safeWorkspacePath(this.context.workspace.root, payload.outputPath);
+    if (!this.stepIsCurrent(step)) {
+      await rm(outputPath, { force: true });
+      throw new AppError('STALE_INPUT', 'Chapter Video inputs changed before promotion', 409);
+    }
+    const outputAssetId = randomUUID();
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: outputAssetId,
+        projectId: payload.projectId,
+        type: 'CHAPTER_VIDEO',
+        role: `chapter:${payload.chapterId}:video`,
+        path: promoted.relativePath,
+        mediaType: 'video/mp4',
+        bytes: promoted.bytes,
+        sha256: promoted.hash,
+        sourceEntityId: payload.chapterId,
+        sourceStepId: step.id,
+        inputFingerprint: payload.fingerprint,
+        metadata: { durationMs: payload.durationMs, timingRevision: payload.timingRevision, probe },
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(outputPath, { force: true });
+      throw new AppError(
+        'STALE_INPUT',
+        'Chapter Video inputs changed before asset registration',
+        409,
+      );
+    }
+    for (const clip of clips) {
+      assets.addDependency({
+        assetId: outputAssetId,
+        dependsOnAssetId: clip.asset.id,
+        role: 'SCENE_VIDEO_CLIP',
+        sourceHash: clip.asset.sha256,
+      });
+    }
+    assets.addDependency({
+      assetId: outputAssetId,
+      dependsOnAssetId: narration.id,
+      role: 'NARRATION',
+      sourceHash: narration.sha256,
+    });
+    assets.addDependency({
+      assetId: outputAssetId,
+      dependsOnAssetId: subtitle.id,
+      role: 'SUBTITLE',
+      sourceHash: subtitle.sha256,
+    });
+    this.timeline.renderJobs.linkAssets(job.id, null, outputAssetId);
+    this.timeline.renderJobs.updateProgress(job.id, payload.durationMs, payload.durationMs);
+  }
+
+  private async executeProjectVideoRender(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
+    const payload = renderProjectPayloadSchema.parse(this.parseStepPayload(step));
+    if (
+      payload.fingerprint !== step.input_fingerprint ||
+      payload.projectId !== step.entity_id ||
+      !this.stepIsCurrent(step)
+    )
+      throw new AppError('STALE_INPUT', 'Project Video inputs are stale', 409);
+    if (await this.recoverRegisteredRender(step, 'PROJECT_VIDEO')) return;
+    const assets = new AssetRepository(this.context.database);
+    const chapters = payload.chapters.map((chapter) => {
+      const asset = assets.current(payload.projectId, `chapter:${chapter.chapterId}:video`);
+      if (!asset || asset.inputFingerprint !== chapter.fingerprint)
+        throw new AppError('STALE_INPUT', `Chapter Video ${chapter.chapterId} is not current`, 409);
+      return { asset, chapterId: chapter.chapterId, durationMs: chapter.durationMs };
+    });
+    const music = payload.config.musicEnabled
+      ? assets.current(payload.projectId, 'project:music')
+      : null;
+    if (
+      payload.config.musicEnabled &&
+      (!music ||
+        !payload.musicPath ||
+        !payload.musicSha256 ||
+        music.path !== payload.musicPath ||
+        music.sha256 !== payload.musicSha256)
+    )
+      throw new AppError('STALE_INPUT', 'Project music changed before rendering', 409);
+    const stagingRoot = `staging/${step.attemptId}`;
+    const stagingRelativePath = `${stagingRoot}/project-video.mp4`;
+    const stagingPath = safeWorkspacePath(this.context.workspace.root, stagingRelativePath);
+    const chapterListRelativePath = `${stagingRoot}/chapters.txt`;
+    const chapterListPath = safeWorkspacePath(this.context.workspace.root, chapterListRelativePath);
+    await mkdir(dirname(stagingPath), { recursive: true });
+    await writeFile(
+      chapterListPath,
+      `${chapters
+        .map(
+          ({ asset }) =>
+            `file '${safeWorkspacePath(this.context.workspace.root, asset.path).replaceAll('\\', '/').replaceAll("'", "'\\''")}'`,
+        )
+        .join(String.fromCharCode(10))}${String.fromCharCode(10)}`,
+      'utf8',
+    );
+    const job = this.renderJob(step);
+    await this.context.media.runWithProgress(
+      buildProjectVideoArguments({
+        chapters: chapters.map(({ asset, chapterId, durationMs }) => ({
+          chapterId,
+          path: safeWorkspacePath(this.context.workspace.root, asset.path),
+          durationMs,
+        })),
+        chapterListPath,
+        outputPath: stagingPath,
+        durationMs: payload.expectedDurationMs,
+        profile: {
+          width: payload.config.width,
+          height: payload.config.height,
+          fps: payload.config.fps,
+          qualityPreset: payload.config.qualityPreset,
+        },
+        musicPath: music
+          ? safeWorkspacePath(this.context.workspace.root, payload.musicPath!)
+          : undefined,
+        musicEnabled: payload.config.musicEnabled,
+        loopMusic: payload.config.loopMusic,
+        narrationVolume: payload.config.narrationVolume,
+        musicVolume: payload.config.musicVolume,
+      }),
+      (update) =>
+        this.reportRenderProgress(step, job.id, update.outTimeMs, payload.expectedDurationMs),
+      { cwd: this.context.workspace.root, signal },
+    );
+    const probe = await validateHierarchicalVideo(this.context.media, stagingPath, {
+      width: payload.config.width,
+      height: payload.config.height,
+      fps: payload.config.fps,
+      expectedDurationMs: payload.expectedDurationMs,
+      durationToleranceMs: 500,
+      requireAudio: true,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      audioSampleRate: 48_000,
+      container: 'mp4',
+    });
+    if (!this.stepIsCurrent(step))
+      throw new AppError('STALE_INPUT', 'Project Video inputs changed during rendering', 409);
+    const promoted = await promoteManagedFile(
+      this.context.workspace,
+      stagingRelativePath,
+      payload.outputPath,
+    );
+    const outputPath = safeWorkspacePath(this.context.workspace.root, payload.outputPath);
+    if (!this.stepIsCurrent(step)) {
+      await rm(outputPath, { force: true });
+      throw new AppError('STALE_INPUT', 'Project Video inputs changed before promotion', 409);
+    }
+    const outputAssetId = randomUUID();
+    const registered = assets.registerIfCurrentStep(
+      {
+        id: outputAssetId,
+        projectId: payload.projectId,
+        type: 'PROJECT_VIDEO',
+        role: projectVideoRole(payload.projectId, payload.scope),
+        path: promoted.relativePath,
+        mediaType: 'video/mp4',
+        bytes: promoted.bytes,
+        sha256: promoted.hash,
+        sourceEntityId: payload.projectId,
+        sourceStepId: step.id,
+        inputFingerprint: payload.fingerprint,
+        metadata: {
+          durationMs: payload.expectedDurationMs,
+          scope: payload.scope,
+          chapters: payload.chapters,
+          probe,
+        },
+      },
+      {
+        stepId: step.id,
+        attemptId: step.attemptId,
+        workerId: this.workerId,
+        inputFingerprint: step.input_fingerprint,
+      },
+    );
+    if (!registered) {
+      await rm(outputPath, { force: true });
+      throw new AppError(
+        'STALE_INPUT',
+        'Project Video inputs changed before asset registration',
+        409,
+      );
+    }
+    for (const chapter of chapters) {
+      assets.addDependency({
+        assetId: outputAssetId,
+        dependsOnAssetId: chapter.asset.id,
+        role: 'CHAPTER_VIDEO',
+        sourceHash: chapter.asset.sha256,
+      });
+    }
+    if (music) {
+      assets.addDependency({
+        assetId: outputAssetId,
+        dependsOnAssetId: music.id,
+        role: 'MUSIC',
+        sourceHash: music.sha256,
+      });
+    }
+    this.timeline.renderJobs.linkAssets(job.id, null, outputAssetId);
+    this.timeline.renderJobs.updateProgress(
+      job.id,
+      payload.expectedDurationMs,
+      payload.expectedDurationMs,
+    );
+  }
+
   private async executeRender(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     const projectId = step.entity_id;
     const chapter = this.context.database.sqlite
@@ -2003,9 +2620,18 @@ export async function createContext(root: string, db: DatabaseHandle): Promise<S
     media: new FfmpegTools(new ProcessRunner()),
   };
 }
-export { parseSrt, serializeSrt, subtitlesFromSegments, validateSubtitleCues } from './text.js';
+export {
+  parseSrt,
+  segmentNarrationText,
+  serializeSrt,
+  subtitlesFromSegments,
+  validateSubtitleCues,
+} from './text.js';
 export * from './omp-agent.js';
 export * from './story-context.js';
 export * from './story-prompts.js';
 export * from './story-engine.js';
 export * from './story-state.js';
+export * from './scene-timing.js';
+export * from './motion-plan.js';
+export * from './timeline-workflow.js';

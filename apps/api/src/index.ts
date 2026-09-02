@@ -23,6 +23,9 @@ import {
   projectInputSchema,
   reorderSchema,
   renderConfigSchema,
+  renderScopeSchema,
+  renderRequestSchema,
+  sceneTimingUpdateSchema,
   storyBlueprintSchema,
   storyArcSchema,
   storyContinuityRebuildRequestSchema,
@@ -63,9 +66,15 @@ import {
   sceneImageRegenerationSchema,
   sceneImageReviewUpdateSchema,
 } from '@studio/shared';
-import type { OmpReadiness } from '@studio/shared';
-import { StudioService, createOmpAgent, createStoryEngine, parseSrt } from '@studio/workflow';
-import { WorkflowRepository } from '@studio/database';
+import type { OmpReadiness, RenderScope } from '@studio/shared';
+import {
+  StudioService,
+  createOmpAgent,
+  createStoryEngine,
+  parseSrt,
+  projectVideoRole,
+} from '@studio/workflow';
+import { RenderJobRepository, WorkflowRepository } from '@studio/database';
 import { createReadStream, createWriteStream, readFileSync, statSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
@@ -120,6 +129,68 @@ function parseChapterStatus(
   if (value === 'FAILED' || value === 'PENDING' || value === 'CONTINUITY_STALE' || value === 'WARN')
     return value;
   throw new AppError('INVALID_INPUT', 'Chapter status filter is invalid', 400);
+}
+type PublicRenderAssetRow = {
+  id: string;
+  type: string;
+  role: string;
+  status: string;
+  mediaType: string;
+  bytes: number;
+  sha256: string;
+  inputFingerprint: string | null;
+  metadata: string;
+};
+function publicRenderAsset(row: PublicRenderAssetRow): Record<string, unknown> {
+  let metadata: unknown = null;
+  try {
+    metadata = JSON.parse(row.metadata);
+  } catch {
+    metadata = null;
+  }
+  return {
+    id: row.id,
+    type: row.type,
+    role: row.role,
+    status: row.status,
+    mediaType: row.mediaType,
+    bytes: row.bytes,
+    sha256: row.sha256,
+    inputFingerprint: row.inputFingerprint,
+    metadata,
+    url: `/api/assets/${row.id}`,
+  };
+}
+type RenderScopeQuery = {
+  scopeKind?: string;
+  sceneId?: string;
+  chapterId?: string;
+  startChapterNumber?: string;
+  endChapterNumber?: string;
+  chapterIds?: string;
+};
+function parseRenderScope(query: RenderScopeQuery): RenderScope {
+  if (query.scopeKind === undefined || query.scopeKind === 'FULL_STORY')
+    return { kind: 'FULL_STORY' };
+  if (query.scopeKind === 'SCENE')
+    return renderScopeSchema.parse({ kind: 'SCENE', sceneId: idSchema.parse(query.sceneId) });
+  if (query.scopeKind === 'CHAPTER')
+    return renderScopeSchema.parse({ kind: 'CHAPTER', chapterId: idSchema.parse(query.chapterId) });
+  if (query.scopeKind === 'CHAPTER_RANGE')
+    return renderScopeSchema.parse({
+      kind: 'CHAPTER_RANGE',
+      startChapterNumber: Number(query.startChapterNumber),
+      endChapterNumber: Number(query.endChapterNumber),
+    });
+  if (query.scopeKind === 'SELECTED_CHAPTERS')
+    return renderScopeSchema.parse({
+      kind: 'SELECTED_CHAPTERS',
+      chapterIds: (query.chapterIds ?? '')
+        .split(',')
+        .filter(Boolean)
+        .map((id) => idSchema.parse(id)),
+    });
+  throw new AppError('INVALID_INPUT', 'Render scope is invalid', 400);
 }
 
 const app = Fastify({ logger: true });
@@ -1382,13 +1453,15 @@ app.get('/api/projects/:id/render', async (request) => {
   const projectId = idSchema.parse(params.id);
   const row = database.sqlite
     .prepare(
-      "SELECT id,type,path,media_type as mediaType,bytes,sha256 FROM assets WHERE project_id=? AND role='project:render' AND is_current=1 AND status='READY'",
+      "SELECT id,type,role,status,media_type as mediaType,bytes,sha256,input_fingerprint as inputFingerprint,metadata FROM assets WHERE project_id=? AND role IN ('project:render',?) AND is_current=1 AND status='READY' ORDER BY CASE WHEN role=? THEN 0 ELSE 1 END LIMIT 1",
     )
-    .get(projectId) as
-    | { id: string; type: string; path: string; mediaType: string; bytes: number; sha256: string }
-    | undefined;
+    .get(
+      projectId,
+      `project:${projectId}:video:full-story`,
+      `project:${projectId}:video:full-story`,
+    ) as PublicRenderAssetRow | undefined;
   if (!row) throw new AppError('NOT_FOUND', 'Rendered video not found', 404);
-  return { ...row, url: `/api/assets/${row.id}` };
+  return publicRenderAsset(row);
 });
 
 const errorCategoryByCode: Record<
@@ -1595,6 +1668,96 @@ app.post('/api/projects/:projectId/chapters/reorder', async (request) => {
   const body = reorderSchema.parse(request.body);
   return service.reorderChapters(idSchema.parse(params.projectId), body.chapters);
 });
+app.get('/api/projects/:projectId/chapters/:chapterId/timeline', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  return service.getChapterTimeline(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.chapterId),
+  );
+});
+app.post('/api/projects/:projectId/chapters/:chapterId/timeline/timing', async (request, reply) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const chapterId = idSchema.parse(params.chapterId);
+  const chapter = service.getChapter(chapterId);
+  if (!chapter || chapter.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const body = request.body;
+  if (
+    body !== undefined &&
+    (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0)
+  )
+    throw new AppError('INVALID_INPUT', 'Automatic timing request must be empty', 400);
+  return reply.code(202).send(service.scheduleSceneTiming(chapterId));
+});
+app.patch('/api/projects/:projectId/chapters/:chapterId/timeline', async (request, reply) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const chapterId = idSchema.parse(params.chapterId);
+  const chapter = service.getChapter(chapterId);
+  if (!chapter || chapter.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const update = sceneTimingUpdateSchema.parse(request.body);
+  return reply.code(202).send(service.scheduleSceneTiming(chapterId, update));
+});
+app.patch('/api/projects/:projectId/chapters/:chapterId/timeline/motion', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const chapterId = idSchema.parse(params.chapterId);
+  const chapter = service.getChapter(chapterId);
+  if (!chapter || chapter.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const body = request.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body))
+    throw new AppError('INVALID_INPUT', 'Motion Plan update must be an object', 400);
+  const { sceneId, ...input } = body as Record<string, unknown>;
+  const parsedSceneId = idSchema.parse(sceneId);
+  const scene = service.getScene(projectId, parsedSceneId);
+  if (!scene || scene.projectId !== projectId || scene.chapterId !== chapterId)
+    throw new AppError('NOT_FOUND', 'Scene not found', 404);
+  return service.updateMotionPlan(projectId, parsedSceneId, input);
+});
+app.post('/api/projects/:projectId/chapters/:chapterId/timeline/motion', async (request, reply) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const chapterId = idSchema.parse(params.chapterId);
+  const chapter = service.getChapter(chapterId);
+  if (!chapter || chapter.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+  const rawBody = request.body;
+  if (rawBody !== undefined && (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)))
+    throw new AppError('INVALID_INPUT', 'Motion Plan request must be an object', 400);
+  const body = (rawBody ?? {}) as Record<string, unknown>;
+  if (
+    Object.keys(body).some((key) => key !== 'replace') ||
+    (body.replace !== undefined && typeof body.replace !== 'boolean')
+  )
+    throw new AppError('INVALID_INPUT', 'Motion Plan request is invalid', 400);
+  const replace = body.replace ?? false;
+  return reply.code(202).send(service.scheduleMotionPlan(chapterId, replace));
+});
+app.get('/api/projects/:id/render/plan', async (request) => {
+  const params = request.params as { id: string };
+  const query = request.query as RenderScopeQuery & {
+    source?: string;
+    autoBuild?: string;
+    fallbackPolicy?: string;
+    qualityPreset?: string;
+    fitMode?: string;
+  };
+  const scope = parseRenderScope(query);
+  return service.getRenderPlan(
+    idSchema.parse(params.id),
+    renderRequestSchema.parse({
+      source: query.source ?? 'SCENES',
+      autoBuild: query.autoBuild === 'true',
+      ...(query.fallbackPolicy ? { fallbackPolicy: query.fallbackPolicy } : {}),
+      ...(query.qualityPreset ? { qualityPreset: query.qualityPreset } : {}),
+      ...(query.fitMode ? { fitMode: query.fitMode } : {}),
+      ...(scope ? { scope } : {}),
+    }),
+  );
+});
 app.post('/api/chapters/:id/tts', async (request, reply) => {
   const params = request.params as { id: string };
   return reply.code(202).send(service.scheduleChapterTts(idSchema.parse(params.id)));
@@ -1687,19 +1850,92 @@ app.patch('/api/projects/:id/render-config', async (request, reply) => {
   service.setRenderConfig(idSchema.parse(params.id), renderConfigSchema.parse(request.body));
   return reply.code(204).send();
 });
+app.get('/api/projects/:projectId/scenes/:sceneId/video', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const sceneId = idSchema.parse(params.sceneId);
+  const scene = service.getScene(projectId, sceneId);
+  if (!scene || scene.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Scene video not found', 404);
+  const row = database.sqlite
+    .prepare(
+      `SELECT a.id,a.type,a.role,a.status,a.media_type as mediaType,a.bytes,a.sha256,
+        a.input_fingerprint as inputFingerprint,a.metadata
+       FROM assets a
+       WHERE a.project_id=? AND a.source_entity_id=? AND a.type='SCENE_VIDEO_CLIP'
+         AND a.is_current=1 AND a.status='READY' LIMIT 1`,
+    )
+    .get(projectId, sceneId) as PublicRenderAssetRow | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Scene video not found', 404);
+  return publicRenderAsset(row);
+});
+app.get('/api/projects/:projectId/chapters/:chapterId/video', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const chapterId = idSchema.parse(params.chapterId);
+  const chapter = service.getChapter(chapterId);
+  if (!chapter || chapter.projectId !== projectId)
+    throw new AppError('NOT_FOUND', 'Chapter video not found', 404);
+  const row = database.sqlite
+    .prepare(
+      `SELECT id,type,role,status,media_type as mediaType,bytes,sha256,
+        input_fingerprint as inputFingerprint,metadata
+       FROM assets
+       WHERE project_id=? AND source_entity_id=? AND type='CHAPTER_VIDEO'
+         AND is_current=1 AND status='READY' LIMIT 1`,
+    )
+    .get(projectId, chapterId) as PublicRenderAssetRow | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Chapter video not found', 404);
+  return publicRenderAsset(row);
+});
+app.get('/api/projects/:projectId/video', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const scope = parseRenderScope(request.query as RenderScopeQuery);
+  const row = database.sqlite
+    .prepare(
+      `SELECT id,type,role,status,media_type as mediaType,bytes,sha256,
+        a.input_fingerprint as inputFingerprint,a.metadata
+       FROM assets a
+       WHERE a.project_id=? AND a.role=? AND a.type='PROJECT_VIDEO'
+         AND a.is_current=1 AND a.status='READY' LIMIT 1`,
+    )
+    .get(projectId, projectVideoRole(projectId, scope)) as PublicRenderAssetRow | undefined;
+  if (!row) throw new AppError('NOT_FOUND', 'Project video not found', 404);
+  return publicRenderAsset(row);
+});
 app.post('/api/projects/:id/render', async (request, reply) => {
   const params = request.params as { id: string };
-  return reply.code(202).send({ jobId: service.scheduleRender(idSchema.parse(params.id)) });
+  const projectId = idSchema.parse(params.id);
+  const rawBody = request.body;
+  if (
+    !rawBody ||
+    typeof rawBody !== 'object' ||
+    Array.isArray(rawBody) ||
+    Object.keys(rawBody).length === 0
+  )
+    return reply.code(202).send({ jobId: service.scheduleRender(projectId) });
+  const renderRequest = renderRequestSchema.parse(rawBody);
+  if (renderRequest.source === 'BACKGROUND')
+    return reply.code(202).send({ jobId: service.scheduleRender(projectId) });
+  const scheduled = await service.scheduleTimelineRender(projectId, renderRequest);
+  return reply.code(202).send({
+    executionId: scheduled.executionId,
+    jobIds: scheduled.jobIds,
+    jobId: scheduled.jobIds.at(-1) ?? null,
+    plan: scheduled.plan,
+  });
 });
 app.get('/api/jobs/:id', async (request) => {
   const params = request.params as { id: string };
   const row = database.sqlite
     .prepare(
-      'SELECT id,type,entity_id as entityId,status,progress,error,attempts,created_at as createdAt,started_at as startedAt,completed_at as completedAt FROM jobs WHERE id=?',
+      'SELECT id,type,entity_id as entityId,step_id as stepId,status,progress,error,attempts,created_at as createdAt,started_at as startedAt,completed_at as completedAt FROM jobs WHERE id=?',
     )
-    .get(idSchema.parse(params.id)) as Record<string, unknown> | undefined;
+    .get(idSchema.parse(params.id)) as (Record<string, unknown> & { stepId?: string }) | undefined;
   if (!row) throw new AppError('NOT_FOUND', 'Job not found', 404);
-  return row;
+  const render = row.stepId ? new RenderJobRepository(database).getByStep(row.stepId) : null;
+  return { ...row, render };
 });
 app.post('/api/jobs/:id/retry', async (request, reply) => {
   const params = request.params as { id: string };

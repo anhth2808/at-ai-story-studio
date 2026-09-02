@@ -349,7 +349,19 @@ export type StepRow = {
 export type ClaimedStep = StepRow & { attemptId: Id; attemptNumber: number };
 
 export class WorkflowRepository {
-  constructor(private readonly database: DatabaseHandle) {}
+  private readonly renderJobsAvailable: boolean;
+
+  constructor(private readonly database: DatabaseHandle) {
+    this.renderJobsAvailable = (
+      this.database.sqlite.prepare('PRAGMA table_info(render_jobs)').all() as Array<{
+        name: string;
+      }>
+    ).some((column) => column.name === 'diagnostics');
+  }
+
+  private updateRenderJobs(sql: string, ...params: Array<string | number | null>): void {
+    if (this.renderJobsAvailable) this.database.sqlite.prepare(sql).run(...params);
+  }
   createExecution(projectId: Id, type: string): Id {
     const id = randomUUID();
     const stamp = now();
@@ -502,6 +514,11 @@ export class WorkflowRepository {
       this.database.sqlite
         .prepare("UPDATE jobs SET status='RUNNING',attempts=?,started_at=? WHERE step_id=?")
         .run(attemptNumber, stamp, candidate.id);
+      this.updateRenderJobs(
+        "UPDATE render_jobs SET status='RUNNING',updated_at=? WHERE step_id=? AND status='PENDING'",
+        stamp,
+        candidate.id,
+      );
       return true;
     });
     return tx()
@@ -567,8 +584,14 @@ export class WorkflowRepository {
           "UPDATE jobs SET status='COMPLETED',progress=1,completed_at=? WHERE step_id=? AND status='RUNNING'",
         )
         .run(stamp, step.id);
+      this.updateRenderJobs(
+        "UPDATE render_jobs SET status='COMPLETED',updated_at=? WHERE step_id=? AND status='RUNNING'",
+        stamp,
+        step.id,
+      );
     })();
   }
+
   fail(step: ClaimedStep, error: string, retry = true): void {
     const stamp = now();
     const safe = safeError(error);
@@ -590,8 +613,16 @@ export class WorkflowRepository {
       this.database.sqlite
         .prepare("UPDATE jobs SET status=?,error=? WHERE step_id=? AND status='RUNNING'")
         .run(status, safe, step.id);
+      this.updateRenderJobs(
+        "UPDATE render_jobs SET status=?,diagnostics=?,updated_at=? WHERE step_id=? AND status IN ('PENDING','RUNNING')",
+        status,
+        JSON.stringify({ error: safe }),
+        stamp,
+        step.id,
+      );
     })();
   }
+
   invalidateSteps(entityId: Id, types: string[], error = 'StaleInput'): number {
     if (!types.length) return 0;
     const placeholders = types.map(() => '?').join(',');
@@ -620,6 +651,12 @@ export class WorkflowRepository {
             "UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL WHERE step_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
           )
           .run(error, step.id);
+        this.updateRenderJobs(
+          "UPDATE render_jobs SET status='INVALIDATED',diagnostics=?,updated_at=? WHERE step_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
+          JSON.stringify({ error }),
+          stamp,
+          step.id,
+        );
       }
       return steps.length;
     })();
@@ -653,6 +690,12 @@ export class WorkflowRepository {
             "UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL WHERE step_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
           )
           .run(error, step.id);
+        this.updateRenderJobs(
+          "UPDATE render_jobs SET status='INVALIDATED',diagnostics=?,updated_at=? WHERE step_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
+          JSON.stringify({ error }),
+          stamp,
+          step.id,
+        );
       }
       return steps.length;
     })();
@@ -681,6 +724,13 @@ export class WorkflowRepository {
             "UPDATE jobs SET status=?,error=?,completed_at=NULL WHERE step_id=? AND status='RUNNING'",
           )
           .run(status, 'WorkerLost', step.id);
+        this.updateRenderJobs(
+          "UPDATE render_jobs SET status=?,diagnostics=?,updated_at=? WHERE step_id=? AND status='RUNNING'",
+          status,
+          JSON.stringify({ error: 'WorkerLost' }),
+          stamp,
+          step.id,
+        );
       }
     });
     tx();
@@ -694,6 +744,12 @@ export class WorkflowRepository {
           "UPDATE workflow_steps SET cancellation_requested_at=?,status=CASE WHEN status='PENDING' THEN 'CANCELLED' ELSE status END,updated_at=? WHERE id=?",
         )
         .run(stamp, stamp, stepId);
+      this.updateRenderJobs(
+        "UPDATE render_jobs SET status='CANCELLED',diagnostics=?,updated_at=? WHERE step_id=? AND status='PENDING'",
+        JSON.stringify({ error: 'Cancelled by user' }),
+        stamp,
+        stepId,
+      );
       this.database.sqlite
         .prepare(
           "UPDATE jobs SET status='CANCELLED',error='Cancelled by user' WHERE step_id=? AND status='PENDING'",
@@ -725,6 +781,12 @@ export class WorkflowRepository {
       this.database.sqlite
         .prepare("UPDATE jobs SET status='CANCELLED',error=? WHERE step_id=? AND status='RUNNING'")
         .run(safe, step.id);
+      this.updateRenderJobs(
+        "UPDATE render_jobs SET status='CANCELLED',diagnostics=?,updated_at=? WHERE step_id=? AND status='RUNNING'",
+        JSON.stringify({ error: safe }),
+        stamp,
+        step.id,
+      );
       return true;
     })();
   }
@@ -741,6 +803,11 @@ export class WorkflowRepository {
         "UPDATE workflow_steps SET status='PENDING',error=NULL,next_attempt_at=NULL,cancellation_requested_at=NULL,updated_at=? WHERE id=? AND status IN ('FAILED','INVALIDATED','CANCELLED')",
       )
       .run(now(), stepId);
+    this.updateRenderJobs(
+      "UPDATE render_jobs SET status='PENDING',diagnostics=NULL,updated_at=? WHERE step_id=? AND status IN ('FAILED','INVALIDATED','CANCELLED')",
+      now(),
+      stepId,
+    );
     this.database.sqlite
       .prepare("UPDATE jobs SET status='PENDING',error=NULL,completed_at=NULL WHERE step_id=?")
       .run(stepId);
@@ -751,6 +818,11 @@ export class WorkflowRepository {
         "UPDATE workflow_steps SET status='COMPLETED',progress=1,updated_at=? WHERE id=? AND status='PENDING'",
       )
       .run(now(), stepId);
+    this.updateRenderJobs(
+      "UPDATE render_jobs SET status='COMPLETED',updated_at=? WHERE step_id=? AND status='PENDING'",
+      now(),
+      stepId,
+    );
   }
 }
 
@@ -782,6 +854,13 @@ export type CurrentAsset = {
   type: string;
   sha256: string;
   mediaType: string;
+  inputFingerprint: string | null;
+};
+export type AssetDependencyRecord = {
+  assetId: Id;
+  dependsOnAssetId: Id;
+  role: string;
+  sourceHash: string;
 };
 export type StepLeaseGuard = {
   stepId: Id;
@@ -790,6 +869,52 @@ export type StepLeaseGuard = {
   inputFingerprint: string;
 };
 
+export function invalidateAssetDependents(
+  database: DatabaseHandle,
+  projectId: Id,
+  assetId: Id,
+  stamp: string,
+): void {
+  const hasRenderJobs = (
+    database.sqlite.prepare('PRAGMA table_info(render_jobs)').all() as Array<{ name: string }>
+  ).some((column) => column.name === 'diagnostics');
+  if (hasRenderJobs) {
+    database.sqlite
+      .prepare(
+        "UPDATE render_jobs SET status='INVALIDATED',diagnostics=?,updated_at=? WHERE output_asset_id=? AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')",
+      )
+      .run(JSON.stringify({ error: 'Dependency changed' }), stamp, assetId);
+  }
+  database.sqlite
+    .prepare(
+      `WITH RECURSIVE descendants(asset_id) AS (
+         SELECT asset_id FROM asset_dependencies WHERE depends_on_asset_id=?
+         UNION
+         SELECT dependency.asset_id
+         FROM asset_dependencies dependency
+         JOIN descendants ON descendants.asset_id=dependency.depends_on_asset_id
+       )
+       UPDATE assets SET is_current=0,updated_at=?
+       WHERE project_id=? AND id IN (SELECT asset_id FROM descendants)`,
+    )
+    .run(assetId, stamp, projectId);
+  if (hasRenderJobs) {
+    database.sqlite
+      .prepare(
+        `WITH RECURSIVE descendants(asset_id) AS (
+           SELECT asset_id FROM asset_dependencies WHERE depends_on_asset_id=?
+           UNION
+           SELECT dependency.asset_id
+           FROM asset_dependencies dependency
+           JOIN descendants ON descendants.asset_id=dependency.depends_on_asset_id
+         )
+         UPDATE render_jobs SET status='INVALIDATED',diagnostics=?,updated_at=?
+         WHERE output_asset_id IN (SELECT asset_id FROM descendants)
+           AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run(assetId, JSON.stringify({ error: 'Dependency changed' }), stamp);
+  }
+}
 export class AssetRepository {
   constructor(private readonly database: DatabaseHandle) {}
   private assertSafePath(path: string): void {
@@ -801,12 +926,54 @@ export class AssetRepository {
     )
       throw new AppError('UNSAFE_PATH', 'Asset path must be workspace-relative', 400);
   }
+  private invalidateDependentsInTransaction(projectId: Id, assetId: Id, stamp: string): void {
+    invalidateAssetDependents(this.database, projectId, assetId, stamp);
+  }
+
+  private retireCurrentRole(projectId: Id, role: string, stamp: string): void {
+    const current = this.database.sqlite
+      .prepare('SELECT id FROM assets WHERE project_id=? AND role=? AND is_current=1')
+      .all(projectId, role) as Array<{ id: Id }>;
+    this.database.sqlite
+      .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
+      .run(stamp, projectId, role);
+    for (const asset of current) this.invalidateDependentsInTransaction(projectId, asset.id, stamp);
+  }
   current(projectId: Id, role: string): CurrentAsset | null {
-    return this.database.sqlite
+    const asset = this.database.sqlite
       .prepare(
-        "SELECT id,path,type,sha256,media_type as mediaType FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY' ORDER BY created_at DESC LIMIT 1",
+        "SELECT id,path,type,sha256,media_type as mediaType,input_fingerprint as inputFingerprint FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY' ORDER BY created_at DESC LIMIT 1",
       )
-      .get(projectId, role) as CurrentAsset | null;
+      .get(projectId, role) as CurrentAsset | undefined;
+    return asset ?? null;
+  }
+  currentRenderableSceneImage(projectId: Id, sceneStableId: string): CurrentAsset | null {
+    const asset = this.database.sqlite
+      .prepare(
+        `SELECT a.id,a.path,a.type,a.sha256,a.media_type as mediaType,a.input_fingerprint as inputFingerprint
+         FROM assets a
+         LEFT JOIN scene_image_generations g ON g.asset_id=a.id
+         LEFT JOIN visual_prompt_packages p ON p.id=g.visual_prompt_package_id
+         LEFT JOIN image_generation_settings s ON s.project_id=a.project_id
+         WHERE a.project_id=? AND a.role=? AND a.type='SCENE_IMAGE'
+           AND a.is_current=1 AND a.status='READY'
+           AND (
+             g.id IS NULL OR (
+               g.status='COMPLETED' AND g.review_status<>'REJECTED' AND
+               (COALESCE(s.require_image_approval,0)=0 OR g.review_status='ACCEPTED') AND
+               (
+                 g.source='MANUAL' OR (
+                   p.status='CURRENT' AND p.is_current=1 AND
+                   p.input_fingerprint=g.package_fingerprint AND
+                   s.input_fingerprint=g.settings_fingerprint
+                 )
+               )
+             )
+           )
+         ORDER BY a.created_at DESC LIMIT 1`,
+      )
+      .get(projectId, `scene:${sceneStableId}:image`) as CurrentAsset | undefined;
+    return asset ?? null;
   }
   registerReference(input: AssetRegistration): void {
     this.assertSafePath(input.path);
@@ -879,10 +1046,7 @@ export class AssetRepository {
     const stamp = now();
     const valid = !input.validationError;
     this.database.sqlite.transaction(() => {
-      if (valid)
-        this.database.sqlite
-          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-          .run(stamp, input.projectId, input.role);
+      if (valid) this.retireCurrentRole(input.projectId, input.role, stamp);
       this.database.sqlite
         .prepare(
           'INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,input_fingerprint,metadata,is_current,validation_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -918,9 +1082,7 @@ export class AssetRepository {
         )
         .get(guard.stepId, guard.attemptId, guard.workerId, guard.inputFingerprint);
       if (!current) return false;
-      this.database.sqlite
-        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-        .run(stamp, input.projectId, input.role);
+      this.retireCurrentRole(input.projectId, input.role, stamp);
       this.database.sqlite
         .prepare(
           'INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,input_fingerprint,metadata,is_current,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -947,16 +1109,69 @@ export class AssetRepository {
     })();
   }
   invalidateRole(projectId: Id, role: string): void {
-    this.database.sqlite
-      .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-      .run(now(), projectId, role);
+    const stamp = now();
+    this.database.sqlite.transaction(() => {
+      this.retireCurrentRole(projectId, role, stamp);
+    })();
   }
   invalidateSource(projectId: Id, sourceEntityId: Id, types: string[] = []): void {
     const condition = types.length ? ` AND type IN (${types.map(() => '?').join(',')})` : '';
+    const stamp = now();
+    this.database.sqlite.transaction(() => {
+      const current = this.database.sqlite
+        .prepare(
+          `SELECT id FROM assets WHERE project_id=? AND source_entity_id=? AND is_current=1${condition}`,
+        )
+        .all(projectId, sourceEntityId, ...types) as Array<{ id: Id }>;
+      this.database.sqlite
+        .prepare(
+          `UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND source_entity_id=?${condition}`,
+        )
+        .run(stamp, projectId, sourceEntityId, ...types);
+      for (const asset of current)
+        this.invalidateDependentsInTransaction(projectId, asset.id, stamp);
+    })();
+  }
+  currentMatching(
+    projectId: Id,
+    role: string,
+    inputFingerprint: string,
+    type?: string,
+  ): CurrentAsset | null {
+    const typeClause = type ? ' AND type=?' : '';
+    const asset = this.database.sqlite
+      .prepare(
+        `SELECT id,path,type,sha256,media_type as mediaType,input_fingerprint as inputFingerprint
+         FROM assets
+         WHERE project_id=? AND role=? AND input_fingerprint=? AND is_current=1 AND status='READY'${typeClause}
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(projectId, role, inputFingerprint, ...(type ? [type] : [])) as CurrentAsset | undefined;
+    return asset ?? null;
+  }
+
+  addDependency(input: AssetDependencyRecord): void {
     this.database.sqlite
       .prepare(
-        `UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND source_entity_id=?${condition}`,
+        `INSERT OR IGNORE INTO asset_dependencies(asset_id,depends_on_asset_id,role,source_hash)
+         VALUES(?,?,?,?)`,
       )
-      .run(now(), projectId, sourceEntityId, ...types);
+      .run(input.assetId, input.dependsOnAssetId, input.role, input.sourceHash);
+  }
+
+  listDependencies(assetId: Id): AssetDependencyRecord[] {
+    return this.database.sqlite
+      .prepare(
+        `SELECT asset_id as assetId,depends_on_asset_id as dependsOnAssetId,role,source_hash as sourceHash
+         FROM asset_dependencies WHERE asset_id=? ORDER BY role,depends_on_asset_id`,
+      )
+      .all(assetId) as AssetDependencyRecord[];
+  }
+
+  invalidateDependents(projectId: Id, assetId: Id): void {
+    const stamp = now();
+    this.database.sqlite.transaction(() => {
+      this.invalidateDependentsInTransaction(projectId, assetId, stamp);
+    })();
   }
 }

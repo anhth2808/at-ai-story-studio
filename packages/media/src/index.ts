@@ -1,9 +1,21 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { access, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import {
+  access,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, extname, join, normalize, relative, resolve, win32 } from 'node:path';
 import { AppError } from '@studio/shared';
+import { FfmpegProgressParser } from './ffmpeg-progress.js';
+import type { FfmpegProgressUpdate } from './ffmpeg-progress.js';
 
 export type WorkspacePaths = { root: string; database: string; projects: string; staging: string };
 
@@ -98,6 +110,9 @@ export async function prepareProjectDirectories(
       'music',
       'renders',
       'images/scenes',
+      'video/scenes',
+      'video/chapters',
+      'video/projects',
     ].map((part) => mkdir(join(base, part), { recursive: true })),
   );
 }
@@ -118,6 +133,62 @@ export async function promoteFile(stagingFile: string, destination: string): Pro
   await rm(destination, { force: true });
   await rename(temporary, destination);
 }
+export type HierarchicalVideoKind = 'scene' | 'chapter' | 'project';
+export type ManagedPromotion = { relativePath: string; hash: string; bytes: number };
+
+export function managedVideoRelativePath(
+  projectId: string,
+  kind: HierarchicalVideoKind,
+  entityId: string,
+  revision: number,
+): string {
+  if (
+    !projectId.trim() ||
+    !entityId.trim() ||
+    /[\\/]/u.test(projectId) ||
+    /[\\/]/u.test(entityId)
+  ) {
+    throw new AppError('UNSAFE_PATH', 'Managed video identifiers are invalid', 400);
+  }
+  if (!Number.isInteger(revision) || revision < 1)
+    throw new AppError('INVALID_MEDIA', 'Video revision is invalid', 400);
+  return `projects/${projectId}/video/${kind}s/${entityId}-r${revision}.mp4`;
+}
+
+export async function promoteManagedFile(
+  paths: WorkspacePaths,
+  stagingRelativePath: string,
+  destinationRelativePath: string,
+): Promise<ManagedPromotion> {
+  const stagingFile = safeWorkspacePath(paths.root, stagingRelativePath);
+  const destination = safeWorkspacePath(paths.root, destinationRelativePath);
+  try {
+    await access(destination);
+    throw new AppError('ASSET_EXISTS', 'Managed output already exists', 409);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    if (code !== 'ENOENT') throw error;
+  }
+  await promoteFile(stagingFile, destination);
+  const file = await sha256File(destination);
+  return {
+    relativePath: relativeAssetPath(paths.root, destination),
+    hash: file.hash,
+    bytes: file.bytes,
+  };
+}
+
+export async function promoteManagedManifest(
+  paths: WorkspacePaths,
+  stagingRelativePath: string,
+  destinationRelativePath: string,
+  value: unknown,
+): Promise<ManagedPromotion> {
+  const stagingFile = safeWorkspacePath(paths.root, stagingRelativePath);
+  await mkdir(dirname(stagingFile), { recursive: true });
+  await writeFile(stagingFile, `${JSON.stringify(value)}${String.fromCharCode(10)}`, 'utf8');
+  return await promoteManagedFile(paths, stagingRelativePath, destinationRelativePath);
+}
 
 export type ProcessOptions = {
   executable: string;
@@ -128,6 +199,7 @@ export type ProcessOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   maxOutputBytes?: number;
+  onStdoutChunk?: (chunk: string) => void;
 };
 export type ProcessResult = {
   stdout: string;
@@ -220,7 +292,9 @@ export class ProcessRunner {
         finish(cancelled, new ProcessError(cancelled, 'Process cancelled', false));
       };
       child.stdout.on('data', (chunk: Buffer) => {
-        if (stdout.length < max) stdout += chunk.toString('utf8').slice(0, max - stdout.length);
+        const text = chunk.toString('utf8');
+        options.onStdoutChunk?.(text);
+        if (stdout.length < max) stdout += text.slice(0, max - stdout.length);
       });
       child.stderr.on('data', (chunk: Buffer) => {
         if (stderr.length < max) stderr += chunk.toString('utf8').slice(0, max - stderr.length);
@@ -353,6 +427,21 @@ export class FfmpegTools {
     options?: Omit<ProcessOptions, 'executable' | 'arguments'>,
   ): Promise<ProcessResult> {
     return await this.runner.run({ ...options, executable: this.ffmpeg, arguments: args });
+  }
+  async runWithProgress(
+    args: string[],
+    onProgress: (progress: FfmpegProgressUpdate) => void,
+    options?: Omit<ProcessOptions, 'executable' | 'arguments' | 'onStdoutChunk'>,
+  ): Promise<ProcessResult> {
+    const parser = new FfmpegProgressParser(onProgress);
+    const result = await this.runner.run({
+      ...options,
+      executable: this.ffmpeg,
+      arguments: ['-progress', 'pipe:1', '-nostats', ...args],
+      onStdoutChunk: (chunk) => parser.push(chunk),
+    });
+    parser.flush();
+    return result;
   }
 }
 export type MediaValidationKind = 'audio' | 'image' | 'video' | 'subtitle' | 'mp4';
@@ -542,3 +631,7 @@ export function relativeAssetPath(workspaceRoot: string, filename: string): stri
     throw new AppError('UNSAFE_PATH', 'Path is outside the managed workspace', 400);
   return value;
 }
+export * from './crop.js';
+export * from './ffmpeg-progress.js';
+export * from './timeline-render.js';
+export * from './hierarchical-probe.js';

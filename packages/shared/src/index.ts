@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { StoryLongStoryCounts } from './story.js';
-
+import type { HierarchicalProgress } from './timeline.js';
 export const idSchema = z.string().uuid();
 export type Id = z.infer<typeof idSchema>;
 
@@ -24,6 +24,11 @@ export const workflowStepTypeSchema = z.enum([
   'SUBTITLE',
   'PREPARE_BACKGROUND',
   'RENDER',
+  'BUILD_SCENE_TIMING',
+  'BUILD_MOTION_PLAN',
+  'RENDER_SCENE_CLIP',
+  'RENDER_CHAPTER_VIDEO',
+  'RENDER_PROJECT_VIDEO',
   'GENERATE_STORY_BLUEPRINT',
   'GENERATE_CHAPTER_PLANS',
   'GENERATE_CHAPTER',
@@ -54,6 +59,9 @@ export const assetTypeSchema = z.enum([
   'BACKGROUND_VIDEO',
   'MUSIC',
   'RENDERED_VIDEO',
+  'SCENE_VIDEO_CLIP',
+  'CHAPTER_VIDEO',
+  'PROJECT_VIDEO',
   'TIMELINE_MANIFEST',
   'SCENE_IMAGE',
   'CHARACTER_REFERENCE_IMAGE',
@@ -88,18 +96,48 @@ export const renderConfigSchema = z
     width: z.union([z.literal(1920), z.literal(1080)]).default(1920),
     height: z.union([z.literal(1080), z.literal(1920)]).default(1080),
     fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]).default(30),
+    qualityPreset: z.enum(['FAST_PREVIEW', 'STANDARD', 'HIGH']).default('STANDARD'),
+    fitMode: z.enum(['COVER', 'CONTAIN']).default('COVER'),
+    motionIntensity: z.number().finite().min(0).max(1).default(0.5),
+    transition: z.enum(['CUT', 'CROSSFADE', 'FADE']).default('CUT'),
+    transitionDurationMs: z.number().int().min(0).max(800).default(0),
     subtitleFontSize: z.number().int().min(12).max(120).default(42),
-    narrationVolume: z.number().min(0).max(2).default(1),
-    musicVolume: z.number().min(0).max(1).default(0.12),
+    subtitlePosition: z.enum(['TOP', 'CENTER', 'BOTTOM']).default('BOTTOM'),
+    subtitleOutlineWidth: z.number().finite().min(0).max(8).default(2),
+    narrationVolume: z.number().finite().min(0).max(2).default(1),
+    musicVolume: z.number().finite().min(0).max(1).default(0.12),
     musicEnabled: z.boolean().default(true),
     loopMusic: z.boolean().default(true),
+    visualSource: z.enum(['SCENES', 'BACKGROUND']).default('BACKGROUND'),
+    fallbackPolicy: z
+      .enum(['FAIL', 'HOLD_PREVIOUS', 'BLACK', 'PROJECT_BACKGROUND'])
+      .default('FAIL'),
   })
   .superRefine((value, ctx) => {
-    if (value.width === value.height)
+    const validRatio =
+      (value.width === 1920 && value.height === 1080) ||
+      (value.width === 1080 && value.height === 1920);
+    if (!validRatio) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Render dimensions must have aspect ratio',
+        path: ['width'],
+        message: 'Render dimensions must be 1920x1080 or 1080x1920',
       });
+    }
+    if (value.transition === 'CUT' && value.transitionDurationMs !== 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['transitionDurationMs'],
+        message: 'CUT transitions must have zero duration',
+      });
+    }
+    if (value.transition !== 'CUT' && value.transitionDurationMs < 300) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['transitionDurationMs'],
+        message: 'Non-CUT transitions must be at least 300 milliseconds',
+      });
+    }
   });
 export type RenderConfig = z.infer<typeof renderConfigSchema>;
 export const subtitleReplacementSchema = z.object({
@@ -159,6 +197,7 @@ export type StatusSummary = {
   subtitles: WorkflowStatus;
   background: WorkflowStatus;
   render: WorkflowStatus;
+  timeline?: HierarchicalProgress | null;
   jobs: JobDto[];
   story?: StoryLongStoryCounts;
 };
@@ -192,3 +231,4 @@ export class AppError extends Error {
 export * from './visual.js';
 export * from './image.js';
 export * from './story.js';
+export * from './timeline.js';

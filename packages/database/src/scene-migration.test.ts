@@ -68,6 +68,37 @@ describe('Scene Engine migrations', () => {
         }>
       ).some((column) => column.name === 'payload'),
     ).toBe(true);
+    expect(
+      database.sqlite
+        .prepare("SELECT 1 FROM _studio_migrations WHERE id='0013_animated_story_timeline'")
+        .get(),
+    ).toEqual({ 1: 1 });
+    expect(
+      (
+        database.sqlite.prepare('PRAGMA table_info(tts_segments)').all() as Array<{ name: string }>
+      ).map((column) => column.name),
+    ).toEqual(
+      expect.arrayContaining([
+        'chapter_revision',
+        'source_start_offset',
+        'source_end_offset',
+        'source_text',
+      ]),
+    );
+    expect(
+      database.sqlite
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('scene_timing_revisions','motion_plan_revisions') ORDER BY name",
+        )
+        .all(),
+    ).toEqual([{ name: 'motion_plan_revisions' }, { name: 'scene_timing_revisions' }]);
+    expect(
+      (
+        database.sqlite.prepare('PRAGMA table_info(render_jobs)').all() as Array<{ name: string }>
+      ).map((column) => column.name),
+    ).toEqual(
+      expect.arrayContaining(['render_type', 'scope_id', 'progress_time_ms', 'diagnostics']),
+    );
     database.sqlite.close();
   });
 });

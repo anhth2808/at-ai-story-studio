@@ -180,16 +180,27 @@ export const assets = sqliteTable(
   }),
 );
 
-export const assetDependencies = sqliteTable('asset_dependencies', {
-  assetId: text('asset_id')
-    .notNull()
-    .references(() => assets.id, { onDelete: 'cascade' }),
-  dependsOnAssetId: text('depends_on_asset_id')
-    .notNull()
-    .references(() => assets.id, { onDelete: 'cascade' }),
-  role: text('role').notNull(),
-  sourceHash: text('source_hash').notNull(),
-});
+export const assetDependencies = sqliteTable(
+  'asset_dependencies',
+  {
+    assetId: text('asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    dependsOnAssetId: text('depends_on_asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    role: text('role').notNull(),
+    sourceHash: text('source_hash').notNull(),
+  },
+  (table) => ({
+    uniqueDependency: uniqueIndex('asset_dependencies_unique_idx').on(
+      table.assetId,
+      table.dependsOnAssetId,
+      table.role,
+    ),
+    dependsOn: index('asset_dependencies_depends_on_idx').on(table.dependsOnAssetId, table.assetId),
+  }),
+);
 
 export const ttsSegments = sqliteTable(
   'tts_segments',
@@ -201,6 +212,10 @@ export const ttsSegments = sqliteTable(
     index: integer('segment_index').notNull(),
     text: text('text').notNull(),
     textHash: text('text_hash').notNull(),
+    chapterRevision: integer('chapter_revision'),
+    sourceStartOffset: integer('source_start_offset'),
+    sourceEndOffset: integer('source_end_offset'),
+    sourceText: text('source_text'),
     status: text('status').notNull().default('PENDING'),
     audioAssetId: text('audio_asset_id').references(() => assets.id),
     durationMs: integer('duration_ms'),
@@ -210,6 +225,104 @@ export const ttsSegments = sqliteTable(
   },
   (table) => ({
     chapterIndex: uniqueIndex('tts_segments_chapter_index_idx').on(table.chapterId, table.index),
+    chapterRevision: index('tts_segments_chapter_revision_idx').on(
+      table.chapterId,
+      table.chapterRevision,
+      table.index,
+    ),
+  }),
+);
+
+export const sceneTimingRevisions = sqliteTable(
+  'scene_timing_revisions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    chapterRevision: integer('chapter_revision').notNull(),
+    audioAssetId: text('audio_asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'restrict' }),
+    mode: text('mode').notNull(),
+    revision: integer('revision').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    minimumSceneDurationMs: integer('minimum_scene_duration_ms').notNull(),
+    items: text('items').notNull(),
+    warnings: text('warnings').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    status: text('status').notNull().default('COMPLETED'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('scene_timing_chapter_revision_idx').on(table.chapterId, table.revision),
+    current: uniqueIndex('scene_timing_current_idx')
+      .on(table.chapterId)
+      .where(sql`${table.isCurrent} = 1`),
+    project: index('scene_timing_project_idx').on(
+      table.projectId,
+      table.chapterId,
+      table.isCurrent,
+      table.revision,
+    ),
+  }),
+);
+
+export const motionPlanRevisions = sqliteTable(
+  'motion_plan_revisions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    timingRevisionId: text('timing_revision_id').references(() => sceneTimingRevisions.id, {
+      onDelete: 'set null',
+    }),
+    revision: integer('revision').notNull(),
+    motionType: text('motion_type').notNull(),
+    startScale: real('start_scale').notNull(),
+    endScale: real('end_scale').notNull(),
+    startPositionX: real('start_position_x').notNull(),
+    startPositionY: real('start_position_y').notNull(),
+    endPositionX: real('end_position_x').notNull(),
+    endPositionY: real('end_position_y').notNull(),
+    easing: text('easing').notNull(),
+    focusPointX: real('focus_point_x'),
+    focusPointY: real('focus_point_y'),
+    intensity: real('intensity').notNull().default(0.5),
+    durationMs: integer('duration_ms').notNull(),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    status: text('status').notNull().default('COMPLETED'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('motion_plan_scene_revision_idx').on(
+      table.sceneRevisionId,
+      table.revision,
+    ),
+    current: uniqueIndex('motion_plan_current_idx')
+      .on(table.sceneStableId, table.sceneRevisionId)
+      .where(sql`${table.isCurrent} = 1`),
+    scene: index('motion_plan_scene_idx').on(
+      table.projectId,
+      table.chapterId,
+      table.sceneStableId,
+      table.isCurrent,
+      table.revision,
+    ),
+    timing: index('motion_plan_timing_idx').on(table.timingRevisionId),
   }),
 );
 
@@ -220,22 +333,36 @@ export const workerHeartbeats = sqliteTable('worker_heartbeats', {
   version: text('version').notNull(),
 });
 
-export const renderJobs = sqliteTable('render_jobs', {
-  id: text('id').primaryKey(),
-  projectId: text('project_id')
-    .notNull()
-    .references(() => projects.id, { onDelete: 'cascade' }),
-  stepId: text('step_id')
-    .notNull()
-    .references(() => workflowSteps.id, { onDelete: 'cascade' }),
-  timelineAssetId: text('timeline_asset_id').references(() => assets.id),
-  outputAssetId: text('output_asset_id').references(() => assets.id),
-  expectedDurationMs: integer('expected_duration_ms'),
-
-  actualDurationMs: integer('actual_duration_ms'),
-  status: text('status').notNull().default('PENDING'),
-  ...timestamps,
-});
+export const renderJobs = sqliteTable(
+  'render_jobs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    stepId: text('step_id')
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: 'cascade' }),
+    renderType: text('render_type').notNull().default('LEGACY_PROJECT'),
+    scopeId: text('scope_id'),
+    timelineAssetId: text('timeline_asset_id').references(() => assets.id),
+    outputAssetId: text('output_asset_id').references(() => assets.id),
+    expectedDurationMs: integer('expected_duration_ms'),
+    actualDurationMs: integer('actual_duration_ms'),
+    progressTimeMs: integer('progress_time_ms'),
+    diagnostics: text('diagnostics'),
+    status: text('status').notNull().default('PENDING'),
+    ...timestamps,
+  },
+  (table) => ({
+    scope: index('render_jobs_scope_idx').on(
+      table.projectId,
+      table.renderType,
+      table.scopeId,
+      table.status,
+    ),
+  }),
+);
 
 export const storySettingsRevisions = sqliteTable('story_settings_revisions', {
   id: text('id').primaryKey(),

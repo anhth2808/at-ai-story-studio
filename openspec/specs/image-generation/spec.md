@@ -31,15 +31,19 @@ The system SHALL expose a bounded image-provider contract for generation, status
 - **THEN** provider-neutral fields SHALL contain only mode and character-to-reference bindings while the provider adapter derives its own node graph
 
 ### Requirement: Minimal project image settings
-The system SHALL persist project-owned image settings containing provider, base URL, connection and generation timeout, approved workflow template, model-component selections, width, height, steps, guidance, sampler hint, and `RANDOM` or `FIXED` seed mode. It SHALL provide safe defaults without making one URL, model, or resolution the only supported value.
+The system SHALL persist project-owned image settings containing provider, base URL, connection and generation timeout, approved workflow template, model-component selections, width, height, steps, guidance, sampler hint, `RANDOM` or `FIXED` seed mode, conditioning mode, and a default-off `requireImageApproval` policy. It SHALL provide safe defaults without making one URL, model, or resolution the only supported value. Only output-affecting fields SHALL participate in image settings fingerprints and generation invalidation.
 
 #### Scenario: Configure local ComfyUI
-- **WHEN** a user saves a valid local ComfyUI URL, approved workflow, available model components, and bounded generation settings
+- **WHEN** a user saves a valid local ComfyUI URL, approved workflow, available model components, bounded generation settings, and approval policy
 - **THEN** the settings SHALL survive restart and SHALL not place model or node values in the Style Bible
 
 #### Scenario: Reject excessive settings
 - **WHEN** settings exceed supported bounds or name an unapproved template
 - **THEN** the update SHALL fail without replacing the current valid configuration
+
+#### Scenario: Change approval policy only
+- **WHEN** a user changes only `requireImageApproval`
+- **THEN** existing generation fingerprints and visual freshness SHALL remain unchanged and image-generation jobs SHALL not be invalidated
 
 ### Requirement: Actionable readiness
 The system SHALL expose `NOT_CONFIGURED`, `UNREACHABLE`, `READY`, `INVALID_WORKFLOW`, `INCOMPATIBLE_API`, and `ERROR` readiness states. A connection test SHALL validate server reachability, required API behavior, approved workflow nodes/inputs for every workflow the project may execute (including the conditioned workflow when conditioning is enabled or offered), output mapping, and required configured model availability without running an expensive generation, and SHALL surface an explicit conditioning readiness diagnostic.
@@ -90,22 +94,34 @@ Every generated revision SHALL persist `requestedSeed` and `actualSeed` plus act
 - **THEN** a new revision SHALL use the previous actual seed while preserving the previous image
 
 ### Requirement: Immutable Scene image revisions
-The system SHALL persist every generated Scene image attempt with a stable application generation ID, project ID, Scene ID, Visual Prompt Package ID, provider, generation status, requested/actual seed, requested/actual dimensions, provider prompt ID, input fingerprint, workflow/version, attempt information, error classification, timestamps, duration, result asset ID when present, and optional regeneration feedback. Prior completed revisions SHALL NOT be overwritten.
+The system SHALL persist every generated Scene image attempt with a stable application generation ID, project ID, Scene ID, Visual Prompt Package ID, provider, generation status, requested/actual seed, requested/actual dimensions, provider prompt ID, input fingerprint, workflow/version, attempt information, error classification, timestamps, duration, result asset ID when present, optional regeneration feedback, and optional candidate-set identifier and candidate index. A candidate set SHALL persist its common Scene revision, package, effective mode, reference dependency, settings, workflow, and instruction provenance, while every candidate SHALL retain the complete request snapshot required for independent retry and restart recovery. Prior completed revisions and candidate sets SHALL NOT be overwritten.
 
 #### Scenario: Regenerate with a new seed
 - **WHEN** a Scene with one completed image is regenerated with a new seed
 - **THEN** a second generation revision SHALL be created and the first generation and asset SHALL remain available
 
+#### Scenario: Persist candidate membership
+- **WHEN** four generations are scheduled as one candidate set
+- **THEN** each generation SHALL reference the same immutable candidate-set identifier with a unique candidate index and its own concrete seed
+
 ### Requirement: Generation, freshness, review, and current are separate
-A Scene image SHALL expose generation status independently from visual freshness (`CURRENT` or `STALE`), review status (`UNREVIEWED`, `ACCEPTED`, or `REJECTED`), and explicit current selection. The system SHALL NOT infer current selection solely from the newest timestamp.
+A Scene image SHALL expose generation status independently from visual freshness (`CURRENT` or `STALE`), review status (`UNREVIEWED`, `ACCEPTED`, or `REJECTED`), structured quality review, candidate-set membership, and explicit current selection. The system SHALL NOT infer current selection solely from the newest timestamp. Accepting a completed candidate SHALL atomically set it `ACCEPTED` and current. Completing a multi-candidate set SHALL never auto-select a candidate, and completing any generation SHALL never replace an accepted current image. A single generation MAY preserve the existing first-image auto-selection only when no current image exists and project approval is not required.
 
 #### Scenario: Reject the current image
 - **WHEN** a user marks a current image `REJECTED`
-- **THEN** the review status SHALL change without deleting its asset or generation history
+- **THEN** the review status SHALL change without deleting its asset or generation history and the system SHALL NOT choose a replacement automatically
 
 #### Scenario: Select an older revision
 - **WHEN** a user explicitly selects an older valid Scene image revision
 - **THEN** that revision SHALL become current and all other revisions for that Scene role SHALL become non-current atomically
+
+#### Scenario: Accept a candidate
+- **WHEN** a user accepts a completed non-current candidate
+- **THEN** its review status, generation current flag, and Asset current flag SHALL change atomically while every other Scene image remains historical
+
+#### Scenario: Preserve accepted current during generation
+- **WHEN** a new image completes while the Scene has an accepted current image
+- **THEN** the new image SHALL remain non-current regardless of freshness and the accepted image SHALL remain current
 
 ### Requirement: Safe managed image assets
 A completed provider or manual Scene image SHALL be copied or streamed into a generated application-managed path, registered as a `SCENE_IMAGE` Asset, and addressed by generated application identifiers. Provider filenames, provider subfolders, upload filenames, and URL query values SHALL NOT be trusted as workspace paths.
@@ -122,15 +138,15 @@ Before an image generation completes or becomes current, the system SHALL verify
 - **THEN** the generation SHALL fail with `OUTPUT_INVALID`, no current Asset SHALL be published, and any prior current image SHALL remain current
 
 ### Requirement: Retry and regenerate are distinct
-A technical retry SHALL create another attempt for the same logical generation, input fingerprint, workflow settings, and concrete seed. Creative regeneration SHALL create a new logical generation revision with an explicit same-seed or new-seed choice and optional bounded instructions. Unrelated completed Scene images SHALL remain untouched.
+A technical retry SHALL create another attempt for the same logical generation, candidate membership, input fingerprint, workflow settings, concrete seed, reference mapping, and provider prompt identity. Creative regeneration SHALL create a new logical generation revision in a new candidate set with an explicit same-seed or new-seed choice and optional bounded instructions. Feedback regeneration SHALL additionally persist the source candidate, structured source review, and deterministically assembled guidance. Unrelated completed Scene images SHALL remain untouched.
 
 #### Scenario: Retry a timeout
 - **WHEN** an image attempt times out and the user retries it without changing inputs
 - **THEN** the same generation record SHALL gain a new attempt or resume checkpoint and SHALL retain the same intended seed and fingerprint
 
 #### Scenario: Add regeneration feedback
-- **WHEN** a user supplies bounded regeneration instructions
-- **THEN** the instructions MAY affect only that new provider prompt/fingerprint and SHALL NOT mutate canonical character, location, object, or Style Bible profiles
+- **WHEN** a user regenerates a rejected candidate with structured review feedback
+- **THEN** the guidance MAY affect only that new provider prompt and fingerprint and SHALL NOT mutate canonical character, location, object, Scene, Story, Visual Prompt Package, or Style Bible data
 
 ### Requirement: Stale results never become current
 The image-generation fingerprint SHALL include the Visual Prompt Package fingerprint, provider, approved workflow/template version, conditioning mode and mapping, reference asset identifiers with content hashes, output-affecting settings, model components, and concrete seed. Completion SHALL compare the original fingerprint and package freshness against current inputs before publishing. A stale completed output MAY be retained as historical evidence but SHALL NOT silently become current.
@@ -151,11 +167,15 @@ The system SHALL allow a user to upload a supported Scene image, validate and st
 - **THEN** the manual Asset SHALL become current while all generated revisions remain available in history
 
 ### Requirement: Bounded batch generation and backpressure
-The system SHALL support one-Scene generation, selected-Scene generation, Chapter missing-image generation, and missing-or-stale generation. It SHALL materialize independently retryable Scene steps, skip matching successful work, avoid duplicates, and SHALL NOT schedule every project Scene without explicit user action. Local image generation SHALL initially execute with effective concurrency one.
+The system SHALL support one-Scene candidate generation, selected-Scene candidate generation, Chapter missing-image generation, and missing-or-stale generation. A request SHALL contain at most four candidates per Scene and SHALL satisfy a fixed bounded total-job limit before any work is created. It SHALL materialize independently retryable Scene candidate steps, skip matching successful or pending work where applicable, avoid duplicates, and SHALL NOT schedule every project Scene or multiply Scene counts by candidate counts without explicit user action. Local image generation SHALL initially execute with effective concurrency one.
 
 #### Scenario: Batch fails at one Scene
-- **WHEN** a 20-Scene missing-image batch fails technically at Scene 8
-- **THEN** completed Scene images SHALL remain completed, Scene 8 SHALL be independently retryable, and later eligible work SHALL continue according to the existing batch policy without duplicating prior success
+- **WHEN** a bounded selected-Scene batch fails technically at one candidate
+- **THEN** completed candidates SHALL remain completed, the failed candidate SHALL be independently retryable, and later eligible work SHALL continue according to the existing batch policy without duplicating prior success
+
+#### Scenario: Reject excessive candidate batch
+- **WHEN** the number of selected Scenes multiplied by candidates per Scene exceeds the total-job guardrail
+- **THEN** the request SHALL fail atomically before any candidate set, workflow step, or job is created
 
 ### Requirement: Timeout, cancellation, and restart recovery are honest
 Generation SHALL use a configurable timeout and persisted provider prompt ID. After worker restart, the system SHALL query the known provider prompt ID and resume waiting or import a completed result when it is still known. It SHALL not blindly submit a duplicate. Cancellation SHALL stop local waiting and SHALL cancel/dequeue the matching remote prompt only when the detected ComfyUI API supports targeted cancellation; otherwise the UI SHALL state that remote execution may continue.

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   cleanNarrationText,
   parseSrt,
+  segmentNarrationText,
   segmentText,
   serializeSrt,
   subtitlesFromSegments,
@@ -19,6 +20,22 @@ describe('narration text', () => {
     expect(segments.length).toBeGreaterThan(1);
     expect(segments.every((segment) => segment.text.length <= 80)).toBe(true);
     expect(segmentText('Một câu rất dài '.repeat(40), 80)).toEqual(segments);
+  });
+  it('maps cleaned narration segments back to UTF-16 source ranges', () => {
+    const input = '  Một câu.\r\n\r\nCâu hai.\u0000 ';
+    const segments = segmentNarrationText(input);
+    expect(
+      segments.map(({ text, sourceStartOffset, sourceEndOffset }) => ({
+        text,
+        source: input.slice(sourceStartOffset, sourceEndOffset),
+      })),
+    ).toEqual([
+      { text: 'Một câu.', source: 'Một câu.' },
+      { text: 'Câu hai.', source: 'Câu hai.' },
+    ]);
+    expect(segments.every((segment) => segment.sourceEndOffset > segment.sourceStartOffset)).toBe(
+      true,
+    );
   });
   it('round-trips measured SRT cues', () => {
     const cues = subtitlesFromSegments([

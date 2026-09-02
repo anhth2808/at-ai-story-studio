@@ -297,6 +297,20 @@ technique is introduced.
 Image quality review must never mutate canonical Story, Scene, or Character
 Visual identity data; review feedback may only shape new generation requests.
 
+# Animated Story Timeline
+
+Scene Clip rendering must resolve the current accepted Scene image by explicit
+Scene identity and Asset hash. Rejected, stale, historical, or non-current
+image candidates must never become render inputs unless an explicit fallback
+policy names that historical Asset.
+
+Timeline invalidation is chapter-local. A Scene image, MotionPlan, or SceneTiming
+change invalidates that Scene Clip, its containing Chapter Video, and dependent
+Project Videos only. Chapter narration or subtitles invalidate only that
+Chapter Video and dependent Project Videos; project music or render settings
+must not invalidate reusable Scene Clips or unrelated Chapter Videos.
+
+
 # TTS
 
 Never assume a provider accepts arbitrarily long text.

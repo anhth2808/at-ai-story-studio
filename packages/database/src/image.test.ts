@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  AssetRepository,
   createDatabase,
   migrateDatabase,
   ImageGenerationSettingsRepository,
@@ -284,6 +285,9 @@ describe('scene image persistence', () => {
     ).toMatchObject({ reviewStatus: 'REJECTED', notes: 'framing off' });
     expect(repository.setCurrent(projectId, sceneStableId, first.id, 1).id).toBe(first.id);
     expect(repository.getCurrent(projectId, sceneStableId)?.id).toBe(first.id);
+    expect(
+      new AssetRepository(database).currentRenderableSceneImage(projectId, sceneStableId),
+    ).toBeNull();
     expect(repository.list(projectId, sceneStableId).map((image) => image.revision)).toEqual([
       2, 1,
     ]);

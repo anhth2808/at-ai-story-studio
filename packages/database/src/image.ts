@@ -21,6 +21,7 @@ import {
   type SceneImageSource,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
+import { invalidateAssetDependents } from './repositories.js';
 import type { StepLeaseGuard } from './repositories.js';
 
 const now = (): string => new Date().toISOString();
@@ -333,6 +334,17 @@ export type ManualImageCommitInput = Omit<
 export class SceneImageGenerationRepository {
   constructor(private readonly database: DatabaseHandle) {}
 
+  private retireCurrentAsset(projectId: Id, role: string, stamp: string): void {
+    const current = this.database.sqlite
+      .prepare('SELECT id FROM assets WHERE project_id=? AND role=? AND is_current=1')
+      .all(projectId, role) as Array<{ id: Id }>;
+    this.database.sqlite
+      .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
+      .run(stamp, projectId, role);
+    for (const asset of current)
+      invalidateAssetDependents(this.database, projectId, asset.id, stamp);
+  }
+
   get(projectId: Id, generationId: Id): SceneImageGenerationDto | null {
     const row = this.database.sqlite
       .prepare(`${generationSelect} WHERE g.project_id=? AND g.id=?`)
@@ -614,9 +626,7 @@ export class SceneImageGenerationRepository {
           'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
         )
         .run(stamp, input.projectId, input.sceneStableId);
-      this.database.sqlite
-        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-        .run(stamp, input.projectId, role);
+      this.retireCurrentAsset(input.projectId, role, stamp);
       this.database.sqlite
         .prepare(
           `INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,input_fingerprint,
@@ -738,9 +748,7 @@ export class SceneImageGenerationRepository {
           'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
         )
         .run(stamp, projectId, sceneStableId);
-      this.database.sqlite
-        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-        .run(stamp, projectId, role);
+      this.retireCurrentAsset(projectId, role, stamp);
       this.database.sqlite
         .prepare(
           'UPDATE scene_image_generations SET is_current=1,updated_at=? WHERE project_id=? AND id=?',
@@ -788,9 +796,7 @@ export class SceneImageGenerationRepository {
           'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
         )
         .run(stamp, projectId, sceneStableId);
-      this.database.sqlite
-        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-        .run(stamp, projectId, role);
+      this.retireCurrentAsset(projectId, role, stamp);
       this.database.sqlite
         .prepare(
           'UPDATE scene_image_generations SET is_current=1,updated_at=? WHERE project_id=? AND id=?',

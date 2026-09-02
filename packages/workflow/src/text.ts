@@ -2,6 +2,45 @@ import { createHash } from 'node:crypto';
 
 export type CleanText = { text: string; warnings: string[] };
 export type TextSegment = { index: number; text: string; textHash: string };
+export type SourceTextSegment = TextSegment & {
+  sourceStartOffset: number;
+  sourceEndOffset: number;
+  sourceText: string;
+};
+
+type SourceCharacter = { value: string; start: number; end: number };
+
+const isUnsupportedSourceCharacter = (character: string): boolean => {
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 0 && code <= 8) ||
+    code === 11 ||
+    code === 12 ||
+    (code >= 14 && code <= 31) ||
+    code === 127 ||
+    (code >= 0x200b && code <= 0x200d) ||
+    code === 0xfeff
+  );
+};
+
+const sourceCharacters = (input: string): SourceCharacter[] => {
+  const characters: SourceCharacter[] = [];
+  let offset = 0;
+  while (offset < input.length) {
+    const start = offset;
+    const codePoint = input.codePointAt(offset);
+    if (codePoint === undefined) break;
+    let value = String.fromCodePoint(codePoint);
+    offset += value.length;
+    if (value === '\r') {
+      if (input[offset] === '\n') offset += 1;
+      value = '\n';
+    }
+    if (isUnsupportedSourceCharacter(value)) continue;
+    characters.push({ value: value.normalize('NFC'), start, end: offset });
+  }
+  return characters;
+};
 
 export function cleanNarrationText(input: string): CleanText {
   const warnings: string[] = [];
@@ -65,6 +104,41 @@ export function segmentText(input: string, maxCharacters = 450): TextSegment[] {
     text,
     textHash: createHash('sha256').update(text).digest('hex'),
   }));
+}
+export function segmentNarrationText(input: string, maxCharacters = 450): SourceTextSegment[] {
+  const cleaned = cleanNarrationText(input).text;
+  const segments = segmentText(cleaned, maxCharacters);
+  const source = sourceCharacters(input);
+  let cursor = 0;
+
+  return segments.map((segment) => {
+    const target = Array.from(segment.text.normalize('NFC'));
+    let sourceStartOffset: number | undefined;
+    let sourceEndOffset: number | undefined;
+
+    for (const character of target) {
+      if (/\s/u.test(character)) continue;
+      while (cursor < source.length && /\s/u.test(source[cursor]!.value)) cursor += 1;
+      const matched = source[cursor];
+      if (!matched || matched.value !== character) {
+        throw new Error(`Unable to map narration segment ${segment.index} to chapter source`);
+      }
+      sourceStartOffset ??= matched.start;
+      sourceEndOffset = matched.end;
+      cursor += 1;
+    }
+
+    if (sourceStartOffset === undefined || sourceEndOffset === undefined) {
+      throw new Error(`Narration segment ${segment.index} has no source characters`);
+    }
+
+    return {
+      ...segment,
+      sourceStartOffset,
+      sourceEndOffset,
+      sourceText: input.slice(sourceStartOffset, sourceEndOffset),
+    };
+  });
 }
 export type SubtitleCue = { index: number; startMs: number; endMs: number; text: string };
 const timestamp = (ms: number): string => {
