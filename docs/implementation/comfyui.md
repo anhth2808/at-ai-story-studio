@@ -26,6 +26,8 @@ Two application-approved templates exist; both use only native nodes.
 
 Studio maps prompt, negative prompt, concrete seed, normalized dimensions, steps, guidance, sampler, configured model components, and reference-image inputs. No custom nodes and no additional model files are required for either template.
 
+Advanced image control (Prompt #11): no ControlNet/LoRA/pose/depth path is adopted. Readiness reports `details.advancedControl.status = NOT_ADOPTED` with reason `NO_COMPATIBLE_CONTROL_MODEL`. See `advanced-image-control.md` for the full evaluation.
+
 ## HTTP endpoints
 
 Studio uses only these ComfyUI routes:

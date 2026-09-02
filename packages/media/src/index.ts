@@ -90,9 +90,15 @@ export async function prepareProjectDirectories(
 ): Promise<void> {
   const base = join(paths.projects, projectId);
   await Promise.all(
-    ['chapters', 'audio/segments', 'subtitles', 'backgrounds', 'music', 'renders', 'images/scenes'].map((part) =>
-      mkdir(join(base, part), { recursive: true }),
-    ),
+    [
+      'chapters',
+      'audio/segments',
+      'subtitles',
+      'backgrounds',
+      'music',
+      'renders',
+      'images/scenes',
+    ].map((part) => mkdir(join(base, part), { recursive: true })),
   );
 }
 

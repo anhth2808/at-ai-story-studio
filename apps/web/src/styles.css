@@ -1310,3 +1310,97 @@ select:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+.candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.candidate-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid #24344d;
+  border-radius: 8px;
+  padding: 8px;
+  min-width: 0;
+}
+.candidate-card.active {
+  border-color: #7dd3fc;
+}
+.candidate-thumb {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.candidate-thumb img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+}
+.candidate-empty {
+  aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  color: #9aa6b8;
+  border: 1px dashed #24344d;
+  border-radius: 6px;
+}
+.candidate-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: #9aa6b8;
+}
+.candidate-meta strong,
+.candidate-meta em {
+  color: #ffcf8a;
+}
+.candidate-actions {
+  display: flex;
+  gap: 6px;
+}
+.candidate-actions button {
+  flex: 1;
+  min-height: 44px;
+  font-size: 12px;
+}
+.quality-review {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.score-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+.score-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.quality-review fieldset {
+  border: 1px solid #24344d;
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 10px;
+  min-width: 0;
+}
+.issue-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.issue-checkbox input {
+  width: 16px;
+}

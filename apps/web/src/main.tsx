@@ -442,11 +442,13 @@ const imageApi = {
     sceneId: string,
     instructions = '',
     conditioningMode?: 'TEXT_ONLY' | 'REFERENCE_CONDITIONED',
+    candidateCount = 1,
   ) =>
     api<ImageScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/images/generate`, {
       method: 'POST',
       body: JSON.stringify({
         instructions,
+        candidateCount,
         ...(conditioningMode ? { conditioningMode } : {}),
       }),
     }),
@@ -456,6 +458,7 @@ const imageApi = {
     generationId: string,
     mode: 'SAME_SEED' | 'NEW_SEED',
     conditioningMode?: 'TEXT_ONLY' | 'REFERENCE_CONDITIONED',
+    useReviewFeedback = false,
   ) =>
     api<ImageScheduleDto>(
       `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/regenerate`,
@@ -464,6 +467,7 @@ const imageApi = {
         body: JSON.stringify({
           mode,
           instructions: '',
+          useReviewFeedback,
           ...(conditioningMode ? { conditioningMode } : {}),
         }),
       },
@@ -519,12 +523,26 @@ const imageApi = {
     projectId: string,
     sceneId: string,
     generationId: string,
-    status: 'UNREVIEWED' | 'ACCEPTED' | 'REJECTED',
+    status: 'UNREVIEWED' | 'REJECTED',
     notes = '',
+    scores: Record<string, number> = {},
+    issues: string[] = [],
   ) =>
     api<SceneImageGenerationDto>(
       `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/review`,
-      { method: 'PUT', body: JSON.stringify({ status, notes }) },
+      { method: 'PUT', body: JSON.stringify({ status, notes, scores, issues }) },
+    ),
+  accept: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    notes = '',
+    scores: Record<string, number> = {},
+    issues: string[] = [],
+  ) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/images/${generationId}/accept`,
+      { method: 'PUT', body: JSON.stringify({ status: 'REJECTED', notes, scores, issues }) },
     ),
   setCurrent: (
     projectId: string,
@@ -2760,6 +2778,41 @@ function ScenesWorkspace({
   const [density, setDensity] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('MEDIUM');
   const [targetMin, setTargetMin] = useState('');
   const [targetMax, setTargetMax] = useState('');
+  const [candidateCount, setCandidateCount] = useState(1);
+  const [reviewDraft, setReviewDraft] = useState<{
+    generationId: string | null;
+    scores: Record<string, number>;
+    issues: string[];
+    notes: string;
+  }>({ generationId: null, scores: {}, issues: [], notes: '' });
+  const scoreCategories = [
+    'IDENTITY',
+    'PROMPT_ADHERENCE',
+    'COMPOSITION',
+    'POSE_ACTION',
+    'LOCATION',
+    'IMPORTANT_OBJECTS',
+    'STYLE',
+    'ARTIFACTS',
+    'OVERALL',
+  ] as const;
+  const issueTags = [
+    'WRONG_FACE',
+    'WRONG_HAIR',
+    'WRONG_CLOTHING',
+    'WRONG_POSE',
+    'WRONG_COMPOSITION',
+    'WRONG_CAMERA',
+    'WRONG_LOCATION',
+    'MISSING_OBJECT',
+    'EXTRA_OBJECT',
+    'DUPLICATE_OBJECT',
+    'BAD_HANDS',
+    'BAD_TEXT',
+    'STYLE_DRIFT',
+    'REFERENCE_POSE_BLEED',
+    'OTHER',
+  ] as const;
   const [style, setStyle] = useState<VisualStyleSettingsDto | null>(null);
   const [styleForm, setStyleForm] = useState<SceneStyleForm>(defaultSceneStyleForm);
   const [showStyle, setShowStyle] = useState(false);
@@ -3109,6 +3162,7 @@ function ScenesWorkspace({
           draft.id,
           imageInstructions.trim(),
           imageModeOverride || undefined,
+          candidateCount,
         ),
       );
     } catch (cause) {
@@ -3118,6 +3172,7 @@ function ScenesWorkspace({
   const regenerateImage = async (
     generationId: string,
     mode: 'SAME_SEED' | 'NEW_SEED',
+    useReviewFeedback = false,
   ): Promise<void> => {
     if (!draft) return;
     try {
@@ -3128,10 +3183,34 @@ function ScenesWorkspace({
           generationId,
           mode,
           imageModeOverride || undefined,
+          useReviewFeedback,
         ),
       );
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : 'Không thể tạo lại ảnh');
+    }
+  };
+  const reviewImage = async (
+    generationId: string,
+    status: 'REJECTED' | 'UNREVIEWED',
+    scores: Record<string, number> = {},
+    issues: string[] = [],
+    notes = '',
+  ): Promise<void> => {
+    if (!draft) return;
+    try {
+      const saved = await imageApi.review(
+        projectId,
+        draft.id,
+        generationId,
+        status,
+        notes,
+        scores,
+        issues,
+      );
+      setSceneImages((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá ảnh');
     }
   };
   const promoteDisplayedImage = async (): Promise<void> => {
@@ -3160,16 +3239,14 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể chuyển ảnh thành tham chiếu');
     }
   };
-  const reviewImage = async (
-    generationId: string,
-    status: 'ACCEPTED' | 'REJECTED',
-  ): Promise<void> => {
+  const acceptImage = async (generationId: string): Promise<void> => {
     if (!draft) return;
     try {
-      const saved = await imageApi.review(projectId, draft.id, generationId, status);
-      setSceneImages((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+      await imageApi.accept(projectId, draft.id, generationId);
+      setSceneImages(await imageApi.list(projectId, draft.id));
+      onChanged();
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá ảnh');
+      onError(cause instanceof Error ? cause.message : 'Không thể chấp nhận ảnh');
     }
   };
   const selectCurrentImage = async (generationId: string): Promise<void> => {
@@ -3828,6 +3905,22 @@ function ScenesWorkspace({
                     </option>
                   </select>
                 </label>
+                <label className="field">
+                  <span>Số ảnh tạo (GPU)</span>
+                  <select
+                    value={candidateCount}
+                    onChange={(event) => setCandidateCount(Number(event.target.value))}
+                  >
+                    <option value="1">1 ảnh</option>
+                    <option value="2">2 ảnh</option>
+                    <option value="4">4 ảnh</option>
+                  </select>
+                  <small className="muted">Mỗi ảnh là một job GPU riêng, chạy tuần tự.</small>
+                </label>
+                <p className="muted" aria-disabled="true">
+                  Điều khiển ảnh nâng cao: không khả dụng - không có ControlNet tương thích FLUX.2
+                  Klein trên máy.
+                </p>
                 <div className="actions">
                   {!scenePackage && (
                     <button
@@ -3881,7 +3974,7 @@ function ScenesWorkspace({
                       <button
                         type="button"
                         className="secondary"
-                        onClick={() => void reviewImage(displayedImage.id, 'ACCEPTED')}
+                        onClick={() => void acceptImage(displayedImage.id)}
                       >
                         Chấp nhận
                       </button>
@@ -3937,20 +4030,156 @@ function ScenesWorkspace({
                     </button>
                   </div>
                 )}
-                {sceneImages.length > 1 && (
-                  <div className="scene-image-history" aria-label="Lịch sử ảnh cảnh">
+                {sceneImages.length > 0 && (
+                  <div className="candidate-grid" aria-label="Lưới ảnh cảnh">
                     {sceneImages.map((image) => (
+                      <article
+                        key={image.id}
+                        className={`candidate-card${image.id === displayedImage?.id ? ' active' : ''}`}
+                      >
+                        {image.assetUrl ? (
+                          <button
+                            type="button"
+                            className="candidate-thumb"
+                            onClick={() => setSelectedImageId(image.id)}
+                            aria-label={`Xem ảnh v${image.revision}`}
+                          >
+                            <img
+                              src={`${API_BASE}${image.assetUrl}`}
+                              alt={`Ảnh v${image.revision} cho cảnh ${draft.sceneNumber}: ${draft.title}`}
+                              loading="lazy"
+                            />
+                          </button>
+                        ) : (
+                          <div className="candidate-empty">{image.status}</div>
+                        )}
+                        <div className="candidate-meta">
+                          <span>v{image.revision}</span>
+                          <span>Seed {image.actualSeed ?? image.requestedSeed ?? 'n/a'}</span>
+                          <span>{image.reviewStatus}</span>
+                          {image.isCurrent && <strong>HIỆN HÀNH</strong>}
+                          {image.freshness === 'STALE' && <em>Stale</em>}
+                        </div>
+                        {image.status === 'COMPLETED' && (
+                          <div className="candidate-actions">
+                            <button type="button" onClick={() => void acceptImage(image.id)}>
+                              Chấp nhận
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void reviewImage(image.id, 'REJECTED')}
+                            >
+                              Từ chối
+                            </button>
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {displayedImage?.status === 'COMPLETED' && (
+                  <div className="quality-review">
+                    <span className="field-label">
+                      Đánh giá chất lượng ảnh v{displayedImage.revision}
+                    </span>
+                    <div className="score-grid">
+                      {scoreCategories.map((category) => (
+                        <label key={category}>
+                          <span>{category}</span>
+                          <select
+                            value={
+                              reviewDraft.generationId === displayedImage.id
+                                ? (reviewDraft.scores[category] ?? '')
+                                : ''
+                            }
+                            onChange={(event) =>
+                              setReviewDraft({
+                                generationId: displayedImage.id,
+                                scores: {
+                                  ...reviewDraft.scores,
+                                  [category]: Number(event.target.value),
+                                },
+                                issues: reviewDraft.issues,
+                                notes: reviewDraft.notes,
+                              })
+                            }
+                          >
+                            <option value="">-</option>
+                            {[1, 2, 3, 4, 5].map((score) => (
+                              <option key={score} value={score}>
+                                {score}/5
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                    <fieldset>
+                      <legend>Vấn đề</legend>
+                      {issueTags.map((tag) => (
+                        <label key={tag} className="issue-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={
+                              reviewDraft.generationId === displayedImage.id &&
+                              reviewDraft.issues.includes(tag)
+                            }
+                            onChange={(event) =>
+                              setReviewDraft({
+                                generationId: displayedImage.id,
+                                scores: reviewDraft.scores,
+                                issues: event.target.checked
+                                  ? [...reviewDraft.issues, tag]
+                                  : reviewDraft.issues.filter((value) => value !== tag),
+                                notes: reviewDraft.notes,
+                              })
+                            }
+                          />
+                          {tag}
+                        </label>
+                      ))}
+                    </fieldset>
+                    <label>
+                      <span>Ghi chú</span>
+                      <textarea
+                        maxLength={1000}
+                        value={
+                          reviewDraft.generationId === displayedImage.id ? reviewDraft.notes : ''
+                        }
+                        onChange={(event) =>
+                          setReviewDraft({
+                            generationId: displayedImage.id,
+                            scores: reviewDraft.scores,
+                            issues: reviewDraft.issues,
+                            notes: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <div className="actions">
                       <button
                         type="button"
-                        className={image.id === displayedImage?.id ? 'active' : ''}
-                        key={image.id}
-                        onClick={() => setSelectedImageId(image.id)}
+                        className="secondary"
+                        onClick={() => {
+                          void reviewImage(
+                            displayedImage.id,
+                            'REJECTED',
+                            reviewDraft.scores,
+                            reviewDraft.issues,
+                            reviewDraft.notes,
+                          );
+                        }}
                       >
-                        v{image.revision} · {image.status} ·{' '}
-                        {image.actualSeed ?? image.requestedSeed ?? 'n/a'}
-                        {image.isCurrent ? ' · hiện hành' : ''}
+                        Lưu đánh giá (Từ chối)
                       </button>
-                    ))}
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void regenerateImage(displayedImage.id, 'NEW_SEED', true)}
+                      >
+                        Tạo lại theo phản hồi
+                      </button>
+                    </div>
                   </div>
                 )}
                 {sceneImages.filter((image) => image.status === 'COMPLETED' && image.assetUrl)

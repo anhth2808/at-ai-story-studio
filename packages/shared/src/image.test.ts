@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  imageGenerationRequestSchema,
   imageGenerationSettingsSchema,
   imageGenerationSettingsUpdateSchema,
-  imageGenerationRequestSchema,
+  imageQualityReviewUpdateSchema,
   sceneImageGenerationDtoSchema,
+  sceneImageGenerationScheduleSchema,
+  sceneImageRegenerationSchema,
 } from './image.js';
 
 const settings = {
@@ -67,6 +70,11 @@ describe('image contracts', () => {
         status: 'COMPLETED',
         freshness: 'CURRENT',
         reviewStatus: 'UNREVIEWED',
+        review: null,
+        candidateSetId: null,
+        candidateIndex: null,
+        productionReady: false,
+        productionBlockers: [],
         isCurrent: true,
         requestedSeed: 42,
         actualSeed: 42,
@@ -92,5 +100,44 @@ describe('image contracts', () => {
         workflow: {},
       }),
     ).toThrow();
+  });
+  it('bounds candidate counts and defaults feedback fields', () => {
+    expect(sceneImageGenerationScheduleSchema.parse({}).candidateCount).toBe(1);
+    expect(sceneImageGenerationScheduleSchema.parse({ candidateCount: 4 }).candidateCount).toBe(4);
+    expect(() => sceneImageGenerationScheduleSchema.parse({ candidateCount: 5 })).toThrow();
+    expect(sceneImageRegenerationSchema.parse({ mode: 'NEW_SEED' }).useReviewFeedback).toBe(false);
+    expect(imageGenerationRequestSchema.parse(generation).reviewFeedback).toBeNull();
+  });
+
+  it('validates structured review updates', () => {
+    const review = imageQualityReviewUpdateSchema.parse({
+      status: 'REJECTED',
+      scores: { IDENTITY: 2, COMPOSITION: 1, OVERALL: 2 },
+      issues: ['WRONG_COMPOSITION', 'REFERENCE_POSE_BLEED'],
+      notes: 'Engine room lost; reference framing dominates.',
+    });
+    expect(review.status).toBe('REJECTED');
+    expect(() =>
+      imageQualityReviewUpdateSchema.parse({ status: 'REJECTED', scores: { COMPOSITION: 0 } }),
+    ).toThrow();
+    expect(() =>
+      imageQualityReviewUpdateSchema.parse({ status: 'REJECTED', scores: { OVERALL: 6 } }),
+    ).toThrow();
+    expect(() =>
+      imageQualityReviewUpdateSchema.parse({
+        status: 'REJECTED',
+        issues: ['WRONG_POSE', 'WRONG_POSE'],
+      }),
+    ).toThrow();
+    expect(() =>
+      imageQualityReviewUpdateSchema.parse({ status: 'REJECTED', issues: ['NOT_A_TAG'] }),
+    ).toThrow();
+    expect(() =>
+      imageQualityReviewUpdateSchema.parse({ status: 'ACCEPTED', issues: ['WRONG_POSE'] }),
+    ).toThrow();
+  });
+
+  it('defaults approval policy off', () => {
+    expect(imageGenerationSettingsSchema.parse(settings).requireImageApproval).toBe(false);
   });
 });

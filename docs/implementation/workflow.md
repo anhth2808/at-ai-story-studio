@@ -99,6 +99,16 @@ inputs change while ComfyUI runs, a validated result may remain historical but
 cannot become current. Manual uploads enter the same revision/current model
 without a provider job.
 
+Prompt #11 candidate quality loop: one Scene request may create 1-4 candidates
+in one persisted candidate set (max 40 jobs per multi-candidate batch, checked
+before writes). Completing candidates never silently replace the Scene's current
+image; the user reviews candidates in a grid, saves structured scores/issues/
+notes, rejects with feedback, and accepts one candidate - which atomically sets
+review ACCEPTED and both current pointers. Feedback regeneration assembles
+deterministic guidance from the review and the current Scene/package (no LLM),
+creates a new one-candidate set, and stops for review. See `image-quality.md`,
+`candidate-generation.md`, and `regeneration-feedback.md`.
+
 Chapter and selected-Scene batches materialize bounded independent one-step
 jobs. With one worker, effective ComfyUI generation concurrency remains one.
 Image completion never schedules rendering or video generation.

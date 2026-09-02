@@ -290,6 +290,13 @@ not reconstruct Story context or mutate canonical visual profiles.
 A generated image whose package, settings, fingerprint, or active lease became
 stale may remain historical, but it must never replace the current Scene image.
 
+Advanced visual controls must be additive: TEXT_ONLY and the proven
+reference-conditioned workflow must remain functional whenever any new control
+technique is introduced.
+
+Image quality review must never mutate canonical Story, Scene, or Character
+Visual identity data; review feedback may only shape new generation requests.
+
 # TTS
 
 Never assume a provider accepts arbitrarily long text.

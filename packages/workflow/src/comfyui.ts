@@ -488,6 +488,13 @@ export class ComfyUiImageProvider implements ImageProvider {
           },
           samplerChoices,
           conditioning: conditioningReadiness,
+          advancedControl: {
+            status: 'NOT_ADOPTED',
+            technique: null,
+            reasonCode: 'NO_COMPATIBLE_CONTROL_MODEL',
+            message:
+              'No ControlNet-compatible model for FLUX.2 Klein is installed; candidate review and feedback regeneration remain available',
+          },
         },
       });
     } catch (error) {

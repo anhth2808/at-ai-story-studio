@@ -6,11 +6,14 @@ import {
   type ImageGenerationErrorCode,
   type ImageConditioningCharacter,
   type ImageConditioningMode,
+  type ImageQualityIssue,
+  type ImageReviewFeedback,
   type ImageWorkflowTemplate,
 } from '@studio/shared';
 import { z } from 'zod';
 import {
   AssetRepository,
+  SceneImageCandidateSetRepository,
   ImageGenerationSettingsRepository,
   SceneImageGenerationRepository,
   SceneRepository,
@@ -53,6 +56,8 @@ import {
 import {
   imageGenerationFingerprint,
   imageSettingsFingerprint,
+  IMAGE_CANDIDATE_BATCH_MAX_JOBS,
+  resolveCandidateSeeds,
   resolveImageSeed,
 } from './image-generation.js';
 import type { StudioContext } from './index.js';
@@ -76,7 +81,7 @@ const scheduledRequestSchema = z
     settingsFingerprint: z.string().min(1).max(128),
     conditioningWarnings: z.array(z.string().min(1).max(500)).max(20).default([]),
   })
-  .strict();
+  .passthrough();
 
 const imageStepPayloadSchema = z
   .object({ projectId: z.string().uuid(), generationId: z.string().uuid() })
@@ -101,6 +106,7 @@ export class ImageGenerationService {
   private readonly workflow: WorkflowRepository;
   private readonly scenes: SceneRepository;
   private readonly packages: VisualPromptPackageRepository;
+  private readonly candidateSets: SceneImageCandidateSetRepository;
 
   constructor(
     private readonly context: StudioContext,
@@ -111,9 +117,63 @@ export class ImageGenerationService {
     this.workflow = new WorkflowRepository(context.database);
     this.scenes = new SceneRepository(context.database);
     this.packages = new VisualPromptPackageRepository(context.database);
+    this.candidateSets = new SceneImageCandidateSetRepository(context.database);
     this.assets = new AssetRepository(context.database);
   }
   private readonly assets: AssetRepository;
+
+  // Deterministic issue -> guidance translation. Reads only current Scene
+  // and package data; never mutates canonical Story/profile/Scene records.
+  private buildReviewFeedback(
+    projectId: Id,
+    sceneId: Id,
+    source: SceneImageGenerationDto,
+  ): ImageReviewFeedback | null {
+    const review = source.review;
+    if (!review || review.status !== 'REJECTED') return null;
+    if (!review.issues.length && !review.notes.trim()) return null;
+    const scene = this.scene(projectId, sceneId);
+    const parts: string[] = [];
+    const byIssue = new Set<ImageQualityIssue>(review.issues);
+    if (byIssue.has('WRONG_FACE') || byIssue.has('WRONG_HAIR') || byIssue.has('WRONG_CLOTHING'))
+      parts.push(
+        'Keep the approved reference identity for every character: same face, hair, and clothing as the reference image',
+      );
+    if (
+      byIssue.has('WRONG_POSE') ||
+      byIssue.has('WRONG_COMPOSITION') ||
+      byIssue.has('WRONG_CAMERA') ||
+      byIssue.has('REFERENCE_POSE_BLEED')
+    )
+      parts.push(
+        `Follow the Scene composition and camera exactly (${scene.camera.framing}${
+          scene.camera.angle ? `, ${scene.camera.angle}` : ''
+        }): ${scene.composition.subjectFocus}. Do not copy the reference image framing or pose`,
+      );
+    if (byIssue.has('MISSING_OBJECT'))
+      parts.push(`Show the required objects clearly: ${scene.importantObjects.join(', ')}`);
+    if (byIssue.has('EXTRA_OBJECT') || byIssue.has('DUPLICATE_OBJECT'))
+      parts.push(
+        `Render only the objects named by the Scene; no extra or duplicated props beyond ${scene.importantObjects.join(', ')}`,
+      );
+    if (byIssue.has('BAD_HANDS')) parts.push('Render natural, correct hands with five fingers');
+    if (byIssue.has('BAD_TEXT')) parts.push('Do not render any readable text');
+    if (byIssue.has('STYLE_DRIFT'))
+      parts.push('Match the established visual style exactly; no style drift');
+    if (review.notes.trim()) parts.push(review.notes.trim());
+    const guidance = parts.join('. ').slice(0, 2000);
+    return {
+      version: 'image-review-feedback-v1',
+      sourceGenerationId: source.id,
+      sourceReview: {
+        status: review.status,
+        scores: review.scores,
+        issues: review.issues,
+        notes: review.notes,
+      },
+      guidance,
+    };
+  }
 
   getSettings(projectId: Id): ImageGenerationSettingsDto {
     this.assertProject(projectId);
@@ -167,9 +227,9 @@ export class ImageGenerationService {
       undefined,
       executionId,
       request.conditioningMode,
+      request.candidateCount,
     );
   }
-
   regenerate(
     projectId: Id,
     sceneId: Id,
@@ -179,6 +239,15 @@ export class ImageGenerationService {
     const request = sceneImageRegenerationSchema.parse(value);
     const scene = this.scene(projectId, sceneId);
     const previous = this.getGeneration(projectId, sceneId, generationId);
+    const feedback = request.useReviewFeedback
+      ? this.buildReviewFeedback(projectId, sceneId, previous)
+      : null;
+    if (request.useReviewFeedback && !feedback)
+      throw new AppError(
+        'INVALID_INPUT',
+        'Review-feedback regeneration requires a rejected candidate with issues or notes',
+        409,
+      );
     const seed =
       request.mode === 'SAME_SEED'
         ? (previous.actualSeed ?? previous.requestedSeed)
@@ -193,11 +262,23 @@ export class ImageGenerationService {
       seed,
       executionId,
       request.conditioningMode,
+      1,
+      feedback,
     );
   }
 
   scheduleBatch(projectId: Id, value: unknown): ImageBatchScheduleResult {
     const request = imageGenerationBatchSchema.parse(value);
+    const candidateJobs = Math.max(1, request.candidateCount);
+    if (
+      candidateJobs > 1 &&
+      request.sceneIds.length * candidateJobs > IMAGE_CANDIDATE_BATCH_MAX_JOBS
+    )
+      throw new AppError(
+        'INVALID_INPUT',
+        `Multi-candidate batches are limited to ${IMAGE_CANDIDATE_BATCH_MAX_JOBS} total jobs`,
+        400,
+      );
     this.assertProject(projectId);
     const scenes = request.sceneIds.map((sceneId) => this.scene(projectId, sceneId));
     const executionId = this.workflow.createExecution(projectId, 'IMAGE_GENERATION');
@@ -212,7 +293,17 @@ export class ImageGenerationService {
         skippedSceneIds.push(scene.id);
         continue;
       }
-      jobs.push(this.scheduleScene(projectId, scene, '', undefined, executionId));
+      jobs.push(
+        this.scheduleScene(
+          projectId,
+          scene,
+          '',
+          undefined,
+          executionId,
+          undefined,
+          request.candidateCount,
+        ),
+      );
     }
     return { executionId, jobs, skippedSceneIds };
   }
@@ -299,6 +390,26 @@ export class ImageGenerationService {
       generationId,
       sceneImageReviewUpdateSchema.parse(value),
     );
+  }
+  acceptCandidate(
+    projectId: Id,
+    sceneId: Id,
+    generationId: Id,
+    value: unknown,
+  ): SceneImageGenerationDto {
+    const scene = this.scene(projectId, sceneId);
+    this.getGeneration(projectId, sceneId, generationId);
+    return this.generations.acceptCandidate(
+      projectId,
+      scene.stableId,
+      generationId,
+      sceneImageReviewUpdateSchema.parse(value),
+    );
+  }
+
+  listCandidateSets(projectId: Id, sceneId: Id, limit = 50, offset = 0) {
+    const scene = this.scene(projectId, sceneId);
+    return this.candidateSets.list(projectId, scene.stableId, limit, offset);
   }
 
   setCurrent(
@@ -484,6 +595,10 @@ export class ImageGenerationService {
       );
     }
   }
+  // Creates one candidate set and schedules `candidateCount` independent
+  // generations inside one transaction. Seeds are resolved before writes;
+  // retry/restart recovery keeps working per candidate via the full request
+  // snapshot stored on each generation.
   private scheduleScene(
     projectId: Id,
     scene: SceneDto,
@@ -491,6 +606,8 @@ export class ImageGenerationService {
     requestedSeed: number | undefined,
     executionId: Id,
     conditioningModeOverride?: ImageConditioningMode,
+    candidateCount = 1,
+    feedback?: ImageReviewFeedback | null,
   ): ImageScheduleResult {
     this.assertSchedulable(scene);
     const settings = this.settings.getOrCreate(projectId);
@@ -501,8 +618,12 @@ export class ImageGenerationService {
         'A current Visual Prompt Package is required',
         409,
       );
-    const seed = requestedSeed ?? resolveImageSeed(settings.seedMode, settings.fixedSeed);
-    const providerJobId = randomUUID();
+    if (feedback && requestedSeed === undefined)
+      throw new AppError('INVALID_INPUT', 'Feedback regeneration requires a concrete seed', 400);
+    const seeds =
+      requestedSeed !== undefined
+        ? [requestedSeed]
+        : resolveCandidateSeeds(settings.seedMode, settings.fixedSeed, candidateCount);
     const references = collectReferenceAssetIds(packageDto.payload).map((assetId) => ({ assetId }));
     const conditioningMode = conditioningModeOverride ?? settings.conditioningMode;
     const { conditioning, workflowTemplate, conditioningWarnings } = this.resolveConditioning(
@@ -510,34 +631,6 @@ export class ImageGenerationService {
       packageDto,
       conditioningMode,
     );
-    const request = imageGenerationRequestSchema.parse({
-      projectId,
-      sceneId: scene.id,
-      visualPromptPackageId: packageDto.id,
-      providerJobId,
-      prompt: packageDto.payload.fullPrompt,
-      negativePrompt: packageDto.payload.negativePrompt,
-      width: settings.width,
-      height: settings.height,
-      seed,
-      steps: settings.steps,
-      guidance: settings.guidance,
-      samplerHint: settings.sampler,
-      referenceImages: references,
-      providerSettings: {
-        provider: settings.provider,
-        baseUrl: settings.baseUrl,
-        workflowTemplate,
-        diffusionModel: settings.diffusionModel,
-        textEncoder: settings.textEncoder,
-        vaeName: settings.vaeName,
-        sampler: settings.sampler,
-        connectionTimeoutMs: settings.connectionTimeoutMs,
-        generationTimeoutMs: settings.generationTimeoutMs,
-      },
-      conditioning,
-      generationInstructions: instructions,
-    });
     const settingsFingerprint = imageSettingsFingerprint(settings);
     if (settingsFingerprint !== settings.inputFingerprint)
       throw new AppError(
@@ -545,58 +638,126 @@ export class ImageGenerationService {
         'Image generation settings fingerprint is invalid',
         500,
       );
-    const inputFingerprint = imageGenerationFingerprint({
-      operation: 'GENERATE_SCENE_IMAGE',
-      projectId,
-      sceneId: scene.id,
-      sceneStableId: scene.stableId,
-      sceneRevision: scene.revision,
-      packageId: packageDto.id,
-      packageFingerprint: packageDto.payload.inputFingerprint,
-      settingsFingerprint,
-      workflowTemplate,
-      request,
-    });
-    const generation = this.generations.create({
+    const candidateSet = this.candidateSets.create({
       projectId,
       sceneStableId: scene.stableId,
       sceneRevisionId: scene.id,
       visualPromptPackageId: packageDto.id,
-      source: 'GENERATED',
-      provider: settings.provider,
-      requestedSeed: seed,
-      requestedWidth: request.width,
-      requestedHeight: request.height,
-      providerJobId,
+      mode: conditioningMode,
       workflowTemplate,
-      modelSettings: request.providerSettings,
       packageFingerprint: packageDto.payload.inputFingerprint,
       settingsFingerprint,
-      inputFingerprint,
+      requestedCount: seeds.length,
+      sourceGenerationId: feedback?.sourceGenerationId ?? null,
       generationInstructions: instructions || null,
       metadata: {
-        request,
-        packageFingerprint: packageDto.payload.inputFingerprint,
-        settingsFingerprint,
         conditioningWarnings,
+        ...(feedback ? { reviewFeedback: feedback } : {}),
       },
     });
-    const stepId = this.workflow.createStep(
-      executionId,
-      `scene-image:${scene.id}:${generation.revision}`,
-      'GENERATE_SCENE_IMAGE',
-      scene.id,
-      inputFingerprint,
-      3,
-      { projectId, generationId: generation.id },
-    );
-    this.generations.linkWorkflowStep(projectId, generation.id, stepId);
-    return {
-      executionId,
-      stepId,
-      jobId: this.workflow.createJob('GENERATE_SCENE_IMAGE', generation.id, stepId),
-      generation,
-    };
+    let lastResult: ImageScheduleResult | null = null;
+    seeds.forEach((seed, index) => {
+      const providerJobId = randomUUID();
+      const request = imageGenerationRequestSchema.parse({
+        projectId,
+        sceneId: scene.id,
+        visualPromptPackageId: packageDto.id,
+        providerJobId,
+        prompt: packageDto.payload.fullPrompt,
+        negativePrompt: packageDto.payload.negativePrompt,
+        width: settings.width,
+        height: settings.height,
+        seed,
+        steps: settings.steps,
+        guidance: settings.guidance,
+        samplerHint: settings.sampler,
+        referenceImages: references,
+        providerSettings: {
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          workflowTemplate,
+          diffusionModel: settings.diffusionModel,
+          textEncoder: settings.textEncoder,
+          vaeName: settings.vaeName,
+          sampler: settings.sampler,
+          connectionTimeoutMs: settings.connectionTimeoutMs,
+          generationTimeoutMs: settings.generationTimeoutMs,
+        },
+        conditioning,
+        generationInstructions: instructions,
+        reviewFeedback: feedback ?? null,
+      });
+      const inputFingerprint = imageGenerationFingerprint({
+        operation: 'GENERATE_SCENE_IMAGE',
+        projectId,
+        sceneId: scene.id,
+        sceneStableId: scene.stableId,
+        sceneRevision: scene.revision,
+        packageId: packageDto.id,
+        packageFingerprint: packageDto.payload.inputFingerprint,
+        settingsFingerprint,
+        workflowTemplate,
+        request,
+      });
+      const generation = this.generations.create({
+        projectId,
+        sceneStableId: scene.stableId,
+        sceneRevisionId: scene.id,
+        visualPromptPackageId: packageDto.id,
+        source: 'GENERATED',
+        provider: settings.provider,
+        requestedSeed: seed,
+        requestedWidth: request.width,
+        requestedHeight: request.height,
+        providerJobId,
+        workflowTemplate,
+        modelSettings: request.providerSettings,
+        packageFingerprint: packageDto.payload.inputFingerprint,
+        settingsFingerprint,
+        inputFingerprint,
+        generationInstructions: instructions || null,
+        metadata: {
+          request,
+          packageFingerprint: packageDto.payload.inputFingerprint,
+          settingsFingerprint,
+          conditioningWarnings,
+          candidateSetId: candidateSet.id,
+          candidateIndex: index + 1,
+          candidateCount: seeds.length,
+        },
+      });
+      this.linkCandidate(projectId, generation.id, candidateSet.id, index + 1);
+      const stepId = this.workflow.createStep(
+        executionId,
+        `scene-image:${scene.id}:${generation.revision}`,
+        'GENERATE_SCENE_IMAGE',
+        scene.id,
+        inputFingerprint,
+        3,
+        { projectId, generationId: generation.id },
+      );
+      this.generations.linkWorkflowStep(projectId, generation.id, stepId);
+      lastResult = {
+        executionId,
+        stepId,
+        jobId: this.workflow.createJob('GENERATE_SCENE_IMAGE', generation.id, stepId),
+        generation,
+      };
+    });
+    return lastResult!;
+  }
+
+  private linkCandidate(
+    projectId: Id,
+    generationId: Id,
+    candidateSetId: Id,
+    candidateIndex: number,
+  ): void {
+    this.context.database.sqlite
+      .prepare(
+        'UPDATE scene_image_generations SET candidate_set_id=?,candidate_index=? WHERE project_id=? AND id=?',
+      )
+      .run(candidateSetId, candidateIndex, projectId, generationId);
   }
 
   // Explicit CharacterId -> reference binding. Only the approved PRIMARY

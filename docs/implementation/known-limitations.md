@@ -118,6 +118,31 @@
 - Image generation does not select a best output automatically and does not
   hand images to FFmpeg, background media, image-to-video, or AI video.
 
+## Image quality workflow limits (Prompt #11)
+
+- Advanced image control is NOT adopted: `ADVANCED_CONTROL_TECHNIQUE = NONE`.
+  Native ControlNet nodes exist locally but no FLUX.2 Klein-compatible control
+  model is installed; exact pose/composition control therefore remains
+  probabilistic. Candidate selection plus deterministic feedback is the
+  mitigation, not deterministic control. See `advanced-image-control.md`.
+- Candidate sets are capped at 4 per Scene and 40 jobs per multi-candidate
+  batch. Effective generation concurrency stays 1, so a 4-candidate set takes
+  roughly 4x one generation's wall time.
+- Multi-candidate results never auto-select. A Scene with only candidates and
+  no accepted image keeps an empty current slot until the user accepts one
+  (except the legacy single-candidate first-image behavior when approval is
+  off and no current image exists).
+- `requireImageApproval` gates downstream readiness only. No downstream
+  image-to-video pipeline consumes it yet.
+- Feedback guidance is deterministic prompt reinforcement. It cannot force a
+  composition the way a ControlNet would; its measured effect is in
+  `control-benchmark.md`.
+- Rejecting the current image leaves it current (with `REJECTED` status); the
+  system never guesses a replacement. With approval enabled it fails the gate
+  until another image is accepted.
+- Multi-character conditioning remains LIMITED (unchanged from Prompt #10);
+  candidate/feedback workflows do not change identity-swap risk.
+
 ## Verification record
 
 The supported Bun OMP host passed:

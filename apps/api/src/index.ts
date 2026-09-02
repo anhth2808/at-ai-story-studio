@@ -59,8 +59,8 @@ import {
   imageGenerationSettingsUpdateSchema,
   sceneImageCurrentSelectionSchema,
   sceneImageGenerationScheduleSchema,
-  sceneImageRegenerationSchema,
   sceneImageManualUploadSchema,
+  sceneImageRegenerationSchema,
   sceneImageReviewUpdateSchema,
 } from '@studio/shared';
 import type { OmpReadiness } from '@studio/shared';
@@ -1021,6 +1021,29 @@ app.put('/api/projects/:projectId/scenes/:sceneId/images/:generationId/review', 
     idSchema.parse(params.sceneId),
     idSchema.parse(params.generationId),
     sceneImageReviewUpdateSchema.parse(request.body),
+  );
+});
+app.put('/api/projects/:projectId/scenes/:sceneId/images/:generationId/accept', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.images.acceptCandidate(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+    sceneImageReviewUpdateSchema.parse(request.body ?? {}),
+  );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/images/candidate-sets', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.images.listCandidateSets(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
   );
 });
 app.put(

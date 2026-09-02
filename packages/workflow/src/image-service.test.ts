@@ -372,6 +372,95 @@ describe('ImageGenerationService', () => {
     expect(staleGeneration.assetId).toBeNull();
     database.sqlite.close();
   });
+
+  it('schedules four candidates with unique seeds, one set, and keeps them non-current', async () => {
+    const { context, database, fixture } = await setup();
+    const studio = new StudioService(context);
+    studio.visual.buildPromptPackage({ projectId, sceneId });
+    const images = createImageGenerationService(
+      context,
+      new FixtureProvider(fixture, context.workspace.staging),
+    );
+    configure(images);
+    const scheduled = images.schedule(projectId, sceneId, { candidateCount: 4 });
+    const all = images.listGenerations(projectId, sceneId);
+    expect(all).toHaveLength(4);
+    const seeds = new Set(all.map((image) => image.requestedSeed));
+    expect(seeds.size).toBe(4);
+    const metadata = scheduled.generation.metadata as {
+      candidateSetId: string;
+      candidateIndex: number;
+    };
+    expect(metadata.candidateSetId).toBeTruthy();
+    const workflow = new WorkflowRepository(database);
+    let step = workflow.claim('image-worker');
+    while (step) {
+      await images.executeStep(step, 'image-worker');
+      workflow.complete(step);
+      step = workflow.claim('image-worker');
+    }
+    const after = images.listGenerations(projectId, sceneId);
+    expect(after.every((image) => image.status === 'COMPLETED')).toBe(true);
+    expect(after.every((image) => !image.isCurrent)).toBe(true);
+    expect(after.every((image) => image.productionBlockers.includes('NOT_CURRENT'))).toBe(true);
+    // Accept one candidate; it becomes the only current image.
+    const accepted = images.acceptCandidate(projectId, sceneId, after[2]!.id, {
+      status: 'REJECTED',
+      issues: [],
+      notes: 'selected',
+    });
+    expect(accepted.isCurrent).toBe(true);
+    expect(
+      images.listGenerations(projectId, sceneId).filter((image) => image.isCurrent),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('regenerates with deterministic review feedback and fresh reference mapping', async () => {
+    const { context, database, fixture } = await setup();
+    const studio = new StudioService(context);
+    studio.visual.buildPromptPackage({ projectId, sceneId });
+    const images = createImageGenerationService(
+      context,
+      new FixtureProvider(fixture, context.workspace.staging),
+    );
+    configure(images);
+    const first = images.schedule(projectId, sceneId, {});
+    const workflow = new WorkflowRepository(database);
+    const step = workflow.claim('image-worker')!;
+    await images.executeStep(step, 'image-worker');
+    workflow.complete(step);
+    images.updateReview(projectId, sceneId, first.generation.id, {
+      status: 'REJECTED',
+      scores: { COMPOSITION: 2, OVERALL: 2 },
+      issues: ['WRONG_COMPOSITION', 'MISSING_OBJECT', 'REFERENCE_POSE_BLEED'],
+      notes: 'Engine room framing was lost',
+    });
+    const regenerated = images.regenerate(projectId, sceneId, first.generation.id, {
+      mode: 'SAME_SEED',
+      useReviewFeedback: true,
+    });
+    const request = regenerated.generation.metadata as {
+      request: { reviewFeedback: { guidance: string; sourceGenerationId: string } | null };
+    };
+    const feedback = request.request.reviewFeedback;
+    expect(feedback).not.toBeNull();
+    expect(feedback!.sourceGenerationId).toBe(first.generation.id);
+    expect(feedback!.guidance).toContain('composition and camera');
+    expect(feedback!.guidance).toContain('Do not copy the reference image framing');
+    expect(feedback!.guidance).toContain('required objects');
+    const completedFirst = images.getGeneration(projectId, sceneId, first.generation.id);
+    expect(regenerated.generation.requestedSeed).toBe(completedFirst.actualSeed);
+    // Feedback-less regeneration request is rejected without a rejected review.
+    const plain = images.schedule(projectId, sceneId, {});
+    expect(() =>
+      images.regenerate(projectId, sceneId, plain.generation.id, {
+        mode: 'SAME_SEED',
+        useReviewFeedback: true,
+      }),
+    ).toThrow();
+    database.sqlite.close();
+  });
 });
 
 describe('Conditioned batch generation isolation', () => {
@@ -538,6 +627,45 @@ describe('Conditioned batch generation isolation', () => {
         (generation) => generation.status === 'COMPLETED' && generation.attempt === 1,
       ),
     ).toHaveLength(5);
+    database.sqlite.close();
+  });
+});
+
+describe('Candidate batch guardrails', () => {
+  it('rejects excessive multi-candidate batches before any writes', async () => {
+    const { context, database, fixture } = await setup();
+    const studio = new StudioService(context);
+    studio.visual.buildPromptPackage({ projectId, sceneId });
+    const images = createImageGenerationService(
+      context,
+      new FixtureProvider(fixture, context.workspace.staging),
+    );
+    configure(images);
+    const sceneIds = Array.from({ length: 11 }, (_, index) =>
+      index === 0
+        ? sceneId
+        : `${index === 10 ? '7' : '8'}${String(index).padStart(7, '0')}-7777-4777-8777-77777777777${index === 10 ? '0' : index}`,
+    );
+    expect(() =>
+      images.scheduleBatch(projectId, {
+        sceneIds,
+        onlyMissing: true,
+        includeStale: false,
+        candidateCount: 4,
+      }),
+    ).toThrow(/limited to 40/u);
+    const setCount = database.sqlite
+      .prepare('SELECT COUNT(*) as count FROM scene_image_candidate_sets')
+      .get() as { count: number };
+    const generationCount = database.sqlite
+      .prepare('SELECT COUNT(*) as count FROM scene_image_generations')
+      .get() as { count: number };
+    const stepCount = database.sqlite
+      .prepare('SELECT COUNT(*) as count FROM workflow_steps')
+      .get() as { count: number };
+    expect(setCount.count).toBe(0);
+    expect(generationCount.count).toBe(0);
+    expect(stepCount.count).toBe(0);
     database.sqlite.close();
   });
 });

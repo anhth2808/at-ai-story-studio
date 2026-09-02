@@ -25,7 +25,13 @@ Consistency Service owns canonical visual profiles, the project Style Bible,
 object resolution, deterministic Visual Prompt Packages, and scoped visual
 invalidation. The Image Generation Service consumes one current package,
 maps it to a controlled ComfyUI graph, and owns durable image revisions,
-validation, Assets, freshness, and current selection. Reference conditioning reuses the same boundary: an explicit CharacterId-to-reference mapping derived from approved Visual Profile references is part of the request, fingerprint, and persisted metadata, and only the approved `reference-character-v1` native workflow conditions on references. Image providers do not
+validation, Assets, freshness, candidate sets, structured quality review, and current
+selection. Candidate sets group bounded generation attempts (1-4 per Scene request)
+without changing the job model: each candidate stays an independently retryable image
+revision, and multi-candidate results never auto-replace the Scene's current image -
+explicit Accept atomically promotes review and current pointers. Feedback-aware
+regeneration derives guidance deterministically from the persisted review and the
+current Scene/package without LLM calls or canonical-data mutation. Reference conditioning reuses the same boundary: an explicit CharacterId-to-reference mapping derived from approved Visual Profile references is part of the request, fingerprint, and persisted metadata, and only the approved `reference-character-v1` native workflow conditions on references. Image providers do not
 rebuild Story context or mutate canonical profiles.
 
 The Story Engine owns settings, blueprint, stable characters, dynamic CharacterState, arcs, plan windows, summaries, threads, facts, events, continuity lineage, and generation provenance. Stories up to 20 chapters may use the existing project-wide plan. Larger stories use ordered gap-free arcs and 10-25 chapter planning windows, defaulting to 20.

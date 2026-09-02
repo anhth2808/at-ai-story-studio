@@ -18,6 +18,26 @@ export function resolveImageSeed(seedMode: ImageSeedMode, fixedSeed: number | nu
   return randomInt(0, 2_147_483_647);
 }
 
+export const IMAGE_CANDIDATE_MAX_COUNT = 4;
+export const IMAGE_CANDIDATE_BATCH_MAX_JOBS = 40;
+
+export function resolveCandidateSeeds(
+  seedMode: ImageSeedMode,
+  fixedSeed: number | null,
+  count: number,
+): number[] {
+  const total = Math.min(Math.max(1, Math.trunc(count)), IMAGE_CANDIDATE_MAX_COUNT);
+  const first = resolveImageSeed(seedMode, fixedSeed);
+  if (total === 1) return [first];
+  const seeds = new Set<number>([first]);
+  let next = first;
+  while (seeds.size < total) {
+    next = (next + 1) % 2_147_483_647;
+    seeds.add(next);
+  }
+  return [...seeds];
+}
+
 export function imageSettingsFingerprint(settings: ImageGenerationSettings): string {
   return imageGenerationFingerprint({
     provider: settings.provider,

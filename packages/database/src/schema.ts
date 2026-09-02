@@ -1228,8 +1228,9 @@ export const imageGenerationSettings = sqliteTable(
     seedMode: text('seed_mode').notNull().default('RANDOM'),
     fixedSeed: integer('fixed_seed'),
     rowVersion: integer('row_version').notNull().default(1),
-    inputFingerprint: text('input_fingerprint').notNull(),
-    ...timestamps,
+    requireImageApproval: integer('require_image_approval', { mode: 'boolean' })
+      .notNull()
+      .default(false),
   },
   (table) => ({
     project: uniqueIndex('image_generation_settings_project_idx').on(table.projectId),
@@ -1273,6 +1274,10 @@ export const sceneImageGenerations = sqliteTable(
       onDelete: 'set null',
     }),
     assetId: text('asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    candidateSetId: text('candidate_set_id'),
+    candidateIndex: integer('candidate_index'),
+    reviewScores: text('review_scores').notNull().default('{}'),
+    reviewIssues: text('review_issues').notNull().default('[]'),
     attempt: integer('attempt').notNull().default(0),
     durationMs: integer('duration_ms'),
     errorCode: text('error_code'),
@@ -1305,5 +1310,40 @@ export const sceneImageGenerations = sqliteTable(
       table.updatedAt,
     ),
     providerJob: index('scene_image_generations_provider_job_idx').on(table.providerJobId),
+  }),
+);
+
+export const sceneImageCandidateSets = sqliteTable(
+  'scene_image_candidate_sets',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    visualPromptPackageId: text('visual_prompt_package_id').references(
+      () => visualPromptPackages.id,
+      { onDelete: 'set null' },
+    ),
+    mode: text('mode').notNull().default('TEXT_ONLY'),
+    workflowTemplate: text('workflow_template'),
+    packageFingerprint: text('package_fingerprint'),
+    settingsFingerprint: text('settings_fingerprint'),
+    requestedCount: integer('requested_count').notNull(),
+    sourceGenerationId: text('source_generation_id'),
+    generationInstructions: text('generation_instructions'),
+    metadata: text('metadata').notNull().default('{}'),
+    ...timestamps,
+  },
+  (table) => ({
+    scene: index('scene_image_candidate_sets_scene_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.createdAt,
+    ),
+    project: index('scene_image_candidate_sets_project_idx').on(table.projectId, table.createdAt),
   }),
 );

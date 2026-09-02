@@ -22,6 +22,7 @@ const settings = {
   seedMode: 'FIXED' as const,
   fixedSeed: 42,
   conditioningMode: 'TEXT_ONLY' as const,
+  requireImageApproval: false,
 };
 
 describe('image generation helpers', () => {
@@ -34,6 +35,19 @@ describe('image generation helpers', () => {
     );
     expect(imageSettingsFingerprint(settings)).not.toBe(
       imageSettingsFingerprint({ ...settings, guidance: 6 }),
+    );
+    expect(imageSettingsFingerprint({ ...settings, requireImageApproval: false })).toBe(
+      imageSettingsFingerprint({ ...settings, requireImageApproval: true }),
+    );
+  });
+
+  it('fingerprints review feedback and seed but never grouping metadata', () => {
+    const feedback = { version: 'image-review-feedback-v1', guidance: 'reframe' };
+    expect(imageGenerationFingerprint({ seed: 42, feedback })).not.toBe(
+      imageGenerationFingerprint({ seed: 42, feedback: null }),
+    );
+    expect(imageGenerationFingerprint({ seed: 42, feedback })).toBe(
+      imageGenerationFingerprint({ feedback, seed: 42 }),
     );
   });
 

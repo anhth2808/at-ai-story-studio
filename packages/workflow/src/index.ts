@@ -298,7 +298,12 @@ export class StudioService {
       const sceneIds = this.scenes.listCurrentSceneIds(null, projectId, locationId);
       this.workflow.invalidateEntities(
         sceneIds,
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
+        [
+          'REGENERATE_SCENE',
+          'GENERATE_SCENE_PROMPT',
+          'BUILD_VISUAL_PROMPT',
+          'GENERATE_SCENE_IMAGE',
+        ],
         'Location changed',
       );
       return saved;
@@ -322,7 +327,12 @@ export class StudioService {
       const saved = this.scenes.updateScene(scene.id, sceneEditSchema.parse(input));
       this.workflow.invalidateEntities(
         [scene.id],
-        ['REGENERATE_SCENE', 'GENERATE_SCENE_PROMPT', 'BUILD_VISUAL_PROMPT', 'GENERATE_SCENE_IMAGE'],
+        [
+          'REGENERATE_SCENE',
+          'GENERATE_SCENE_PROMPT',
+          'BUILD_VISUAL_PROMPT',
+          'GENERATE_SCENE_IMAGE',
+        ],
         'Scene changed',
       );
       return saved;

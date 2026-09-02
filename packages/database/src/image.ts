@@ -3,16 +3,21 @@ import {
   AppError,
   imageGenerationSettingsSchema,
   imageGenerationSettingsUpdateSchema,
+  imageQualityReviewSchema,
+  sceneImageCandidateSetDtoSchema,
   sceneImageGenerationDtoSchema,
   sceneImageReviewUpdateSchema,
   type Id,
+  type ImageConditioningMode,
   type ImageGenerationSettings,
   type ImageGenerationSettingsDto,
   type ImageGenerationSettingsUpdate,
+  type ImageQualityReview,
   type ImageProvider,
   type ImageWorkflowTemplate,
+  type SceneImageCandidateSetDto,
   type SceneImageGenerationDto,
-  type SceneImageReviewUpdate,
+  type ImageQualityReviewUpdate,
   type SceneImageSource,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
@@ -517,6 +522,19 @@ export class SceneImageGenerationRepository {
         currentSettings &&
         generation.settingsFingerprint === currentSettings.inputFingerprint,
       );
+      const existingCurrent = this.database.sqlite
+        .prepare(
+          'SELECT 1 FROM scene_image_generations WHERE project_id=? AND scene_stable_id=? AND is_current=1',
+        )
+        .get(input.projectId, input.sceneStableId);
+      const approval = this.database.sqlite
+        .prepare(
+          'SELECT require_image_approval as requireImageApproval FROM image_generation_settings WHERE project_id=?',
+        )
+        .get(input.projectId) as { requireImageApproval: number } | undefined;
+      const candidateCount = parseCandidateCount(generation.metadata);
+      const autoSelect =
+        fresh && !existingCurrent && candidateCount <= 1 && !approval?.requireImageApproval;
       const stamp = now();
       const assetId = randomUUID();
       const role = sceneImageRole(input.sceneStableId);
@@ -524,16 +542,6 @@ export class SceneImageGenerationRepository {
         ...parseRecord(generation.metadata),
         ...(input.metadata ?? {}),
       });
-      if (fresh) {
-        this.database.sqlite
-          .prepare(
-            'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
-          )
-          .run(stamp, input.projectId, input.sceneStableId);
-        this.database.sqlite
-          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-          .run(stamp, input.projectId, role);
-      }
       this.database.sqlite
         .prepare(
           `INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,source_step_id,
@@ -559,20 +567,10 @@ export class SceneImageGenerationRepository {
             height: input.height,
             seed: input.seed,
           }),
-          fresh ? 1 : 0,
+          autoSelect ? 1 : 0,
           stamp,
           stamp,
         );
-      if (fresh) {
-        this.database.sqlite
-          .prepare(
-            'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
-          )
-          .run(stamp, input.projectId, input.sceneStableId);
-        this.database.sqlite
-          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
-          .run(stamp, input.projectId, role);
-      }
       this.database.sqlite
         .prepare(
           `UPDATE scene_image_generations SET status='COMPLETED',actual_seed=?,actual_width=?,actual_height=?,
@@ -585,7 +583,7 @@ export class SceneImageGenerationRepository {
           input.height,
           assetId,
           input.durationMs,
-          fresh ? 1 : 0,
+          autoSelect ? 1 : 0,
           mergedMetadata,
           stamp,
           stamp,
@@ -676,17 +674,83 @@ export class SceneImageGenerationRepository {
   updateReview(
     projectId: Id,
     generationId: Id,
-    value: SceneImageReviewUpdate,
+    value: ImageQualityReviewUpdate,
   ): SceneImageGenerationDto {
     const input = sceneImageReviewUpdateSchema.parse(value);
     const result = this.database.sqlite
       .prepare(
-        'UPDATE scene_image_generations SET review_status=?,notes=?,updated_at=? WHERE project_id=? AND id=?',
+        `UPDATE scene_image_generations SET review_status=?,notes=?,review_scores=?,review_issues=?,updated_at=?
+         WHERE project_id=? AND id=?`,
       )
-      .run(input.status, input.notes, now(), projectId, generationId);
+      .run(
+        input.status,
+        input.notes,
+        json(input.scores ?? {}),
+        JSON.stringify(input.issues ?? []),
+        now(),
+        projectId,
+        generationId,
+      );
     if (result.changes !== 1)
       throw new AppError('NOT_FOUND', 'Scene image generation not found', 404);
     return this.get(projectId, generationId)!;
+  }
+
+  acceptCandidate(
+    projectId: Id,
+    sceneStableId: string,
+    generationId: Id,
+    value: ImageQualityReviewUpdate,
+  ): SceneImageGenerationDto {
+    return this.database.sqlite.transaction(() => {
+      const target = this.database.sqlite
+        .prepare(
+          `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,a.status as assetStatus
+           FROM scene_image_generations g LEFT JOIN assets a ON a.id=g.asset_id
+           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?`,
+        )
+        .get(projectId, sceneStableId, generationId) as CurrentSelectionRow | undefined;
+      if (
+        !target ||
+        target.status !== 'COMPLETED' ||
+        !target.assetId ||
+        target.assetStatus !== 'READY'
+      )
+        throw new AppError('INVALID_INPUT', 'Only a completed valid image can be accepted', 409);
+      const review = sceneImageReviewUpdateSchema.parse(value);
+      this.database.sqlite
+        .prepare(
+          `UPDATE scene_image_generations SET review_status='ACCEPTED',notes=?,review_scores=?,review_issues=?,updated_at=?
+           WHERE project_id=? AND id=?`,
+        )
+        .run(
+          review.notes,
+          json(review.scores ?? {}),
+          JSON.stringify(review.issues ?? []),
+          now(),
+          projectId,
+          generationId,
+        );
+      const stamp = now();
+      const role = sceneImageRole(sceneStableId);
+      this.database.sqlite
+        .prepare(
+          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+        )
+        .run(stamp, projectId, sceneStableId);
+      this.database.sqlite
+        .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND role=?')
+        .run(stamp, projectId, role);
+      this.database.sqlite
+        .prepare(
+          'UPDATE scene_image_generations SET is_current=1,updated_at=? WHERE project_id=? AND id=?',
+        )
+        .run(stamp, projectId, generationId);
+      this.database.sqlite
+        .prepare('UPDATE assets SET is_current=1,updated_at=? WHERE id=? AND project_id=?')
+        .run(stamp, target.assetId, projectId);
+      return this.get(projectId, generationId)!;
+    })();
   }
 
   setCurrent(
@@ -755,6 +819,8 @@ const generationSelect = `SELECT g.id,g.project_id as projectId,g.scene_stable_i
   g.actual_height as actualHeight,g.provider_job_id as providerJobId,g.workflow_template as workflowTemplate,
   g.input_fingerprint as inputFingerprint,g.attempt,g.asset_id as assetId,g.duration_ms as durationMs,
   g.error_code as errorCode,g.error,g.notes,g.generation_instructions as generationInstructions,g.metadata,
+  g.candidate_set_id as candidateSetId,g.candidate_index as candidateIndex,
+  g.review_scores as reviewScores,g.review_issues as reviewIssues,
   g.created_at as createdAt,g.started_at as startedAt,g.completed_at as completedAt,g.updated_at as updatedAt
   FROM scene_image_generations g`;
 
@@ -764,11 +830,14 @@ type GenerationRow = {
   sceneId: string;
   sceneRevisionId: Id;
   visualPromptPackageId: Id | null;
-  revision: number;
   source: string;
   provider: ImageProvider | null;
   status: string;
   reviewStatus: string;
+  candidateSetId: Id | null;
+  candidateIndex: number | null;
+  reviewScores: string;
+  reviewIssues: string;
   isCurrent: number | boolean;
   requestedSeed: number | null;
   actualSeed: number | null;
@@ -818,12 +887,50 @@ function parseGeneration(database: DatabaseHandle, row: GenerationRow): SceneIma
     )
       freshness = 'CURRENT';
   }
+  const blockers = productionBlockers(database, row, freshness);
+  const rest: Record<string, unknown> = { ...row };
+  delete rest.reviewScores;
+  delete rest.reviewIssues;
   return sceneImageGenerationDtoSchema.parse({
-    ...row,
+    ...rest,
     isCurrent: Boolean(row.isCurrent),
     freshness,
+    review: parseReview(row),
     metadata: parseRecord(row.metadata),
     assetUrl: row.assetId ? `/api/assets/${row.assetId}` : null,
+    productionReady: blockers.length === 0,
+    productionBlockers: blockers,
+  });
+}
+
+function productionBlockers(
+  database: DatabaseHandle,
+  row: GenerationRow,
+  freshness: 'CURRENT' | 'STALE',
+): string[] {
+  const blockers: string[] = [];
+  if (row.status !== 'COMPLETED') blockers.push('GENERATION_NOT_COMPLETED');
+  if (row.source === 'GENERATED' && freshness === 'STALE') blockers.push('VISUALLY_STALE');
+  if (!row.isCurrent) blockers.push('NOT_CURRENT');
+  const settings = database.sqlite
+    .prepare(
+      'SELECT require_image_approval as requireImageApproval FROM image_generation_settings WHERE project_id=?',
+    )
+    .get(row.projectId) as { requireImageApproval: number } | undefined;
+  if (settings?.requireImageApproval && row.reviewStatus !== 'ACCEPTED')
+    blockers.push('APPROVAL_REQUIRED');
+  return blockers.slice(0, 5);
+}
+function parseReview(row: GenerationRow): ImageQualityReview | null {
+  const issues = JSON.parse(row.reviewIssues) as string[];
+  const scores = JSON.parse(row.reviewScores) as Record<string, unknown>;
+  if (row.reviewStatus === 'UNREVIEWED' && !issues.length && !Object.keys(scores).length)
+    return null;
+  return imageQualityReviewSchema.parse({
+    status: row.reviewStatus,
+    scores,
+    issues,
+    notes: row.notes,
   });
 }
 
@@ -851,3 +958,98 @@ type CurrentSelectionRow = {
   status: string;
   assetStatus: string | null;
 };
+export type CreateCandidateSetInput = {
+  projectId: Id;
+  sceneStableId: string;
+  sceneRevisionId: Id;
+  visualPromptPackageId: Id | null;
+  mode: ImageConditioningMode;
+  workflowTemplate: ImageWorkflowTemplate | null;
+  packageFingerprint: string | null;
+  settingsFingerprint: string | null;
+  requestedCount: number;
+  sourceGenerationId?: Id | null;
+  generationInstructions: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+function parseCandidateCount(metadata: string): number {
+  const value = parseRecord(metadata)['candidateCount'];
+  return typeof value === 'number' && Number.isInteger(value) ? value : 1;
+}
+
+export class SceneImageCandidateSetRepository {
+  constructor(private readonly database: DatabaseHandle) {}
+
+  get(projectId: Id, candidateSetId: Id): SceneImageCandidateSetDto | null {
+    const row = this.database.sqlite
+      .prepare(
+        `SELECT id,project_id as projectId,scene_stable_id as sceneId,scene_revision_id as sceneRevisionId,
+          visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
+          package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
+          requested_count as requestedCount,source_generation_id as sourceGenerationId,
+          generation_instructions as generationInstructions,metadata,created_at as createdAt,updated_at as updatedAt
+         FROM scene_image_candidate_sets WHERE project_id=? AND id=?`,
+      )
+      .get(projectId, candidateSetId) as Record<string, unknown> | undefined;
+    return row ? parseCandidateSet(row) : null;
+  }
+
+  list(projectId: Id, sceneStableId: string, limit = 50, offset = 0): SceneImageCandidateSetDto[] {
+    const rows = this.database.sqlite
+      .prepare(
+        `SELECT id,project_id as projectId,scene_stable_id as sceneId,scene_revision_id as sceneRevisionId,
+          visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
+          package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
+          requested_count as requestedCount,source_generation_id as sourceGenerationId,
+          generation_instructions as generationInstructions,metadata,created_at as createdAt,updated_at as updatedAt
+         FROM scene_image_candidate_sets WHERE project_id=? AND scene_stable_id=?
+         ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+      .all(
+        projectId,
+        sceneStableId,
+        Math.max(1, Math.min(100, limit)),
+        Math.max(0, offset),
+      ) as Record<string, unknown>[];
+    return rows.map(parseCandidateSet);
+  }
+
+  create(input: CreateCandidateSetInput): SceneImageCandidateSetDto {
+    const id = randomUUID();
+    const stamp = now();
+    this.database.sqlite
+      .prepare(
+        `INSERT INTO scene_image_candidate_sets(
+          id,project_id,scene_stable_id,scene_revision_id,visual_prompt_package_id,mode,workflow_template,
+          package_fingerprint,settings_fingerprint,requested_count,source_generation_id,generation_instructions,
+          metadata,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.projectId,
+        input.sceneStableId,
+        input.sceneRevisionId,
+        input.visualPromptPackageId,
+        input.mode,
+        input.workflowTemplate,
+        input.packageFingerprint,
+        input.settingsFingerprint,
+        input.requestedCount,
+        input.sourceGenerationId ?? null,
+        input.generationInstructions,
+        json(input.metadata ?? {}),
+        stamp,
+        stamp,
+      );
+    return this.get(input.projectId, id)!;
+  }
+}
+
+function parseCandidateSet(row: Record<string, unknown>): SceneImageCandidateSetDto {
+  return sceneImageCandidateSetDtoSchema.parse({
+    ...row,
+    metadata: parseRecord(String(row.metadata ?? '{}')),
+  });
+}
