@@ -8,6 +8,7 @@ import {
   SceneRepository,
   TimelineRepository,
   WorkflowRepository,
+  type CreateSceneTimingInput,
   type DatabaseHandle,
 } from '@studio/database';
 import {
@@ -308,6 +309,7 @@ export class TimelineWorkflowService {
           sceneNumber: itemIndex + 1,
           title: `Scene ${itemIndex + 1}`,
           sourceExcerpt: '',
+          sourceRange: timingItem.sourceRange,
           startMs: timingItem.startMs,
           endMs: timingItem.endMs,
           durationMs: timingItem.durationMs,
@@ -352,6 +354,7 @@ export class TimelineWorkflowService {
         sceneNumber: scene.sceneNumber,
         title: scene.title,
         sourceExcerpt: scene.sourceExcerpt ?? '',
+        sourceRange: timingItem.sourceRange,
         startMs: timingItem.startMs,
         endMs: timingItem.endMs,
         durationMs: timingItem.durationMs,
@@ -471,6 +474,19 @@ export class TimelineWorkflowService {
   }
 
   async buildSceneTiming(chapterId: Id, update?: SceneTimingUpdate): Promise<SceneTiming> {
+    const prepared = await this.prepareSceneTiming(chapterId, update);
+    if (!prepared.input) {
+      if (!prepared.current)
+        throw new AppError('TIMELINE_NOT_FOUND', 'Scene timing was not prepared', 500);
+      return prepared.current;
+    }
+    return this.timeline.createSceneTiming(prepared.input);
+  }
+
+  private async prepareSceneTiming(
+    chapterId: Id,
+    update?: SceneTimingUpdate,
+  ): Promise<{ current: SceneTiming | null; input: CreateSceneTimingInput | null }> {
     const chapter = this.chapters.get(chapterId);
     if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
     const current = this.timeline.getCurrentSceneTiming(chapter.id);
@@ -483,7 +499,7 @@ export class TimelineWorkflowService {
       );
     if (!update && current?.mode === 'MANUAL') {
       if (current.audioAssetId === audio.id && current.chapterRevision === chapter.revision)
-        return current;
+        return { current, input: null };
       if (current.audioAssetId !== audio.id)
         throw new AppError(
           'TIMELINE_MANUAL_LOCKED',
@@ -580,21 +596,31 @@ export class TimelineWorkflowService {
       current?.inputFingerprint === inputFingerprint &&
       current.chapterRevision === chapter.revision
     )
-      return current;
-    return this.timeline.createSceneTiming({
-      projectId: chapter.projectId,
-      chapterId: chapter.id,
-      chapterRevision: chapter.revision,
-      audioAssetId: audio.id,
-      mode,
-      durationMs: audioDurationMs,
-      minimumSceneDurationMs: 500,
-      items,
-      warnings,
-      inputFingerprint,
-    });
+      return { current, input: null };
+    return {
+      current,
+      input: {
+        projectId: chapter.projectId,
+        chapterId: chapter.id,
+        chapterRevision: chapter.revision,
+        audioAssetId: audio.id,
+        mode,
+        durationMs: audioDurationMs,
+        minimumSceneDurationMs: 500,
+        items,
+        warnings,
+        inputFingerprint,
+      },
+    };
   }
+
   buildMotionPlans(chapterId: Id, replace = false): MotionPlan[] {
+    return this.context.database.sqlite.transaction(() =>
+      this.buildMotionPlansInTransaction(chapterId, replace),
+    )();
+  }
+
+  private buildMotionPlansInTransaction(chapterId: Id, replace = false): MotionPlan[] {
     const chapter = this.chapters.get(chapterId);
     if (!chapter) throw new AppError('NOT_FOUND', 'Chapter not found', 404);
     const timing = this.timeline.getCurrentSceneTiming(chapter.id);
@@ -628,7 +654,7 @@ export class TimelineWorkflowService {
         timingRevision: timing.revision,
         config: { motionIntensity: config.motionIntensity },
       });
-      return this.timeline.createMotionPlan(
+      return this.timeline.createMotionPlanInTransaction(
         {
           projectId: chapter.projectId,
           chapterId: chapter.id,
@@ -899,7 +925,9 @@ export class TimelineWorkflowService {
         400,
       );
     let plan = this.getRenderPlan(projectId, parsedRequest);
-    if (plan.blockers.length > 0 && parsedRequest.autoBuild) {
+    const autoBuildTimingInputs: CreateSceneTimingInput[] = [];
+    const shouldAutoBuild = plan.blockers.length > 0 && parsedRequest.autoBuild;
+    if (shouldAutoBuild) {
       const unsupported = plan.blockers.filter(
         (blocker) =>
           !['TIMING_REQUIRED', 'SCENE_TIMING_REQUIRED', 'MOTION_PLAN_REQUIRED'].includes(
@@ -909,32 +937,43 @@ export class TimelineWorkflowService {
       if (unsupported.length > 0)
         throw new AppError('RENDER_BLOCKED', JSON.stringify(unsupported), 409);
       for (const chapter of this.resolveChapters(projectId, parsedRequest.scope)) {
-        if (!this.timeline.getCurrentSceneTiming(chapter.id))
-          await this.buildSceneTiming(chapter.id);
-        const timing = this.timeline.getCurrentSceneTiming(chapter.id);
-        if (
-          timing &&
-          this.scenes
-            .listScenes(chapter.id)
-            .some((scene) => !this.timeline.getCurrentMotionPlan(scene.stableId, scene.id))
-        )
-          this.buildMotionPlans(chapter.id);
+        if (!this.timeline.getCurrentSceneTiming(chapter.id)) {
+          const prepared = await this.prepareSceneTiming(chapter.id);
+          if (prepared.input) autoBuildTimingInputs.push(prepared.input);
+        }
       }
-      plan = this.getRenderPlan(projectId, parsedRequest);
     }
-    if (plan.blockers.length > 0)
+    if (plan.blockers.length > 0 && !shouldAutoBuild)
       throw new AppError('RENDER_BLOCKED', JSON.stringify(plan.blockers), 409);
     if (parsedRequest.scope.kind === 'SCENE') {
       this.assertNoActiveRenderJobs(projectId, parsedRequest.scope);
-      return this.scheduleSingleSceneRender(projectId, parsedRequest, plan);
+      return this.context.database.sqlite.transaction(() => {
+        if (shouldAutoBuild) {
+          for (const input of autoBuildTimingInputs)
+            this.timeline.createSceneTimingInTransaction(input);
+          for (const chapter of this.resolveChapters(projectId, parsedRequest.scope))
+            this.buildMotionPlansInTransaction(chapter.id);
+          plan = this.getRenderPlan(projectId, parsedRequest);
+        }
+        if (plan.blockers.length > 0)
+          throw new AppError('RENDER_BLOCKED', JSON.stringify(plan.blockers), 409);
+        return this.scheduleSingleSceneRender(projectId, parsedRequest, plan);
+      })();
     }
     const config = this.config(projectId, parsedRequest);
     const selectedChapters = this.resolveChapters(projectId, parsedRequest.scope);
     if (selectedChapters.length === 0)
       throw new AppError('RENDER_SCOPE_EMPTY', 'Render scope does not contain chapters', 409);
     this.assertNoActiveRenderJobs(projectId, parsedRequest.scope);
-
     return this.context.database.sqlite.transaction(() => {
+      if (shouldAutoBuild) {
+        for (const input of autoBuildTimingInputs)
+          this.timeline.createSceneTimingInTransaction(input);
+        for (const chapter of selectedChapters) this.buildMotionPlansInTransaction(chapter.id);
+        plan = this.getRenderPlan(projectId, parsedRequest);
+      }
+      if (plan.blockers.length > 0)
+        throw new AppError('RENDER_BLOCKED', JSON.stringify(plan.blockers), 409);
       const executionId = this.workflow.createExecution(projectId, 'TIMELINE_RENDER');
       const jobIds: Id[] = [];
       const chapterStepIds: Id[] = [];

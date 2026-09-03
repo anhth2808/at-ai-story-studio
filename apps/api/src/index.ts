@@ -194,7 +194,10 @@ function parseRenderScope(query: RenderScopeQuery): RenderScope {
 }
 
 const app = Fastify({ logger: true });
-await app.register(cors, { origin: true });
+await app.register(cors, {
+  origin: true,
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+});
 await app.register(multipart, { limits: { fileSize: 1_000_000_000 } });
 app.get('/api/health', async () => {
   const tools = await media.health();

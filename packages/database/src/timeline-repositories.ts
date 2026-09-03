@@ -229,6 +229,10 @@ export class TimelineRepository {
   }
 
   createSceneTiming(input: CreateSceneTimingInput): SceneTiming {
+    return this.database.sqlite.transaction(() => this.createSceneTimingInTransaction(input))();
+  }
+
+  createSceneTimingInTransaction(input: CreateSceneTimingInput): SceneTiming {
     const id = randomUUID();
     const stamp = now();
     const revisionRow = this.database.sqlite
@@ -238,40 +242,37 @@ export class TimelineRepository {
       .get(input.chapterId) as { revision: number };
     const revision = revisionRow.revision;
     const status = input.status ?? 'COMPLETED';
-    const transaction = this.database.sqlite.transaction(() => {
-      this.invalidateChapterVideoAssets(input.projectId, input.chapterId, stamp);
-      this.database.sqlite
-        .prepare(
-          'UPDATE scene_timing_revisions SET is_current=0,updated_at=? WHERE chapter_id=? AND is_current=1',
-        )
-        .run(stamp, input.chapterId);
-      this.database.sqlite
-        .prepare(
-          `INSERT INTO scene_timing_revisions
-           (id,project_id,chapter_id,chapter_revision,audio_asset_id,mode,revision,duration_ms,
-            minimum_scene_duration_ms,items,warnings,input_fingerprint,status,is_current,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
-          id,
-          input.projectId,
-          input.chapterId,
-          input.chapterRevision,
-          input.audioAssetId,
-          input.mode,
-          revision,
-          input.durationMs,
-          input.minimumSceneDurationMs,
-          json(input.items),
-          json(input.warnings),
-          input.inputFingerprint,
-          status,
-          status === 'COMPLETED' ? 1 : 0,
-          stamp,
-          stamp,
-        );
-    });
-    transaction();
+    this.invalidateChapterVideoAssets(input.projectId, input.chapterId, stamp);
+    this.database.sqlite
+      .prepare(
+        'UPDATE scene_timing_revisions SET is_current=0,updated_at=? WHERE chapter_id=? AND is_current=1',
+      )
+      .run(stamp, input.chapterId);
+    this.database.sqlite
+      .prepare(
+        `INSERT INTO scene_timing_revisions
+         (id,project_id,chapter_id,chapter_revision,audio_asset_id,mode,revision,duration_ms,
+          minimum_scene_duration_ms,items,warnings,input_fingerprint,status,is_current,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.projectId,
+        input.chapterId,
+        input.chapterRevision,
+        input.audioAssetId,
+        input.mode,
+        revision,
+        input.durationMs,
+        input.minimumSceneDurationMs,
+        json(input.items),
+        json(input.warnings),
+        input.inputFingerprint,
+        status,
+        status === 'COMPLETED' ? 1 : 0,
+        stamp,
+        stamp,
+      );
     const timing = this.getSceneTiming(id);
     if (!timing) throw new AppError('TIMELINE_NOT_FOUND', 'Scene timing was not persisted', 500);
     return timing;
@@ -419,6 +420,12 @@ export class TimelineRepository {
   }
 
   createMotionPlan(input: CreateMotionPlanInput, sceneRevision: number): MotionPlan {
+    return this.database.sqlite.transaction(() =>
+      this.createMotionPlanInTransaction(input, sceneRevision),
+    )();
+  }
+
+  createMotionPlanInTransaction(input: CreateMotionPlanInput, sceneRevision: number): MotionPlan {
     const id = randomUUID();
     const stamp = now();
     const revisionRow = this.database.sqlite
@@ -427,49 +434,46 @@ export class TimelineRepository {
       )
       .get(input.sceneRevisionId) as { revision: number };
     const revision = revisionRow.revision;
-    const transaction = this.database.sqlite.transaction(() => {
-      this.invalidateCurrentRole(input.projectId, `scene:${input.sceneStableId}:video`, stamp);
-      this.database.sqlite
-        .prepare(
-          'UPDATE motion_plan_revisions SET is_current=0,updated_at=? WHERE scene_stable_id=? AND scene_revision_id=? AND is_current=1',
-        )
-        .run(stamp, input.sceneStableId, input.sceneRevisionId);
-      this.database.sqlite
-        .prepare(
-          `INSERT INTO motion_plan_revisions
-           (id,project_id,chapter_id,scene_stable_id,scene_revision_id,timing_revision_id,revision,
-            motion_type,start_scale,end_scale,start_position_x,start_position_y,end_position_x,end_position_y,
-            easing,focus_point_x,focus_point_y,intensity,duration_ms,input_fingerprint,status,is_current,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
-          id,
-          input.projectId,
-          input.chapterId,
-          input.sceneStableId,
-          input.sceneRevisionId,
-          input.timingRevisionId,
-          revision,
-          input.motionType,
-          input.startScale,
-          input.endScale,
-          input.startPositionX,
-          input.startPositionY,
-          input.endPositionX,
-          input.endPositionY,
-          input.easing,
-          input.focusPointX,
-          input.focusPointY,
-          input.intensity,
-          input.durationMs,
-          input.inputFingerprint,
-          input.status ?? 'COMPLETED',
-          input.status === 'INVALIDATED' ? 0 : 1,
-          stamp,
-          stamp,
-        );
-    });
-    transaction();
+    this.invalidateCurrentRole(input.projectId, `scene:${input.sceneStableId}:video`, stamp);
+    this.database.sqlite
+      .prepare(
+        'UPDATE motion_plan_revisions SET is_current=0,updated_at=? WHERE scene_stable_id=? AND scene_revision_id=? AND is_current=1',
+      )
+      .run(stamp, input.sceneStableId, input.sceneRevisionId);
+    this.database.sqlite
+      .prepare(
+        `INSERT INTO motion_plan_revisions
+         (id,project_id,chapter_id,scene_stable_id,scene_revision_id,timing_revision_id,revision,
+          motion_type,start_scale,end_scale,start_position_x,start_position_y,end_position_x,end_position_y,
+          easing,focus_point_x,focus_point_y,intensity,duration_ms,input_fingerprint,status,is_current,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.projectId,
+        input.chapterId,
+        input.sceneStableId,
+        input.sceneRevisionId,
+        input.timingRevisionId,
+        revision,
+        input.motionType,
+        input.startScale,
+        input.endScale,
+        input.startPositionX,
+        input.startPositionY,
+        input.endPositionX,
+        input.endPositionY,
+        input.easing,
+        input.focusPointX,
+        input.focusPointY,
+        input.intensity,
+        input.durationMs,
+        input.inputFingerprint,
+        input.status ?? 'COMPLETED',
+        input.status === 'INVALIDATED' ? 0 : 1,
+        stamp,
+        stamp,
+      );
     const plan = this.getMotionPlan(id);
     if (!plan) throw new AppError('MOTION_PLAN_NOT_FOUND', 'Motion plan was not persisted', 500);
     return { ...plan, sceneRevision };

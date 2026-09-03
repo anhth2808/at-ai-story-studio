@@ -6,6 +6,9 @@ Project and Chapter status summaries SHALL expose SceneTiming, MotionPlan, Scene
 #### Scenario: Observe a partial Story render
 - **WHEN** 442 of 450 Scene Clips and 48 of 50 Chapter Videos are valid
 - **THEN** project status SHALL expose those level-specific counts and identify final assembly as pending rather than reporting only one undifferentiated percentage
+#### Scenario: Refresh after restart
+- **WHEN** the web application reloads after the API or worker has restarted
+- **THEN** it SHALL display statuses read from persisted state rather than resetting them to optimistic defaults
 
 ### Requirement: Multi-chapter render scopes
 Project management SHALL allow explicit rendering of one Chapter, an inclusive Chapter range, selected Chapters, or the full Story. The selected scope SHALL be persisted in the render request/manifest and output metadata, and Chapter order SHALL follow current project numbering. A full-story request SHALL not silently limit itself to the first Chapter.

@@ -10,6 +10,9 @@ The system SHALL support validated render configuration for 16:9 and 9:16 output
 #### Scenario: Reject unsafe render settings
 - **WHEN** a request includes unsupported dimensions, a negative volume, an excessive transition, or an invalid fitting mode
 - **THEN** validation SHALL fail before a workflow step or FFmpeg process is created
+#### Scenario: Reject unsupported configuration
+- **WHEN** a render request contains invalid dimensions, FPS, volume, or unsafe subtitle settings
+- **THEN** the request SHALL fail validation before scheduling external work
 
 ### Requirement: Hierarchical manifest-driven render
 The system SHALL build immutable manifests for Scene Clip, Chapter Video, and Project Video renders. Each manifest SHALL record scope, ordered direct inputs, accepted/current image or legacy background source, timing/motion/transition data where applicable, narration/subtitle/music assets, configuration, hashes, expected duration, compiler/tool versions, and output profile before invoking FFmpeg. Project manifests SHALL identify the selected Chapter range or full-Story scope and SHALL not assume the first Chapter only.
@@ -43,6 +46,9 @@ Project music SHALL be mixed once at Project Video stage, looped or trimmed to t
 #### Scenario: Render a Chapter independently
 - **WHEN** a user renders one Chapter with project music configured
 - **THEN** the Chapter Video SHALL contain narration and burned subtitles but SHALL not contain the project music track
+#### Scenario: Remove music
+- **WHEN** music is removed or disabled
+- **THEN** future renders SHALL omit it and the render dependency SHALL be invalidated without changing narration or subtitles
 
 ### Requirement: Render validation and cancellation
 Every hierarchical render SHALL persist progress, safe diagnostics, cancellation state, and bounded current-time/expected-duration values where FFmpeg exposes them. It SHALL render under managed staging, terminate the process through the existing safe runner on cancellation/timeout, validate with ffprobe, and publish only a complete valid Asset.

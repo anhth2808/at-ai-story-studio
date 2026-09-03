@@ -11,6 +11,9 @@ A pending hierarchical render step SHALL be claimable only when all required cur
 - **WHEN** a selected Chapter Video is stale or absent
 - **THEN** the Project Video step SHALL remain blocked or schedule that dependency only under explicit auto-build behavior
 
+#### Scenario: Do not render missing inputs
+- **WHEN** narration, background, or subtitle prerequisites are not current
+- **THEN** the render step SHALL not execute and SHALL report the named prerequisite state
 ### Requirement: Persist hierarchical render work
 The workflow SHALL materialize independently identifiable steps/jobs for building Scene timing, generating default MotionPlans, rendering Scene Clips, rendering Chapter Videos, and assembling Project Videos. Each step SHALL retain its scope, input fingerprint, render settings, progress, expected duration where known, and output linkage through existing durable records or an equivalent persisted projection. One render request SHALL not require one unbounded FFmpeg job for the full Story.
 
@@ -31,6 +34,9 @@ After an API, worker, or computer restart, completed timing, MotionPlan, Scene C
 #### Scenario: Resume after worker loss
 - **WHEN** the worker stops after completing part of a Chapter or Project render
 - **THEN** a restarted worker SHALL recover the remaining pending work and preserve all completed valid output Assets
+#### Scenario: Worker dies during a step
+- **WHEN** a worker stops while a step is running and its lease expires
+- **THEN** a subsequent worker SHALL mark the prior attempt as worker-lost and deterministically make the step retryable or terminal, while leaving completed sibling steps untouched
 
 ### Requirement: Render progress and cancellation
 Hierarchical render jobs SHALL persist stage-specific progress, current render time when available, expected duration, attempts, safe stderr/diagnostic context, and cancellation state. Cancellation SHALL propagate through the existing `AbortSignal` and process runner, and partial outputs SHALL not satisfy dependent steps.

@@ -10,6 +10,13 @@ Each current Scene SHALL continue exposing exact chapter source range, camera, c
 #### Scenario: Inspect an unready Scene
 - **WHEN** a current Scene has no accepted image or has stale source ranges
 - **THEN** the read SHALL show the named missing/stale prerequisite and SHALL not report a renderable current Scene Clip
+#### Scenario: Inspect a scene plan
+- **WHEN** a scene plan has completed
+- **THEN** a scene detail read SHALL expose enough structured information to review narrative purpose and future visual generation without requiring the complete novel
+
+#### Scenario: Enforce controlled values
+- **WHEN** an OMP result supplies an unsupported purpose or camera framing value
+- **THEN** the system SHALL reject the result as structured validation failure and SHALL preserve the prior current scene plan
 
 ### Requirement: Scene source traceability feeds timing
 The exact UTF-16 source range already persisted for a current Scene SHALL be usable with the matching chapter revision's persisted TTS source mappings to build deterministic SceneTiming. A timing build SHALL reject stale or out-of-bounds Scene source data and SHALL preserve the original Scene range when timing is manually adjusted.

@@ -10,6 +10,21 @@ A Scene image SHALL continue exposing generation status, freshness, review statu
 #### Scenario: Reject a candidate
 - **WHEN** a candidate is rejected or remains non-current
 - **THEN** render preflight SHALL exclude it and SHALL report the Scene as missing a valid accepted/current render input
+#### Scenario: Reject the current image
+- **WHEN** a user marks a current image `REJECTED`
+- **THEN** the review status SHALL change without deleting its asset or generation history and the system SHALL NOT choose a replacement automatically
+
+#### Scenario: Select an older revision
+- **WHEN** a user explicitly selects an older valid Scene image revision
+- **THEN** that revision SHALL become current and all other revisions for that Scene role SHALL become non-current atomically
+
+#### Scenario: Accept a candidate
+- **WHEN** a user accepts a completed non-current candidate
+- **THEN** its review status, generation current flag, and Asset current flag SHALL change atomically while every other Scene image remains historical
+
+#### Scenario: Preserve accepted current during generation
+- **WHEN** a new image completes while the Scene has an accepted current image
+- **THEN** the new image SHALL remain non-current regardless of freshness and the accepted image SHALL remain current
 
 ### Requirement: Preserve image history during video invalidation
 Changing a Scene image, reviewing a candidate, or accepting a replacement SHALL preserve all image generation revisions and Assets. Video invalidation SHALL affect only dependent Scene Clip/Chapter/Project outputs and SHALL never delete image history or trigger new image generation.

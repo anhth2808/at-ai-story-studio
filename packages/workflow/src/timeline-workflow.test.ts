@@ -497,6 +497,60 @@ describe('timeline workflow integration', () => {
     expect(fixture.service.getRenderPlan(fixture.projectId, request).project.reusable).toBe(true);
     fixture.database.sqlite.close();
   }, 30_000);
+  it('rolls back auto-build timing and render materialization as one transaction', async () => {
+    const fixture = await setupFixture();
+    const brokenScene = fixture.chapters[1]!.scenes[0]!;
+    fixture.database.sqlite
+      .prepare('UPDATE assets SET metadata=? WHERE project_id=? AND role=?')
+      .run(
+        JSON.stringify({ width: 640 }),
+        fixture.projectId,
+        `scene:${brokenScene.stableId}:image`,
+      );
+    const request = {
+      source: 'SCENES' as const,
+      scope: { kind: 'FULL_STORY' as const },
+      autoBuild: true,
+      fallbackPolicy: 'FAIL' as const,
+    };
+    expect(
+      fixture.service.getRenderPlan(fixture.projectId, request).blockers.length,
+    ).toBeGreaterThan(0);
+    expect(
+      (
+        fixture.database.sqlite.prepare('SELECT COUNT(*) as count FROM jobs').get() as {
+          count: number;
+        }
+      ).count,
+    ).toBe(0);
+    await expect(
+      fixture.service.scheduleTimelineRender(fixture.projectId, request),
+    ).rejects.toMatchObject({ code: 'RENDER_INPUT_INVALID' });
+    for (const chapter of fixture.chapters)
+      expect(fixture.service.timeline.timeline.getCurrentSceneTiming(chapter.id)).toBeNull();
+    expect(
+      (
+        fixture.database.sqlite
+          .prepare('SELECT COUNT(*) as count FROM motion_plan_revisions')
+          .get() as { count: number }
+      ).count,
+    ).toBe(0);
+    expect(
+      (
+        fixture.database.sqlite.prepare('SELECT COUNT(*) as count FROM jobs').get() as {
+          count: number;
+        }
+      ).count,
+    ).toBe(0);
+    expect(
+      (
+        fixture.database.sqlite
+          .prepare('SELECT COUNT(*) as count FROM workflow_executions')
+          .get() as { count: number }
+      ).count,
+    ).toBe(0);
+    fixture.database.sqlite.close();
+  }, 30_000);
   it('rejects TTS source mappings from another chapter revision', async () => {
     const fixture = await setupFixture();
     const chapterId = fixture.chapters[0]!.id;
