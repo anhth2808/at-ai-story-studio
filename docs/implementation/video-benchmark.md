@@ -18,14 +18,14 @@ ComfyUI `image-to-video-v1` workflow (no custom nodes, Apache 2.0).
 
 ## Results (measured through the real API + worker, not scripts)
 
-| # | Scene type | Preset | Resolution | Frames | Clip len | Provider time | Peak VRAM |
-|---|---|---|---|---|---|---|---|
-| 1 | Environment wide (lighthouse sunset) | BALANCED | 832x480 | 81 | 3.375s | 230s (cold, includes model load) | 10,585 MiB |
-| 2 | Character over-the-shoulder | BALANCED | 832x480 | 81 | 3.375s | 224s (warm) | ~10.6 GB |
-| 3 | Action extreme wide | BALANCED | 832x480 | 81 | 3.375s | 221s (warm) | ~10.6 GB |
-| 4 | Climax full shot (HYBRID source) | BALANCED | 832x480 | 81 | 3.375s | 221s (warm) | ~10.6 GB |
-| 5 | Environment wide, regenerate | BALANCED | 832x480 | 81 | 3.375s | 220s (warm) | ~10.6 GB |
-| 6 | Environment wide, regenerate | LOW_VRAM | 704x384 | 81 | 3.375s | 141s (warm) | < BALANCED |
+| #   | Scene type                           | Preset   | Resolution | Frames | Clip len | Provider time                    | Peak VRAM  |
+| --- | ------------------------------------ | -------- | ---------- | ------ | -------- | -------------------------------- | ---------- |
+| 1   | Environment wide (lighthouse sunset) | BALANCED | 832x480    | 81     | 3.375s   | 230s (cold, includes model load) | 10,585 MiB |
+| 2   | Character over-the-shoulder          | BALANCED | 832x480    | 81     | 3.375s   | 224s (warm)                      | ~10.6 GB   |
+| 3   | Action extreme wide                  | BALANCED | 832x480    | 81     | 3.375s   | 221s (warm)                      | ~10.6 GB   |
+| 4   | Climax full shot (HYBRID source)     | BALANCED | 832x480    | 81     | 3.375s   | 221s (warm)                      | ~10.6 GB   |
+| 5   | Environment wide, regenerate         | BALANCED | 832x480    | 81     | 3.375s   | 220s (warm)                      | ~10.6 GB   |
+| 6   | Environment wide, regenerate         | LOW_VRAM | 704x384    | 81     | 3.375s   | 141s (warm)                      | < BALANCED |
 
 - First-run wall time was ~7m20s (model load from SSD + queue + sampling +
   VAE decode + download + ffprobe + promotion); warm BALANCED generations

@@ -993,7 +993,8 @@ describe('timeline workflow integration', () => {
     expect(stepsAfterPlan).toBe(stepsBefore);
     const schedule = await fixture.service.scheduleTimelineRender(fixture.projectId, request);
     const aiJobTypes = database.sqlite
-      .prepare("SELECT COUNT(*) as n FROM workflow_steps WHERE type='GENERATE_AI_SCENE_VIDEO'").get() as { n: number };
+      .prepare("SELECT COUNT(*) as n FROM workflow_steps WHERE type='GENERATE_AI_SCENE_VIDEO'")
+      .get() as { n: number };
     expect(aiJobTypes.n).toBe(0);
     await drainTimelineWorker(fixture, 'timeline-worker-ai');
     // Raw AI motion assets survive renders untouched.

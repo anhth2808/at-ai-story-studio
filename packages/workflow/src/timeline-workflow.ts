@@ -957,8 +957,7 @@ export class TimelineWorkflowService {
           missingMotion: aiMissing,
           clipsToNormalize: aiToNormalize,
           estimatedGenerations: aiMissing,
-          estimatedGenerationMs:
-            aiMissing > 0 ? (unit ? aiMissing * unit : null) : 0,
+          estimatedGenerationMs: aiMissing > 0 ? (unit ? aiMissing * unit : null) : 0,
         };
       })(),
       expectedDurationMs: expectedDurationMs || null,
@@ -1122,10 +1121,9 @@ export class TimelineWorkflowService {
             clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
             rawClipPath: aiSource?.raw?.path ?? null,
             rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
-            crossfadeMs:
-              aiSource?.raw
-                ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
-                : 0,
+            crossfadeMs: aiSource?.raw
+              ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
+              : 0,
           };
           const stepId = this.workflow.createStep(
             executionId,
@@ -1366,8 +1364,7 @@ export class TimelineWorkflowService {
           missingMotion: aiClip && !aiClip.raw ? 1 : 0,
           clipsToNormalize: aiClip && aiClip.raw && !reusable ? 1 : 0,
           estimatedGenerations: aiClip && !aiClip.raw ? 1 : 0,
-          estimatedGenerationMs:
-            aiClip && !aiClip.raw ? (unit ? unit : null) : 0,
+          estimatedGenerationMs: aiClip && !aiClip.raw ? (unit ? unit : null) : 0,
         };
       })(),
       expectedDurationMs: timingItem?.durationMs ?? null,
@@ -1451,10 +1448,9 @@ export class TimelineWorkflowService {
       clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
       rawClipPath: aiSource?.raw?.path ?? null,
       rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
-      crossfadeMs:
-        aiSource?.raw
-          ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
-          : 0,
+      crossfadeMs: aiSource?.raw
+        ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
+        : 0,
     };
     const stepId = this.workflow.createStep(
       executionId,
@@ -1742,11 +1738,7 @@ export class TimelineWorkflowService {
       return { clipSource, raw: null };
     const asset = this.currentAsset(projectId, sceneVideoRole(sceneStableId));
     const rawDuration = asset?.metadata.clipDurationMs;
-    if (
-      !asset ||
-      typeof rawDuration !== 'number' ||
-      rawDuration <= 0
-    )
+    if (!asset || typeof rawDuration !== 'number' || rawDuration <= 0)
       return { clipSource, raw: null };
     return {
       clipSource,
@@ -1771,9 +1763,9 @@ export class TimelineWorkflowService {
       reviewStatus: generation?.reviewStatus ?? ('UNREVIEWED' as const),
       hasAcceptedClip: Boolean(
         generation &&
-          generation.status === 'COMPLETED' &&
-          generation.reviewStatus === 'ACCEPTED' &&
-          generation.freshness === 'CURRENT',
+        generation.status === 'COMPLETED' &&
+        generation.reviewStatus === 'ACCEPTED' &&
+        generation.freshness === 'CURRENT',
       ),
     };
   }

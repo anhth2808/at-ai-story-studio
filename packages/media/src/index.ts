@@ -569,8 +569,7 @@ export async function validateRawAiVideo(
     const candidate = value as Record<string, unknown>;
     return candidate.codec_type === 'video' && Number(candidate.width) >= 16;
   });
-  if (!stream)
-    throw new AppError('INVALID_MEDIA', 'Raw AI video has no usable video stream', 400);
+  if (!stream) throw new AppError('INVALID_MEDIA', 'Raw AI video has no usable video stream', 400);
   const width = Number(stream.width);
   const height = Number(stream.height);
   const rateText = String(stream.avg_frame_rate ?? stream.r_frame_rate ?? '0/1');
@@ -603,7 +602,7 @@ export async function validateRawAiVideo(
     frameCount: Number.isFinite(frameCount) ? frameCount : Math.round(durationSeconds * fps),
     codec: String(stream.codec_name ?? 'unknown'),
     probe,
-  }
+  };
 }
 export type RenderArguments = {
   backgroundPath: string;

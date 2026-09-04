@@ -55,7 +55,8 @@ function validateInput(input: AiSceneClipRenderInput): void {
     invalid('rawClipDurationMs must be positive');
   if (!Number.isFinite(input.sceneDurationMs) || input.sceneDurationMs <= 0)
     invalid('sceneDurationMs must be positive');
-  if (!Number.isFinite(input.sourceWidth) || input.sourceWidth < 16) invalid('sourceWidth is invalid');
+  if (!Number.isFinite(input.sourceWidth) || input.sourceWidth < 16)
+    invalid('sourceWidth is invalid');
   if (!Number.isFinite(input.sourceHeight) || input.sourceHeight < 16)
     invalid('sourceHeight is invalid');
   const quality: QualityProfile | undefined = QUALITY_PROFILES[input.profile.qualityPreset];
@@ -77,7 +78,11 @@ function validateInput(input: AiSceneClipRenderInput): void {
   const composing = input.rawClipDurationMs < input.sceneDurationMs;
   if (composing && input.crossfadeMs < 1)
     invalid('AI_THEN_KEN_BURNS composition requires a positive crossfade');
-  if (input.fitMode === 'CONTAIN' && input.containFill && !['BLACK', 'WHITE'].includes(input.containFill))
+  if (
+    input.fitMode === 'CONTAIN' &&
+    input.containFill &&
+    !['BLACK', 'WHITE'].includes(input.containFill)
+  )
     invalid('containFill is invalid');
 }
 

@@ -90,7 +90,8 @@ function defaultEnvironmentMotion(input: AiMotionPlanSceneInput): string {
 
 function defaultCharacterAction(input: AiMotionPlanSceneInput): string {
   const purpose = input.purpose;
-  if (purpose === 'ACTION' || purpose === 'FIGHT') return 'the subject tenses and shifts weight slowly';
+  if (purpose === 'ACTION' || purpose === 'FIGHT')
+    return 'the subject tenses and shifts weight slowly';
   if (purpose === 'REVEAL') return 'the subject slowly turns toward the reveal';
   if (purpose === 'DEPARTURE' || purpose === 'FAREWELL')
     return 'the subject breathes and holds still, shoulders settling';

@@ -1274,44 +1274,53 @@ app.post(
       );
   },
 );
-app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/review', async (request) => {
-  const params = request.params as {
-    projectId: string;
-    sceneId: string;
-    generationId: string;
-  };
-  return service.videos.updateReview(
-    idSchema.parse(params.projectId),
-    idSchema.parse(params.sceneId),
-    idSchema.parse(params.generationId),
-    sceneVideoReviewUpdateSchema.parse(request.body),
-  );
-});
-app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/accept', async (request) => {
-  const params = request.params as {
-    projectId: string;
-    sceneId: string;
-    generationId: string;
-  };
-  return service.videos.accept(
-    idSchema.parse(params.projectId),
-    idSchema.parse(params.sceneId),
-    idSchema.parse(params.generationId),
-    request.body ?? {},
-  );
-});
-app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/current', async (request) => {
-  const params = request.params as {
-    projectId: string;
-    sceneId: string;
-    generationId: string;
-  };
-  return service.videos.setCurrent(
-    idSchema.parse(params.projectId),
-    idSchema.parse(params.sceneId),
-    idSchema.parse(params.generationId),
-  );
-});
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/review',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.videos.updateReview(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneVideoReviewUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/accept',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.videos.accept(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      request.body ?? {},
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/current',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return service.videos.setCurrent(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+    );
+  },
+);
 app.post('/api/projects/:projectId/ai-video/generate-batch', async (request, reply) => {
   const params = request.params as { projectId: string };
   return reply
@@ -1323,17 +1332,20 @@ app.post('/api/projects/:projectId/ai-video/generate-batch', async (request, rep
       ),
     );
 });
-app.post('/api/projects/:projectId/chapters/:chapterId/ai-video/generate-missing', async (request, reply) => {
-  const params = request.params as { projectId: string; chapterId: string };
-  return reply
-    .code(202)
-    .send(
-      service.videos.scheduleChapterMissing(
-        idSchema.parse(params.projectId),
-        idSchema.parse(params.chapterId),
-      ),
-    );
-});
+app.post(
+  '/api/projects/:projectId/chapters/:chapterId/ai-video/generate-missing',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; chapterId: string };
+    return reply
+      .code(202)
+      .send(
+        service.videos.scheduleChapterMissing(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.chapterId),
+        ),
+      );
+  },
+);
 app.get('/api/projects/:projectId/scenes/:sceneId/ai-video/current', async (request) => {
   const params = request.params as { projectId: string; sceneId: string };
   const clip = service.videos.getCurrentGeneration(

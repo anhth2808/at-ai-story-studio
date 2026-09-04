@@ -2091,9 +2091,8 @@ function TimelinePanel({
                     </span>
                     {renderPlan.ai && (
                       <span>
-                        AI: {renderPlan.ai.scenesSelected} cảnh chọn /{' '}
-                        {renderPlan.ai.missingMotion} thiếu motion /{' '}
-                        {renderPlan.ai.clipsToNormalize} cần ghép; ước lượng ~
+                        AI: {renderPlan.ai.scenesSelected} cảnh chọn / {renderPlan.ai.missingMotion}{' '}
+                        thiếu motion / {renderPlan.ai.clipsToNormalize} cần ghép; ước lượng ~
                         {renderPlan.ai.estimatedGenerations} video (
                         {renderPlan.ai.estimatedGenerationMs != null
                           ? timelineTime(renderPlan.ai.estimatedGenerationMs)
@@ -2133,9 +2132,7 @@ function TimelinePanel({
                     <div>
                       <p className="eyebrow">
                         SCENE {item.sceneNumber}
-                        <span className="status-chip">
-                          {motionSourceBadges[item.motionSource]}
-                        </span>
+                        <span className="status-chip">{motionSourceBadges[item.motionSource]}</span>
                         {item.aiMotion && (
                           <span
                             className={`status-chip status-${item.aiMotion.status.toLowerCase()}`}
@@ -4720,7 +4717,11 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể tạo lại video AI');
     }
   };
-  const reviewVideo = async (generationId: string, issues: string[], notes: string): Promise<void> => {
+  const reviewVideo = async (
+    generationId: string,
+    issues: string[],
+    notes: string,
+  ): Promise<void> => {
     if (!draft) return;
     try {
       const saved = await videoApi.review(projectId, draft.id, generationId, issues, notes);
@@ -4728,9 +4729,7 @@ function ScenesWorkspace({
         current
           ? {
               ...current,
-              generations: current.generations.map((item) =>
-                item.id === saved.id ? saved : item,
-              ),
+              generations: current.generations.map((item) => (item.id === saved.id ? saved : item)),
             }
           : current,
       );
@@ -4738,7 +4737,11 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá video');
     }
   };
-  const acceptVideo = async (generationId: string, issues: string[], notes: string): Promise<void> => {
+  const acceptVideo = async (
+    generationId: string,
+    issues: string[],
+    notes: string,
+  ): Promise<void> => {
     if (!draft) return;
     try {
       await videoApi.accept(projectId, draft.id, generationId, issues, notes);

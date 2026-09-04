@@ -37,10 +37,7 @@ export class VideoProviderError extends Error implements VideoProviderFailure {
 }
 
 export type VideoGenerationProvider = {
-  generate(
-    request: VideoGenerationRequest,
-    signal?: AbortSignal,
-  ): Promise<VideoGenerationResult>;
+  generate(request: VideoGenerationRequest, signal?: AbortSignal): Promise<VideoGenerationResult>;
   readiness(settings: VideoProviderSettings, signal?: AbortSignal): Promise<VideoReadiness>;
   cancel(
     providerJobId: string,
@@ -322,10 +319,7 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     return this.workspaceRoot ?? resolve(this.outputRoot ?? '.', '..');
   }
 
-  async readiness(
-    settings: VideoProviderSettings,
-    signal?: AbortSignal,
-  ): Promise<VideoReadiness> {
+  async readiness(settings: VideoProviderSettings, signal?: AbortSignal): Promise<VideoReadiness> {
     const checkedAt = new Date(this.clock()).toISOString();
     if (!settings.diffusionModel || !settings.textEncoder || !settings.vaeName)
       return videoReadinessSchema.parse({
@@ -335,7 +329,12 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
         details: { required: ['diffusionModel', 'textEncoder', 'vaeName'] },
       });
     try {
-      const system = await this.json(settings, '/system_stats', settings.connectionTimeoutMs, signal);
+      const system = await this.json(
+        settings,
+        '/system_stats',
+        settings.connectionTimeoutMs,
+        signal,
+      );
       if (!system || typeof system !== 'object')
         return this.parseReadiness(checkedAt, 'ERROR', 'ComfyUI system_stats is invalid');
       const objectInfo = await this.loadObjectInfo(settings, signal);
@@ -679,7 +678,10 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     const status = record.status;
     const statusValue =
       status && typeof status.status_str === 'string' ? status.status_str.toLowerCase() : '';
-    if (status?.completed === true || ['success', 'completed', 'error', 'failed'].includes(statusValue))
+    if (
+      status?.completed === true ||
+      ['success', 'completed', 'error', 'failed'].includes(statusValue)
+    )
       return record;
     return null;
   }
@@ -835,9 +837,12 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     const node = objectInfo[className];
     if (!node || typeof node !== 'object') return [];
     const input = (node as Record<string, unknown>).input;
-    const required = input && typeof input === 'object' ? (input as Record<string, unknown>).required : null;
+    const required =
+      input && typeof input === 'object' ? (input as Record<string, unknown>).required : null;
     const entry =
-      required && typeof required === 'object' ? (required as Record<string, unknown>)[inputName] : null;
+      required && typeof required === 'object'
+        ? (required as Record<string, unknown>)[inputName]
+        : null;
     return Array.isArray(entry) && Array.isArray(entry[0])
       ? entry[0].filter((value): value is string => typeof value === 'string')
       : [];
@@ -859,8 +864,8 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       const payload = await this.responseJson(response);
       return Boolean(
         payload &&
-          typeof payload === 'object' &&
-          Array.isArray((payload as Record<string, unknown>).jobs),
+        typeof payload === 'object' &&
+        Array.isArray((payload as Record<string, unknown>).jobs),
       );
     } catch {
       return false;

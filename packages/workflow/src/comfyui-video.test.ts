@@ -50,7 +50,10 @@ describe('buildComfyUiVideoPrompt', () => {
       class_type: 'Wan22ImageToVideoLatent',
       inputs: expect.objectContaining({ width: 832, height: 480, length: 81, batch_size: 1 }),
     });
-    expect(prompt['56']).toMatchObject({ class_type: 'LoadImage', inputs: { image: 'upload.png' } });
+    expect(prompt['56']).toMatchObject({
+      class_type: 'LoadImage',
+      inputs: { image: 'upload.png' },
+    });
     expect(prompt['7']).toMatchObject({
       class_type: 'CLIPTextEncode',
       inputs: { text: WAN22_DEFAULT_NEGATIVE_PROMPT },

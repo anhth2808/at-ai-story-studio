@@ -53,15 +53,17 @@ describe('buildAiSceneClipArguments', () => {
   });
 
   it('rejects traversal output paths before invocation', () => {
-    expect(() => buildAiSceneClipArguments({ ...baseInput, outputPath: '../escape.mp4' })).toThrow();
+    expect(() =>
+      buildAiSceneClipArguments({ ...baseInput, outputPath: '../escape.mp4' }),
+    ).toThrow();
     expect(() =>
       buildAiSceneClipArguments({ ...baseInput, outputPath: 'staging/x/../escape.mp4' }),
     ).toThrow();
   });
 
   it('rejects non-positive durations', () => {
-    expect(() =>
-      buildAiSceneClipArguments({ ...baseInput, sceneDurationMs: 0 }),
-    ).toThrowError(/sceneDurationMs/);
+    expect(() => buildAiSceneClipArguments({ ...baseInput, sceneDurationMs: 0 })).toThrowError(
+      /sceneDurationMs/,
+    );
   });
 });

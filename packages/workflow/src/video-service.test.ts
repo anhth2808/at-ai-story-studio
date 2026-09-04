@@ -11,6 +11,7 @@ import {
 } from '@studio/database';
 import { FfmpegTools, initializeWorkspace, ProcessRunner } from '@studio/media';
 import {
+  AppError,
   videoGenerationResultSchema,
   videoReadinessSchema,
   type VideoGenerationRequest,
@@ -390,14 +391,14 @@ describe('SceneVideoService', () => {
       new FakeVideoProvider(clipFixture, context.workspace.staging),
     );
     expect(() =>
-      service.updateMotionPlan(projectId, sceneId, { cameraMotion: 'SPIN' }),
+      service.updateMotionPlan(projectId, sceneId, { cameraMotion: 'FLY_TO_MARS' }),
     ).toThrowError(/cameraMotion/u);
     expect(() =>
-      service.updateMotionPlan(projectId, sceneId, { intensity: 'EXTREME' }),
+      service.updateMotionPlan(projectId, sceneId, { intensity: 'ABSURD' }),
     ).toThrowError(/intensity/u);
-    expect(() => service.updateMotionPlan(projectId, sceneId, { priority: 'URGENT' })).toThrowError(
-      /priority/u,
-    );
+    expect(() =>
+      service.updateMotionPlan(projectId, sceneId, { priority: 'URGENT_999' }),
+    ).toThrowError(/priority/u);
     database.sqlite.close();
   });
 
@@ -416,12 +417,19 @@ describe('SceneVideoService', () => {
         characterAction: 'she runs',
       }).revision,
     ).toBe(3);
-    expect(() =>
+    let conflict: unknown;
+    try {
       service.updateMotionPlan(projectId, sceneId, {
         expectedRevision: 2,
         characterAction: 'she sleeps',
-      }),
-    ).toThrowError('AI motion plan changed; reload and retry');
+      });
+    } catch (error) {
+      conflict = error;
+    }
+    expect(conflict).toBeInstanceOf(AppError);
+    expect((conflict as AppError).statusCode).toBe(409);
+    expect((conflict as AppError).code).toBe('CONFLICT');
+    expect((conflict as AppError).message).toMatch(/reload and retry/u);
     database.sqlite.close();
   });
 
