@@ -16,8 +16,7 @@ import {
   type VideoGenerationSettingsUpdate,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
-import { invalidateAssetDependents } from './repositories.js';
-import type { StepLeaseGuard } from './repositories.js';
+import { AssetRepository, invalidateAssetDependents, type StepLeaseGuard } from './repositories.js';
 
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value ?? {});
@@ -273,9 +272,7 @@ export class SceneMotionSourceRepository {
 
   set(projectId: Id, sceneStableId: string, motionSource: MotionSource): void {
     const scene = this.database.sqlite
-      .prepare(
-        'SELECT 1 FROM scene_revisions WHERE project_id=? AND stable_id=? AND is_current=1',
-      )
+      .prepare('SELECT 1 FROM scene_revisions WHERE project_id=? AND stable_id=? AND is_current=1')
       .get(projectId, sceneStableId);
     if (!scene) throw new AppError('NOT_FOUND', 'Scene not found', 404);
     const stamp = now();
@@ -553,14 +550,15 @@ export class SceneVideoGenerationRepository {
       invalidateAssetDependents(this.database, projectId, asset.id, stamp);
   }
 
+  // Same canonical downstream Scene-image gate as
+  // AssetRepository.currentRenderableSceneImage: a rejected or
+  // approval-blocked current image cannot feed AI video generation.
   currentSourceImageSha(projectId: Id, sceneStableId: string): string | null {
-    const row = this.database.sqlite
-      .prepare(
-        `SELECT sha256 FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY'
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(projectId, `scene:${sceneStableId}:image`) as { sha256: string } | undefined;
-    return row?.sha256 ?? null;
+    const asset = new AssetRepository(this.database).currentRenderableSceneImage(
+      projectId,
+      sceneStableId,
+    );
+    return asset?.sha256 ?? null;
   }
 
   get(projectId: Id, generationId: Id): SceneVideoGenerationDto | null {
@@ -591,8 +589,12 @@ export class SceneVideoGenerationRepository {
       .prepare(
         `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
       )
-      .all(projectId, sceneStableId, Math.max(1, Math.min(100, limit)), Math.max(0, offset)) as
-      GenerationRow[];
+      .all(
+        projectId,
+        sceneStableId,
+        Math.max(1, Math.min(100, limit)),
+        Math.max(0, offset),
+      ) as GenerationRow[];
     return rows.map((row) => this.parseGeneration(row));
   }
 
@@ -758,11 +760,11 @@ export class SceneVideoGenerationRepository {
     // they must not retroactively stale existing raw clips (raw reuse rule).
     const fresh = Boolean(
       row.sourceImageSha256 &&
-        imageSha &&
-        row.sourceImageSha256 === imageSha &&
-        row.motionPlanFingerprint &&
-        plan &&
-        row.motionPlanFingerprint === plan.inputFingerprint,
+      imageSha &&
+      row.sourceImageSha256 === imageSha &&
+      row.motionPlanFingerprint &&
+      plan &&
+      row.motionPlanFingerprint === plan.inputFingerprint,
     );
     return { fresh, requireApproval: Boolean(settings?.requireMotionApproval) };
   }

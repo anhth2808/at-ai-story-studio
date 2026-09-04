@@ -30,6 +30,19 @@ was rejected.
   the practical long-form mode: a 5-second AI burst covers the opening of a
   40-second scene without generating 40 seconds of diffusion video.
 
+## Source image gate
+
+Scheduling reuses the canonical downstream Scene-image gate
+(`AssetRepository.currentRenderableSceneImage`), including its freshness
+checks. With `requireImageApproval` enabled, only the current `ACCEPTED`
+image qualifies as an AI-video source; a `REJECTED` current image never
+qualifies, even when approval is disabled. The same gate is re-checked
+before execution, so an image rejected mid-generation fails the step as
+`STALE_INPUT` instead of publishing. Motion-plan updates validate through
+`aiMotionPlanUpdateSchema` and honor `expectedRevision` (`409 CONFLICT` on
+mismatch); motion-source updates have no optimistic-concurrency field by
+design because that storage keeps no revision counter.
+
 ## Raw vs normalized
 
 - Raw provider output is an immutable `AI_SCENE_VIDEO` Asset under

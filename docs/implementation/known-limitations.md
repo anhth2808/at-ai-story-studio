@@ -115,8 +115,9 @@
   local wait. Studio never issues an uncertain global ComfyUI interrupt.
 - Generated and manual image history is retained. There is no destructive
   revision deletion or long-term orphan-retention policy yet.
-- Image generation does not select a best output automatically and does not
-  hand images to FFmpeg, background media, image-to-video, or AI video.
+- Image generation does not select a best output automatically, and there is
+  no automatic handoff: images reach rendering only through explicit AI-video
+  scheduling (Prompt #13) or the animated timeline.
 
 ## Image quality workflow limits (Prompt #11)
 
@@ -132,8 +133,10 @@
   no accepted image keeps an empty current slot until the user accepts one
   (except the legacy single-candidate first-image behavior when approval is
   off and no current image exists).
-- `requireImageApproval` gates downstream readiness only. No downstream
-  image-to-video pipeline consumes it yet.
+- `requireImageApproval` gates downstream readiness, and AI-video scheduling
+  consumes that canonical gate: with approval enabled, an AI video can be
+  scheduled only from the current `ACCEPTED` Scene image. A rejected current
+  image never qualifies, even with approval disabled.
 - Feedback guidance is deterministic prompt reinforcement. It cannot force a
   composition the way a ControlNet would; its measured effect is in
   `control-benchmark.md`.
@@ -223,10 +226,13 @@ Live verification on 2026-09-01 used ComfyUI `0.33.1` at
   lighthouse-on-foggy-cliff-at-dawn image matching the prompt, with drift:
   the model doubled the lighthouse and the path fades unnaturally. Character
   resemblance is not demonstrable because the fixture scene has no characters.
-- Reference Assets remain request-only; `REFERENCE_IMAGES_UNUSED` is asserted
-  in provider tests. No reference conditioning or video handoff exists.
+- At that smoke's date, Reference Assets were request-only
+  (`REFERENCE_IMAGES_UNUSED` asserted in provider tests). Reference
+  conditioning exists since Prompt #10, and accepted Scene images now feed
+  Wan 2.2 I2V through AI-video scheduling (Prompt #13).
 
 These limits are deliberate boundaries for the first working video, bounded
-long-story authoring, and first working image workflows. They do not enable
-character-memory retrieval, scene graphs, reference-conditioned generation,
-AI video, publishing, or generic workflow/plugin systems.
+long-story authoring, hierarchical multi-chapter rendering, first working
+image workflows, reference-conditioned generation, and AI video SceneClips.
+They do not enable character-memory retrieval, scene graphs, shot planning,
+publishing, or generic workflow/plugin systems.

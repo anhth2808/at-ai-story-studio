@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import {
   AppError,
+  aiMotionPlanUpdateSchema,
   aiVideoBatchSchema,
   sceneMotionSourceUpdateSchema,
   sceneVideoRegenerationSchema,
@@ -22,6 +23,7 @@ import {
 import { z } from 'zod';
 import {
   AiMotionPlanRepository,
+  AssetRepository,
   SceneMotionSourceRepository,
   SceneRepository,
   SceneVideoGenerationRepository,
@@ -257,33 +259,20 @@ export class SceneVideoService {
   }
 
   updateMotionPlan(projectId: Id, sceneId: Id, value: unknown): AiMotionPlanDto {
-    const input = z
-      .object({
-        characterAction: z.string().max(500).optional(),
-        environmentMotion: z.string().max(500).optional(),
-        cameraMotion: z.string().max(60).optional(),
-        intensity: z.string().max(20).optional(),
-        priority: z.string().max(20).optional(),
-      })
-      .strict()
-      .parse(value ?? {});
+    const input = aiMotionPlanUpdateSchema.parse(value ?? {});
     const scene = this.scene(projectId, sceneId);
     const current = this.ensureMotionPlan(projectId, scene.id, scene);
+    if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision)
+      throw new AppError('CONFLICT', 'AI motion plan changed; reload and retry', 409);
     const intent = {
       ...current.intent,
       ...(input.characterAction !== undefined ? { characterAction: input.characterAction } : {}),
       ...(input.environmentMotion !== undefined
         ? { environmentMotion: input.environmentMotion }
         : {}),
-      ...(input.cameraMotion !== undefined
-        ? { cameraMotion: input.cameraMotion as AiMotionPlanDto['intent']['cameraMotion'] }
-        : {}),
-      ...(input.intensity !== undefined
-        ? { intensity: input.intensity as AiMotionPlanDto['intent']['intensity'] }
-        : {}),
-      ...(input.priority !== undefined
-        ? { priority: input.priority as AiMotionPlanDto['intent']['priority'] }
-        : {}),
+      ...(input.cameraMotion !== undefined ? { cameraMotion: input.cameraMotion } : {}),
+      ...(input.intensity !== undefined ? { intensity: input.intensity } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
     };
     const motionPrompt = compileMotionPrompt(intent, sceneIntentInput(scene));
     return this.plans.create({
@@ -375,7 +364,10 @@ export class SceneVideoService {
     // Accept is its own action: issues/notes are optional and the review
     // status flips to ACCEPTED as part of accepting.
     const review = z
-      .object({ issues: z.array(z.string().max(60)).max(12).default([]), notes: z.string().max(1_000).default('') })
+      .object({
+        issues: z.array(z.string().max(60)).max(12).default([]),
+        notes: z.string().max(1_000).default(''),
+      })
       .strict()
       .parse(value ?? {});
     this.context.database.sqlite
@@ -467,9 +459,9 @@ export class SceneVideoService {
     const current = this.generations.getCurrent(projectId, sceneStableId);
     return Boolean(
       current &&
-        current.status === 'COMPLETED' &&
-        current.freshness === 'CURRENT' &&
-        current.reviewStatus === 'ACCEPTED',
+      current.status === 'COMPLETED' &&
+      current.freshness === 'CURRENT' &&
+      current.reviewStatus === 'ACCEPTED',
     );
   }
 
@@ -492,7 +484,13 @@ export class SceneVideoService {
     const settings = this.settings.getOrCreate(projectId);
     const settingsFingerprint = videoSettingsFingerprint(settings);
     const plan = this.ensureMotionPlan(projectId, scene.id, scene);
-    const image = this.currentImageAsset(projectId, scene.stableId);
+    // Scheduling must reuse the canonical downstream Scene-image gate: a
+    // rejected, unreviewed-while-approval-required, or stale-source current
+    // image is never an AI-video source input.
+    const image = new AssetRepository(this.context.database).currentRenderableSceneImage(
+      projectId,
+      scene.stableId,
+    );
     if (!image)
       throw new AppError(
         'PREREQUISITE_MISSING',
@@ -545,7 +543,8 @@ export class SceneVideoService {
       motionPlanFingerprint: plan.inputFingerprint,
       settingsFingerprint,
     });
-    const execution = executionId ?? this.workflow.createExecution(projectId, 'GENERATE_AI_SCENE_VIDEO');
+    const execution =
+      executionId ?? this.workflow.createExecution(projectId, 'GENERATE_AI_SCENE_VIDEO');
     // Identical deterministic inputs must reuse the existing raw clip instead
     // of spending GPU time again.
     const existing = this.generations.findCompletedByFingerprint(
@@ -554,7 +553,13 @@ export class SceneVideoService {
       inputFingerprint,
     );
     if (existing)
-      return { executionId: execution, stepId: null, jobId: null, generation: existing, reused: true };
+      return {
+        executionId: execution,
+        stepId: null,
+        jobId: null,
+        generation: existing,
+        reused: true,
+      };
     const generation = this.generations.create({
       projectId,
       chapterId: scene.chapterId,
@@ -602,22 +607,6 @@ export class SceneVideoService {
     };
   }
 
-  private currentImageAsset(
-    projectId: Id,
-    sceneStableId: string,
-  ): { id: Id; sha256: string; path: string } | null {
-    const row = this.context.database.sqlite
-      .prepare(
-        `SELECT id,sha256,path FROM assets
-         WHERE project_id=? AND role=? AND type='SCENE_IMAGE' AND is_current=1 AND status='READY'
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(projectId, `scene:${sceneStableId}:image`) as
-      | { id: Id; sha256: string; path: string }
-      | undefined;
-    return row ?? null;
-  }
-
   async executeStep(
     step: ClaimedStep,
     workerId: string,
@@ -640,7 +629,12 @@ export class SceneVideoService {
     )
       throw new AppError('STALE_INPUT', 'Scene video generation metadata is stale', 409);
     try {
-      this.assertCurrentInputs(payload.projectId, generation.sceneId, generation.sceneRevisionId, scheduled);
+      this.assertCurrentInputs(
+        payload.projectId,
+        generation.sceneId,
+        generation.sceneRevisionId,
+        scheduled,
+      );
       this.generations.markRunning(payload.projectId, generation.id, step.attemptNumber);
       progress(0.1, 'Checking ComfyUI video generation readiness');
       const result = await this.provider.generate(request, signal);
@@ -704,7 +698,11 @@ export class SceneVideoService {
           },
         );
         if (!committed)
-          throw new AppError('STALE_INPUT', 'Video generation lease was lost before publication', 409);
+          throw new AppError(
+            'STALE_INPUT',
+            'Video generation lease was lost before publication',
+            409,
+          );
       } finally {
         await rm(output.stagingPath, { force: true });
       }
@@ -721,7 +719,12 @@ export class SceneVideoService {
           failure.message,
         );
       } else {
-        this.generations.markFailed(payload.projectId, generation.id, failure.code, failure.message);
+        this.generations.markFailed(
+          payload.projectId,
+          generation.id,
+          failure.code,
+          failure.message,
+        );
       }
       throw new VideoProviderError(
         failure.code as VideoProviderError['code'],

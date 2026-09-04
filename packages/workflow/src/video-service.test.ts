@@ -29,7 +29,11 @@ const sceneId = '44444444-4444-4444-8444-444444444444';
 const sceneStableId = 'scene-stable-1';
 const imageSha = 'a'.repeat(64);
 
-async function setup(): Promise<{ context: StudioContext; database: DatabaseHandle; clipFixture: string }> {
+async function setup(): Promise<{
+  context: StudioContext;
+  database: DatabaseHandle;
+  clipFixture: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), 'studio-video-workflow-'));
   const database = createDatabase(join(root, 'studio.db'));
   migrateDatabase(database);
@@ -198,8 +202,15 @@ class FakeVideoProvider implements VideoGenerationProvider {
   async cancel(): Promise<void> {}
 }
 
-async function configuredService(database: DatabaseHandle, context: StudioContext, clipFixture: string) {
-  const service = new SceneVideoService(context, new FakeVideoProvider(clipFixture, context.workspace.staging));
+async function configuredService(
+  database: DatabaseHandle,
+  context: StudioContext,
+  clipFixture: string,
+) {
+  const service = new SceneVideoService(
+    context,
+    new FakeVideoProvider(clipFixture, context.workspace.staging),
+  );
   service.setMotionSource(projectId, sceneId, 'AI_VIDEO');
   const settings = service.getSettings(projectId);
   const base = { ...settings };
@@ -218,10 +229,52 @@ async function configuredService(database: DatabaseHandle, context: StudioContex
   return service;
 }
 
+function bindImageGeneration(
+  database: DatabaseHandle,
+  reviewStatus: 'UNREVIEWED' | 'ACCEPTED' | 'REJECTED',
+): void {
+  const asset = database.sqlite
+    .prepare('SELECT id FROM assets WHERE project_id=? AND role=? AND is_current=1')
+    .get(projectId, `scene:${sceneStableId}:image`) as { id: string };
+  database.sqlite
+    .prepare(
+      `INSERT INTO scene_image_generations(id,project_id,scene_stable_id,scene_revision_id,revision,
+        source,status,review_status,is_current,input_fingerprint,asset_id,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      randomUUID(),
+      projectId,
+      sceneStableId,
+      sceneId,
+      1,
+      'MANUAL',
+      'COMPLETED',
+      reviewStatus,
+      1,
+      'gen-fingerprint',
+      asset.id,
+      '2026-01-01',
+      '2026-01-01',
+    );
+}
+
+function requireImageApproval(database: DatabaseHandle, required: boolean): void {
+  database.sqlite
+    .prepare(
+      `INSERT INTO image_generation_settings(id,project_id,require_image_approval,input_fingerprint,created_at,updated_at)
+       VALUES(?,?,?,?,?,?)`,
+    )
+    .run(randomUUID(), projectId, required ? 1 : 0, 'img-fingerprint', '2026-01-01', '2026-01-01');
+}
+
 describe('SceneVideoService', () => {
   it('refuses to schedule a Ken Burns scene', async () => {
     const { context, database, clipFixture } = await setup();
-    const service = new SceneVideoService(context, new FakeVideoProvider(clipFixture, context.workspace.staging));
+    const service = new SceneVideoService(
+      context,
+      new FakeVideoProvider(clipFixture, context.workspace.staging),
+    );
     expect(() => service.schedule(projectId, sceneId, {})).toThrowError(
       'Scene motion source is KEN_BURNS; set it to AI_VIDEO or HYBRID first',
     );
@@ -268,7 +321,14 @@ describe('SceneVideoService', () => {
     // RANDOM seed mode: regenerate must produce a new concrete seed.
     const settingsNow = service.getSettings(projectId);
     const baseSettings = { ...settingsNow };
-    for (const key of ['id', 'projectId', 'rowVersion', 'inputFingerprint', 'createdAt', 'updatedAt'])
+    for (const key of [
+      'id',
+      'projectId',
+      'rowVersion',
+      'inputFingerprint',
+      'createdAt',
+      'updatedAt',
+    ])
       delete (baseSettings as Record<string, unknown>)[key];
     service.updateSettings(projectId, {
       ...baseSettings,
@@ -309,7 +369,10 @@ describe('SceneVideoService', () => {
         throw Object.assign(new Error('CUDA out of memory'), { name: 'VideoProviderError' });
       }
     }
-    const service = new SceneVideoService(context, new OomProvider(clipFixture, context.workspace.staging));
+    const service = new SceneVideoService(
+      context,
+      new OomProvider(clipFixture, context.workspace.staging),
+    );
     service.setMotionSource(projectId, sceneId, 'AI_VIDEO');
     const scheduled = service.schedule(projectId, sceneId, {});
     const workflow = new WorkflowRepository(database);
@@ -317,6 +380,99 @@ describe('SceneVideoService', () => {
     await expect(service.executeStep(step, 'video-worker')).rejects.toBeTruthy();
     const failed = service.getGeneration(projectId, sceneId, scheduled.generation.id);
     expect(failed.status).toBe('FAILED');
+    database.sqlite.close();
+  });
+
+  it('rejects invalid motion plan intent fields', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = new SceneVideoService(
+      context,
+      new FakeVideoProvider(clipFixture, context.workspace.staging),
+    );
+    expect(() =>
+      service.updateMotionPlan(projectId, sceneId, { cameraMotion: 'SPIN' }),
+    ).toThrowError(/cameraMotion/u);
+    expect(() =>
+      service.updateMotionPlan(projectId, sceneId, { intensity: 'EXTREME' }),
+    ).toThrowError(/intensity/u);
+    expect(() => service.updateMotionPlan(projectId, sceneId, { priority: 'URGENT' })).toThrowError(
+      /priority/u,
+    );
+    database.sqlite.close();
+  });
+
+  it('enforces expectedRevision on motion plan updates', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = new SceneVideoService(
+      context,
+      new FakeVideoProvider(clipFixture, context.workspace.staging),
+    );
+    expect(
+      service.updateMotionPlan(projectId, sceneId, { characterAction: 'she waits' }).revision,
+    ).toBe(2);
+    expect(
+      service.updateMotionPlan(projectId, sceneId, {
+        expectedRevision: 2,
+        characterAction: 'she runs',
+      }).revision,
+    ).toBe(3);
+    expect(() =>
+      service.updateMotionPlan(projectId, sceneId, {
+        expectedRevision: 2,
+        characterAction: 'she sleeps',
+      }),
+    ).toThrowError('AI motion plan changed; reload and retry');
+    database.sqlite.close();
+  });
+
+  it('refuses rejected and unreviewed current images as AI video sources when approval is required', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = await configuredService(database, context, clipFixture);
+    requireImageApproval(database, true);
+    bindImageGeneration(database, 'REJECTED');
+    expect(() => service.schedule(projectId, sceneId, {})).toThrowError(
+      'A current accepted scene image is required before AI video generation',
+    );
+    database.sqlite
+      .prepare(
+        `UPDATE scene_image_generations SET review_status='UNREVIEWED'
+         WHERE project_id=? AND scene_stable_id=?`,
+      )
+      .run(projectId, sceneStableId);
+    expect(() => service.schedule(projectId, sceneId, {})).toThrowError(
+      'A current accepted scene image is required before AI video generation',
+    );
+    database.sqlite.close();
+  });
+
+  it('schedules from an accepted current image when approval is required', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = await configuredService(database, context, clipFixture);
+    requireImageApproval(database, true);
+    bindImageGeneration(database, 'ACCEPTED');
+    const scheduled = service.schedule(projectId, sceneId, {});
+    expect(scheduled.reused).toBe(false);
+    expect(scheduled.generation.status).toBe('PENDING');
+    database.sqlite.close();
+  });
+
+  it('keeps the canonical image gate when approval is disabled', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = await configuredService(database, context, clipFixture);
+    requireImageApproval(database, false);
+    // Documented approval-off behavior: an unreviewed current image still
+    // schedules, but a rejected current image is never an AI video source.
+    bindImageGeneration(database, 'UNREVIEWED');
+    expect(service.schedule(projectId, sceneId, {}).reused).toBe(false);
+    database.sqlite
+      .prepare(
+        `UPDATE scene_image_generations SET review_status='REJECTED'
+         WHERE project_id=? AND scene_stable_id=?`,
+      )
+      .run(projectId, sceneStableId);
+    expect(() => service.schedule(projectId, sceneId, {})).toThrowError(
+      'A current accepted scene image is required before AI video generation',
+    );
     database.sqlite.close();
   });
 });

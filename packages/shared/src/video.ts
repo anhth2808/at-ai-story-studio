@@ -122,11 +122,7 @@ export const videoProviderSettingsBaseSchema = z
     provider: videoProviderSchema.default('COMFYUI'),
     baseUrl: videoBaseUrlSchema.default('http://127.0.0.1:8188'),
     workflowTemplate: z.literal('image-to-video-v1').default('image-to-video-v1'),
-    diffusionModel: z
-      .string()
-      .trim()
-      .max(300)
-      .default(wan22Ti2v5bDefaults.diffusionModel),
+    diffusionModel: z.string().trim().max(300).default(wan22Ti2v5bDefaults.diffusionModel),
     textEncoder: z.string().trim().max(300).default(wan22Ti2v5bDefaults.textEncoder),
     vaeName: z.string().trim().max(300).default(wan22Ti2v5bDefaults.vaeName),
     sampler: z.string().trim().min(1).max(120).default('uni_pc'),
@@ -237,10 +233,11 @@ export const VIDEO_PRESETS: Record<z.infer<typeof videoPresetSchema>, VideoPrese
   QUALITY: { width: 1_280, height: 704, frames: 121, steps: 20, guidance: 5 },
 };
 
+// Motion-source storage has no revision counter, so optimistic concurrency is
+// intentionally absent here (unlike AiMotionPlan updates).
 export const sceneMotionSourceUpdateSchema = z
   .object({
     motionSource: motionSourceSchema,
-    expectedRevision: z.number().int().positive().optional(),
   })
   .strict();
 export type SceneMotionSourceUpdate = z.infer<typeof sceneMotionSourceUpdateSchema>;
@@ -418,7 +415,10 @@ export const sceneVideoGenerationDtoSchema = z
     workflowTemplate: videoWorkflowTemplateSchema.nullable(),
     inputFingerprint: z.string().min(1).max(128),
     sourceImageAssetId: idSchema.nullable(),
-    sourceImageSha256: z.string().regex(/^[0-9a-f]{64}$/u).nullable(),
+    sourceImageSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
     attempt: z.number().int().nonnegative(),
     assetId: idSchema.nullable(),
     assetUrl: z.string().max(1_000).nullable(),
