@@ -9,3 +9,5 @@ export * from './image.js';
 export * from './timeline-repositories.js';
 export * from './render-jobs.js';
 export * from './video.js';
+export * from './production.js';
+export * from './publication.js';

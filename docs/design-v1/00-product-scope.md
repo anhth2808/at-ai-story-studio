@@ -17,8 +17,10 @@ AI Story Studio turns an idea or an authorized user-provided story into a long-f
 ### Project management
 
 A `StoryProject` stores title, description, language, genre, target chapter count, creation mode, imported source reference, current blueprint revision, characters, chapter plans, chapter revisions, provider selections, TTS/visual/subtitle/render configuration, workflow state, and generated assets.
-
-Project operations: create, edit metadata/configuration, archive, duplicate configuration, inspect storage, export final MP4, and delete only after an explicit destructive confirmation. Deleting a project is not part of workflow invalidation.
+Project operations: create, edit metadata/configuration, archive, duplicate
+configuration, inspect storage, export a revisioned publication package and
+final MP4, and delete only after an explicit destructive confirmation.
+Deleting a project is not part of workflow invalidation.
 
 ### Story creation modes
 
@@ -56,6 +58,14 @@ Adaptation is not synonym replacement. Chapter prompts use the adaptation bluepr
 - Preview configuration and render final MP4.
 - See current, stale, failed, running, and pending outputs with causes.
 
+### Production orchestration
+
+An explicit production run performs read-only preflight, bounded planning, and
+ordered handoff across existing Story, chapter, audio, Scene, visual, image,
+motion, timeline, render, and publication services. It reuses current matching
+outputs, stops for review/configuration, supports pause/resume/cancel/retry,
+and never uploads to an external platform.
+
 ### Automation
 
 “Run remaining” schedules only missing/invalidated descendants. It never silently overwrites a user-edited current chapter. A user can cancel queued/running work, change a provider for future work, retry a failed unit, or deliberately regenerate selected outputs.
@@ -81,8 +91,8 @@ flowchart TD
 ## Explicit non-goals
 
 - Multi-user accounts, collaboration, cloud hosting, mobile apps.
-- Automatic YouTube upload, channel analytics, thumbnails as a required path.
-- AI image generation, character-consistent imagery, animation, image-to-video, AI video.
+- Automatic YouTube upload, channel analytics, or external platform publishing.
+- AI image generation, character-consistent imagery, animation, image-to-video, AI video as a required V1 path.
 - Voice training/management UI; only provider configuration and voice selection.
 - Full novel memory, embeddings/vector search, knowledge graphs, scene/shot planner.
 - Dubbing/translation workflow, although provider interfaces leave room for them.

@@ -16,8 +16,10 @@
   corruption rejection still rely on render-time ffprobe validation.
 - Asset streaming does not yet implement a download disposition header.
 - IDs use cryptographically random UUIDs rather than UUIDv7.
-- The render manifest is represented by persisted fingerprints and asset
-  lineage. A standalone immutable manifest file is not emitted.
+- The render pipeline keeps fingerprints and asset lineage in SQLite. The
+  production publication stage additionally emits a revisioned
+  workspace-relative `publication.json` package, but it does not upload to
+  YouTube or another external platform.
 
 ## Long-story engine limits
 
@@ -145,6 +147,30 @@
   until another image is accepted.
 - Multi-character conditioning remains LIMITED (unchanged from Prompt #10);
   candidate/feedback workflows do not change identity-swap risk.
+
+## Production pipeline limits
+
+- Production coordination, preflight, planning, stage persistence, bounded
+  scheduling, recovery, package validation, and safe export are implemented.
+- A run pauses on missing story/media/configuration, review gates, or provider
+  readiness instead of inventing output. It does not silently bypass approval.
+- Prompt #14 GPU verification on 2026-09-04 used ComfyUI 0.33.1. Image
+  generation completed in 46,343 ms with a 1024x576 PNG and a verified
+  SHA-256. AI-motion generation completed in 153,097 ms with an H.264 MP4
+  at 704x384, 24 fps, and 3,375 ms; its SHA-256 was also verified.
+- The one-chapter production smoke completed all 11 stages after a compiled
+  render fallback-policy enum bug was corrected and the worker was rebuilt.
+  It produced publication package `READY` revision 3 and a `COMPLETED`
+  export. The exported MP4 was H.264/AAC at 1920x1080 for 90,474 ms, and its
+  manifest checksum matched the file.
+- The smoke project contained one chapter. The required three-chapter
+  release E2E, restart/recovery after interruption, and a second-run reuse
+  measurement remain unverified.
+- The new image and AI-motion outputs remained `UNREVIEWED` and non-current;
+  no unreviewed output was promoted.
+- The publication package contains metadata, current managed Asset references,
+  measured chapter markers, and checksums. External publishing, upload
+  credentials, channel state, and platform analytics are out of scope.
 
 ## Verification record
 

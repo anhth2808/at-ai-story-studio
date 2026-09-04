@@ -648,3 +648,20 @@ order.
 images or Story/TTS data. Reference changes propagate only through the
 per-character profile dependency model.
 
+# Production pipeline implementation rules
+
+- Keep production orchestration durable in the Node/TypeScript worker and SQLite
+  source of truth. The coordinator must not call providers, FFmpeg, or external
+  publishing platforms directly.
+- Keep production scopes bounded and fingerprinted. Reuse only current,
+  dependency-valid outputs; stale, rejected, unreviewed, or non-current assets
+  must never become render inputs.
+- Pause at missing inputs, review gates, provider readiness, and recoverable
+  failures. Never invent output or bypass an explicit user decision.
+- Persist publication package revisions and exports immutably. Export only
+  managed assets through validated relative names, staging directories,
+  checksums, and atomic manifests.
+- External publishing, including YouTube upload, is out of scope until a
+  separate product change defines credentials, consent, retries, and platform
+  state handling.
+

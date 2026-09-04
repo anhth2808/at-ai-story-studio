@@ -1654,3 +1654,279 @@ export const sceneVideoGenerations = sqliteTable(
     ),
   }),
 );
+export const productionProfiles = sqliteTable(
+  'production_profiles',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    profileKey: text('profile_key').notNull(),
+    revision: integer('revision').notNull(),
+    settings: text('settings').notNull(),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(true),
+    rowVersion: integer('row_version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    current: uniqueIndex('production_profiles_current_idx')
+      .on(table.projectId, table.profileKey)
+      .where(sql`${table.isCurrent} = 1`),
+    revision: uniqueIndex('production_profiles_revision_idx').on(
+      table.projectId,
+      table.profileKey,
+      table.revision,
+    ),
+    project: index('production_profiles_project_idx').on(table.projectId, table.updatedAt),
+  }),
+);
+
+export const productionRuns = sqliteTable(
+  'production_runs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    workflowExecutionId: text('workflow_execution_id')
+      .notNull()
+      .references(() => workflowExecutions.id, { onDelete: 'restrict' }),
+    profileId: text('profile_id')
+      .notNull()
+      .references(() => productionProfiles.id, { onDelete: 'restrict' }),
+    profileRevision: integer('profile_revision').notNull(),
+    scopeType: text('scope_type').notNull(),
+    scopeStart: integer('scope_start'),
+    scopeEnd: integer('scope_end'),
+    fingerprint: text('fingerprint').notNull(),
+    status: text('status').notNull(),
+    currentStage: text('current_stage'),
+    rowVersion: integer('row_version').notNull().default(1),
+    coordinatorSequence: integer('coordinator_sequence').notNull().default(0),
+    progressCurrent: integer('progress_current').notNull().default(0),
+    progressTotal: integer('progress_total').notNull().default(0),
+    metrics: text('metrics').notNull().default('{}'),
+    error: text('error'),
+    createdAt: text('created_at').notNull(),
+    startedAt: text('started_at'),
+    pausedAt: text('paused_at'),
+    completedAt: text('completed_at'),
+    cancellationRequestedAt: text('cancellation_requested_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    execution: uniqueIndex('production_runs_execution_idx').on(table.workflowExecutionId),
+    projectStatus: index('production_runs_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.updatedAt,
+    ),
+    scope: index('production_runs_project_scope_idx').on(
+      table.projectId,
+      table.scopeType,
+      table.scopeStart,
+      table.scopeEnd,
+      table.status,
+    ),
+    fingerprint: index('production_runs_fingerprint_idx').on(table.projectId, table.fingerprint),
+  }),
+);
+
+export const productionStages = sqliteTable(
+  'production_stages',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => productionRuns.id, { onDelete: 'cascade' }),
+    stageKey: text('stage_key').notNull(),
+    ordinal: integer('ordinal').notNull(),
+    status: text('status').notNull(),
+    attempt: integer('attempt').notNull().default(0),
+    fingerprint: text('fingerprint').notNull(),
+    progressCurrent: integer('progress_current').notNull().default(0),
+    progressTotal: integer('progress_total').notNull().default(0),
+    reusableCount: integer('reusable_count').notNull().default(0),
+    generatedCount: integer('generated_count').notNull().default(0),
+    reviewCount: integer('review_count').notNull().default(0),
+    blockedCount: integer('blocked_count').notNull().default(0),
+    summary: text('summary').notNull().default('{}'),
+    warnings: text('warnings').notNull().default('[]'),
+    fallbacks: text('fallbacks').notNull().default('[]'),
+    blockers: text('blockers').notNull().default('[]'),
+    error: text('error'),
+    createdAt: text('created_at').notNull(),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    runStage: uniqueIndex('production_stages_run_stage_idx').on(table.runId, table.stageKey),
+    runOrdinal: uniqueIndex('production_stages_run_ordinal_idx').on(table.runId, table.ordinal),
+    runStatus: index('production_stages_run_status_idx').on(
+      table.runId,
+      table.status,
+      table.ordinal,
+    ),
+  }),
+);
+
+export const productionStageWork = sqliteTable(
+  'production_stage_work',
+  {
+    id: text('id').primaryKey(),
+    stageId: text('stage_id')
+      .notNull()
+      .references(() => productionStages.id, { onDelete: 'cascade' }),
+    workflowStepId: text('workflow_step_id')
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: 'cascade' }),
+    unitKey: text('unit_key').notNull(),
+    entityId: text('entity_id'),
+    classification: text('classification').notNull(),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    outputFingerprint: text('output_fingerprint'),
+    status: text('status').notNull(),
+    summary: text('summary').notNull().default('{}'),
+    ...timestamps,
+  },
+  (table) => ({
+    unit: uniqueIndex('production_stage_work_unit_idx').on(table.stageId, table.unitKey),
+    step: uniqueIndex('production_stage_work_step_idx').on(table.stageId, table.workflowStepId),
+    status: index('production_stage_work_status_idx').on(
+      table.stageId,
+      table.status,
+      table.unitKey,
+    ),
+    workflowStep: index('production_stage_work_workflow_step_idx').on(table.workflowStepId),
+  }),
+);
+
+export const productionInterventions = sqliteTable(
+  'production_interventions',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => productionRuns.id, { onDelete: 'cascade' }),
+    stageId: text('stage_id').references(() => productionStages.id, { onDelete: 'set null' }),
+    type: text('type').notNull(),
+    severity: text('severity').notNull(),
+    status: text('status').notNull(),
+    affectedEntityType: text('affected_entity_type'),
+    affectedEntityId: text('affected_entity_id'),
+    message: text('message').notNull(),
+    actions: text('actions').notNull().default('[]'),
+    dedupeKey: text('dedupe_key').notNull(),
+    resolution: text('resolution'),
+    createdAt: text('created_at').notNull(),
+    resolvedAt: text('resolved_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    open: uniqueIndex('production_interventions_open_idx')
+      .on(table.runId, table.dedupeKey)
+      .where(sql`${table.status} = 'OPEN'`),
+    runStatus: index('production_interventions_run_status_idx').on(
+      table.runId,
+      table.status,
+      table.updatedAt,
+    ),
+  }),
+);
+
+export const publicationPackages = sqliteTable(
+  'publication_packages',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    runId: text('run_id')
+      .notNull()
+      .references(() => productionRuns.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull().default(1),
+    status: text('status').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    videoAssetId: text('video_asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    thumbnailAssetId: text('thumbnail_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    subtitleAssetIds: text('subtitle_asset_ids').notNull().default('[]'),
+    metadata: text('metadata'),
+    chapterMarkers: text('chapter_markers').notNull().default('[]'),
+    validation: text('validation').notNull().default('[]'),
+    manifest: text('manifest'),
+    rowVersion: integer('row_version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    run: uniqueIndex('publication_packages_run_idx').on(table.runId),
+    projectStatus: index('publication_packages_project_status_idx').on(
+      table.projectId,
+      table.status,
+      table.updatedAt,
+    ),
+  }),
+);
+
+export const publicationPackageRevisions = sqliteTable(
+  'publication_package_revisions',
+  {
+    id: text('id').primaryKey(),
+    packageId: text('package_id')
+      .notNull()
+      .references(() => publicationPackages.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    videoAssetId: text('video_asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    thumbnailAssetId: text('thumbnail_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    subtitleAssetIds: text('subtitle_asset_ids').notNull().default('[]'),
+    metadata: text('metadata'),
+    chapterMarkers: text('chapter_markers').notNull().default('[]'),
+    validation: text('validation').notNull().default('[]'),
+    manifest: text('manifest'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(true),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => ({
+    revision: uniqueIndex('publication_package_revisions_revision_idx').on(
+      table.packageId,
+      table.revision,
+    ),
+    current: uniqueIndex('publication_package_revisions_current_idx')
+      .on(table.packageId)
+      .where(sql`${table.isCurrent} = 1`),
+    package: index('publication_package_revisions_package_idx').on(table.packageId, table.revision),
+  }),
+);
+
+export const publicationExports = sqliteTable(
+  'publication_exports',
+  {
+    id: text('id').primaryKey(),
+    packageId: text('package_id')
+      .notNull()
+      .references(() => publicationPackages.id, { onDelete: 'cascade' }),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    status: text('status').notNull(),
+    directoryName: text('directory_name').notNull(),
+    manifest: text('manifest'),
+    error: text('error'),
+    createdAt: text('created_at').notNull(),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    active: uniqueIndex('publication_exports_active_idx')
+      .on(table.packageId, table.directoryName)
+      .where(sql`${table.status} IN ('PENDING', 'RUNNING')`),
+    package: index('publication_exports_package_idx').on(table.packageId, table.updatedAt),
+  }),
+);

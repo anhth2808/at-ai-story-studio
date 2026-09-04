@@ -47,6 +47,10 @@ export const workflowStepTypeSchema = z.enum([
   'BUILD_VISUAL_PROMPT',
   'GENERATE_SCENE_IMAGE',
   'GENERATE_AI_SCENE_VIDEO',
+  'ADVANCE_PRODUCTION_RUN',
+  'GENERATE_PUBLICATION_METADATA',
+  'BUILD_PUBLICATION_PACKAGE',
+  'EXPORT_PUBLICATION_PACKAGE',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);
@@ -67,7 +71,9 @@ export const assetTypeSchema = z.enum([
   'CHARACTER_REFERENCE_IMAGE',
   'STYLE_REFERENCE_IMAGE',
   'AI_SCENE_VIDEO',
+  'PUBLICATION_THUMBNAIL',
 ]);
+export type AssetType = z.infer<typeof assetTypeSchema>;
 
 export const projectInputSchema = z
   .object({
@@ -211,7 +217,9 @@ export type SafeError = {
     | 'CONTEXT'
     | 'CONTINUITY'
     | 'CANCELLED'
-    | 'BUDGET';
+    | 'BUDGET'
+    | 'PRODUCTION'
+    | 'PACKAGE';
   diagnostics?: string;
 };
 
@@ -232,3 +240,5 @@ export * from './image.js';
 export * from './story.js';
 export * from './timeline.js';
 export * from './video.js';
+export * from './production.js';
+export * from './publication.js';

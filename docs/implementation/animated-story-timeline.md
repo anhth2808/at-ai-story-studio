@@ -91,3 +91,12 @@ A failed Scene Clip leaves its Chapter and Project dependencies blocked. Retryin
 ## Legacy mode
 
 The existing `scheduleRender()` and `buildRenderArguments()` path remains explicit for `BACKGROUND` source and no-body clients. Legacy background rendering does not create Scene fallback data, SceneTiming, MotionPlan, or hierarchical video Assets.
+
+## Production handoff
+
+Prompt #14's production run consumes the current renderable Scene and Chapter
+outputs through the existing Timeline service. Timeline invalidation remains
+chapter-local: a Scene image, MotionPlan, or SceneTiming change stales only
+that Scene Clip, its Chapter Video, and dependent Project Videos. Production
+reuses unaffected clips and never asks the timeline to regenerate unrelated
+chapters.

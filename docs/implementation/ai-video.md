@@ -85,3 +85,12 @@ motion intent, structured issues, and notes into the next request only.
 
 See `known-limitations.md` and `video-benchmark.md` for measured generation
 times and quality observations on the RTX 3060 12GB target.
+
+## Production handoff
+
+The Production profile can select AI motion by policy and priority, but
+selection is metadata-only until the existing AI-video worker step runs.
+Unreviewed or rejected motion remains a visible review/fallback condition;
+Ken Burns fallback is recorded rather than silently replacing the source.
+Production does not start a GPU generation while another workload reserves the
+local GPU.

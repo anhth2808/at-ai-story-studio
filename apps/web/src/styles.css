@@ -1671,3 +1671,84 @@ select:focus-visible {
 .timeline-workspace input {
   min-height: 44px;
 }
+.production-workspace {
+  display: grid;
+  gap: 16px;
+}
+.production-workspace .story-toolbar {
+  align-items: flex-start;
+}
+.production-workspace .actions label,
+.production-workspace .field label {
+  display: grid;
+  gap: 5px;
+}
+.production-workspace input,
+.production-workspace select {
+  min-height: 40px;
+  min-width: 120px;
+  padding: 7px 9px;
+  border: 1px solid #394252;
+  border-radius: 7px;
+  background: #11131a;
+  color: #e9edf5;
+}
+.production-workspace .field textarea {
+  min-height: 110px;
+  box-sizing: border-box;
+}
+.status-pill {
+  border: 1px solid #4e5c70;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #b8c5d8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.code-block {
+  max-height: 360px;
+  overflow: auto;
+  margin: 16px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #11131a;
+  color: #c8d5e8;
+  font-size: 11px;
+}
+
+.production-workspace .package-media {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+.production-workspace .package-media video {
+  width: 100%;
+  max-height: 420px;
+  border-radius: 8px;
+  background: #000;
+}
+.production-workspace .package-media a {
+  color: #7dd3fc;
+}
+.production-workspace .package-markers {
+  margin-top: 16px;
+  color: #b9c5d7;
+}
+.production-workspace .package-markers ol {
+  display: grid;
+  gap: 6px;
+  padding-left: 24px;
+}
+@media (max-width: 700px) {
+  .production-workspace .actions {
+    align-items: stretch;
+  }
+  .production-workspace .actions > button,
+  .production-workspace .actions > label {
+    flex: 1 1 100%;
+  }
+  .production-workspace .actions input,
+  .production-workspace .actions select {
+    width: 100%;
+  }
+}

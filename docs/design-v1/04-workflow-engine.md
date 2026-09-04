@@ -117,3 +117,17 @@ Running steps have leases and heartbeats. On startup, an expired lease closes it
 - **Why:** explicit edges enable exact chapter/chunk invalidation and independent retry while remaining understandable in SQLite.
 - **Trade-offs:** graph materialization and cycle validation add code; historical state is attempts/revisions rather than replayable events.
 - **Future impact:** scene/image/video/evaluation nodes append naturally; a remote scheduler can later consume the same step contract.
+
+## Production coordination
+
+The production run is a persisted projection over existing workflow steps, not
+a replacement state machine. A bounded coordinator inspects the next ordered
+stage, reuses current matching outputs, links missing work to existing steps,
+and records review/configuration interventions. Run and stage transitions are
+centralized and guarded; pause, resume, cancel, retry, lease recovery, and
+scope conflict checks remain durable in SQLite.
+
+The coordinator is intentionally forbidden from calling providers, FFmpeg,
+ffprobe, filesystem copy, or export code. Worker execution keeps ownership of
+those side effects. Publication package revisions and exports are separate
+durable records and never imply external platform publishing.

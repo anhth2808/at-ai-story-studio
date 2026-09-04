@@ -139,3 +139,23 @@ clips normalize into SceneClips during the normal scoped render. RenderPlan
 reports AI-specific counts (missing motion, clips to normalize, estimated
 generation time) and never schedules AI generation implicitly. See
 `ai-video.md` and `video-provider.md`.
+
+## Production workflow (Prompt #14)
+
+The production coordinator is a persisted, bounded layer over these existing
+steps:
+
+```text
+STORY -> CHAPTERS -> AUDIO -> SCENES -> VISUAL_PROFILES -> VISUAL_PROMPTS
+  -> SCENE_IMAGES -> AI_MOTION -> TIMELINE -> RENDER -> PUBLICATION_PACKAGE
+```
+
+`ProductionOrchestrator` advances one stage at a time, reuses current matching
+outputs, schedules only missing bounded units, and pauses for review or
+configuration. It persists stage work and interventions, supports pause,
+resume, cancel, retry, lease recovery, and scope conflict checks. The
+coordinator never calls providers, FFmpeg, ffprobe, or filesystem export code.
+
+The publication stage generates a revisioned metadata/manifest package from
+current Asset IDs and hashes, then exports through a safe managed directory.
+It does not upload to YouTube or any other external platform.

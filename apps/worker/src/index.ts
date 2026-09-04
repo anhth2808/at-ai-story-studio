@@ -11,13 +11,12 @@ import {
 import { FfmpegTools, ProcessRunner, reconcileWorkspace, initializeWorkspace } from '@studio/media';
 import {
   ImageProviderError,
+  StudioService,
   WorkerExecutor,
-  createImageGenerationService,
   createOmpAgent,
   createStoryEngine,
   createVisualConsistencyService,
   SceneEngine,
-  SceneVideoService,
 } from '@studio/workflow';
 const root =
   process.env.STUDIO_WORKSPACE ??
@@ -41,8 +40,7 @@ const sceneEngine = new SceneEngine({ database, agent });
 const batches = new StoryBatchRepository(database);
 const heartbeat = new HeartbeatRepository(database);
 const visualService = createVisualConsistencyService(database, agent);
-const imageService = createImageGenerationService(context);
-const videoService = new SceneVideoService(context);
+const studio = new StudioService(context);
 const executor = new WorkerExecutor(
   context,
   workerId,
@@ -50,8 +48,10 @@ const executor = new WorkerExecutor(
   storyEngine,
   sceneEngine,
   visualService,
-  imageService,
-  videoService,
+  studio.images,
+  studio.videos,
+  studio.production,
+  studio.publication,
 );
 let stopping = false;
 let activeController: AbortController | undefined;
@@ -59,9 +59,17 @@ const stop = (): void => {
   stopping = true;
   activeController?.abort();
 };
+await studio.production.reconcileActiveRuns();
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
 const heartbeatTimer = setInterval(() => heartbeat.beat(workerId, 'READY'), 5_000);
+const reconcileProductionStep = async (stepId: string): Promise<void> => {
+  try {
+    await studio.production.onWorkflowStepSettled(stepId);
+  } catch (error) {
+    console.error('Production reconciliation failed', error);
+  }
+};
 
 while (!stopping) {
   heartbeat.beat(workerId, 'READY');
@@ -84,19 +92,23 @@ while (!stopping) {
     clearInterval(cancellationPoll);
     if (controller.signal.aborted || workflow.isCancellationRequested(step.id)) {
       workflow.cancel(step);
+      await reconcileProductionStep(step.id);
       batches.reconcileWorkflowStep(step.id);
     } else {
       workflow.complete(step);
+      await reconcileProductionStep(step.id);
       batches.reconcileWorkflowStep(step.id);
     }
   } catch (error) {
     clearInterval(cancellationPoll);
     if (controller.signal.aborted || workflow.isCancellationRequested(step.id)) {
       workflow.cancel(step, 'Cancelled by user');
+      await reconcileProductionStep(step.id);
       batches.reconcileWorkflowStep(step.id);
     } else {
       const retry = error instanceof ImageProviderError ? error.retryable : true;
       workflow.fail(step, error instanceof Error ? error.message : 'Worker step failed', retry);
+      await reconcileProductionStep(step.id);
       batches.reconcileWorkflowStep(step.id);
     }
   } finally {

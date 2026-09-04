@@ -63,6 +63,8 @@ A single user can create a project, generate a new story or adapt a story they a
 15. [Reference reuse](14-reference-reuse.md)
 16. [Future roadmap](15-future-roadmap.md)
 17. [Risks and decisions](16-risks-and-decisions.md)
+18. [Production implementation](../implementation/production-pipeline.md)
+19. [Publication package implementation](../implementation/publication-package.md)
 
 ## Smallest implementation sequence
 
@@ -79,4 +81,4 @@ A single user can create a project, generate a new story or adapt a story they a
 | **M6 - Story generation** | Add the thin `AiAgent` -> `OmpAgent` -> OMP SDK boundary, then generate/analyze blueprint, characters, plans, chapters, summaries, and events through configured OMP models/providers with Zod-validated outputs. | Chapter 27 can be generated from bounded recorded context. |
 | **M7 — Full automation** | Pipeline command from idea/import through every chapter, audio, subtitles, timeline, and final MP4; overview/retry UI. | A new project reaches validated MP4 without manual media assembly and can recover from restart/failure. |
 
-This order proves the risky media and persistence path with manual text before adding nondeterministic LLM behavior. Image generation, voice cloning, ASR alignment, and publishing remain post-V1 options.
+This order proves the risky media and persistence path with manual text before adding nondeterministic LLM behavior. Image generation, voice cloning, ASR alignment, and external publishing remain post-V1 options; the local production package/export boundary is implemented before any platform integration.

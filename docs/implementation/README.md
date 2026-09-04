@@ -40,18 +40,34 @@ explicit. None automatically starts narration, rendering, or video generation.
 - [Scene prompts](scene-prompts.md)
 - [Known limitations](known-limitations.md)
 
+- [Production pipeline](production-pipeline.md)
+- [Production run](production-run.md)
+- [Production profile](production-profile.md)
+- [Production interventions](production-interventions.md)
+- [Production planning](production-planning.md)
+- [Publication package](publication-package.md)
+
+## Production boundary
+
+The production surface is an explicit, bounded coordinator over the existing
+Story, chapter, TTS, Scene, visual, image, motion, timeline, render, and
+publication services. It persists stage projections, reuses current outputs,
+waits for review or configuration, and schedules only missing work. It does
+not call providers, FFmpeg, or external publishing platforms from the
+coordinator.
+
 ## Scope boundaries
 
 The long-story path supports bounded structured generation, durable SQLite
 state, resumable chapter batches, manual chapter analysis, continuity review,
 and explicit regeneration. It intentionally stops before character-memory
-retrieval systems, scene graphs, AI video, publishing, and generic
-workflow/plugin frameworks.
+retrieval systems, scene graphs, and generic workflow/plugin frameworks.
 
 The image path consumes only current Visual Prompt Packages through one
 controlled ComfyUI workflow. It preserves immutable revisions, manual
-replacement, and explicit review/current selection. It does not implement
-reference conditioning, automatic best-image selection, or render handoff.
+replacement, explicit review/current selection, and reference-conditioned
+requests with persisted CharacterId mappings. It never auto-starts production
+or rendering.
 
 The media path remains focused on the first working video: project and chapter
 creation, narration, subtitles, background media, FFmpeg rendering, and MP4

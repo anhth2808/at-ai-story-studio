@@ -46,6 +46,7 @@ import type {
   SceneTimingUpdate,
 } from '@studio/shared';
 import './styles.css';
+import { ProductionWorkspace } from './ProductionWorkspace.js';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const SELECTED_PROJECT_STORAGE_KEY = 'studio.selectedProjectId';
 const normalizeVisualObjectKey = (value: string): string =>
@@ -1178,6 +1179,7 @@ function App() {
                   'Audio',
                   'Video',
                   'Render',
+                  'Production',
                 ].map((item) => (
                   <button
                     className={tab === item ? 'selected' : ''}
@@ -1445,6 +1447,9 @@ function App() {
                 />
                 {render && <video className="video" controls src={render.url} />}
               </div>
+            )}
+            {tab === 'Production' && (
+              <ProductionWorkspace projectId={selected.id} request={api} onError={setError} />
             )}
           </section>
         ) : (

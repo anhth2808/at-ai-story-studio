@@ -119,3 +119,22 @@ Source: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` (Apache 2.0). Verify with
 `VIDEO_MODEL_MISSING` naming the file. Generation presets: LOW_VRAM
 (704x384x81), BALANCED (832x480x81, default), QUALITY (1280x704x121). See
 `video-benchmark.md` for measured RTX 3060 12GB timings.
+
+## Production pipeline
+
+Open the project's **Production** workspace to choose a profile and scope,
+run read-only preflight and planning, then create a persisted production run.
+The API and worker own durable progression; refreshing the browser does not
+reset stage state. Start, pause, resume, cancel, and retry commands operate on
+the run. Resolve review/configuration interventions before resuming.
+
+The publication stage builds a revisioned package from current assets and
+measured chapter audio, then exports it under
+`{workspace}/exports/{directoryName}/publication.json`. Export paths are
+workspace-relative and validated with ownership and SHA-256 checks. This is a
+local package export only; there is no YouTube upload.
+
+When the GPU is reserved by another workload, leave image and AI-motion
+provider steps pending and use preflight, planning, existing-output reuse,
+package validation, and API/UI checks only. Do not start a production run
+until the provider execution window is available.

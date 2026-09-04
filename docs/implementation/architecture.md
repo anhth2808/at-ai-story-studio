@@ -17,13 +17,13 @@ apps/worker -> packages/workflow -> packages/database/media
 apps/omp-agent (Bun) <- bounded NDJSON -> packages/workflow (Node)
 ```
 
-- `apps/web`: React/Vite authoring UI, review-first Story, Scenes, Visual Bible, Image Generation controls, paginated long-story views, and job polling.
-- `apps/api`: Fastify composition root with thin validated Story, Scene, Visual Consistency, image, and media routes.
-- `apps/worker`: one polling worker with heartbeat, lease recovery, retry, and graceful shutdown for Story, Scene, Visual Consistency, image, and media steps.
-- `packages/shared`: Zod transport schemas, domain IDs, status enums, DTOs, and safe application errors.
-- `packages/database`: Drizzle schema, additive migrations, SQLite connection, and repositories for revision chains, StoryState, Scenes, visual profiles, prompt packages, image generations, Assets, continuity, and batches.
+- `apps/web`: React/Vite authoring UI, review-first Story, Scenes, Visual Bible, Image Generation controls, the bounded Production workspace, publication metadata/export, paginated long-story views, and job polling.
+- `apps/api`: Fastify composition root with thin validated Story, Scene, Visual Consistency, image, media, production, and publication routes.
+- `apps/worker`: one polling worker with heartbeat, lease recovery, retry, and graceful shutdown for Story, Scene, Visual Consistency, image, media, production coordination, and publication export steps.
+- `packages/shared`: Zod transport schemas, domain IDs, status enums, DTOs, production/publication contracts, and safe application errors.
+- `packages/database`: Drizzle schema, additive migrations, SQLite connection, and repositories for revision chains, StoryState, Scenes, visual profiles, prompt packages, image generations, Assets, continuity, batches, production runs, stages, interventions, and publication revisions/exports.
 - `packages/media`: managed workspace, path safety, SHA-256 streaming, image validation, process runner, FFmpeg, and ffprobe.
-- `packages/workflow`: authoring services, deterministic bounded context compilation, OMP boundary, controlled ComfyUI provider, durable scheduling, TTS, subtitles, and render orchestration.
+- `packages/workflow`: authoring services, deterministic bounded context compilation, OMP boundary, controlled ComfyUI provider, durable scheduling, TTS, subtitles, render orchestration, ProductionOrchestrator, and PublicationPackageService.
 - `apps/omp-agent`: isolated Bun-only OMP SDK host. It communicates through a versioned NDJSON protocol and never writes SQLite or project files.
 
 The Scene Engine owns chapter-to-scene visual planning, source ranges,
@@ -52,3 +52,17 @@ The Story Engine never starts TTS, subtitles, image generation, or rendering aut
 The OMP host receives one bounded request, disables MCP/LSP/extensions/tools, creates an in-memory isolated session, emits progress and one terminal result/error, and disposes the session. OMP credentials and provider payloads remain outside Studio persistence.
 
 The API binds to loopback by default. Process execution passes executable arguments separately with `shell: false`. Errors returned to clients are safe application errors; internal stack traces stay in structured logs.
+
+## Production orchestration
+
+`ProductionOrchestrator` is an application service, not a second workflow
+engine. It owns the ordered production projection and creates one bounded
+`ADVANCE_PRODUCTION_RUN` coordinator step per run. Existing Story, Scene,
+image, motion, Timeline, render, and publication services own their records,
+assets, provider calls, and media work.
+
+`PublicationPackageService` builds an immutable, revisioned package from
+current managed Assets and measured chapter durations. It writes only
+workspace-relative manifest references and exports through a staging directory
+with path, ownership, and checksum validation. External platform publishing
+is intentionally absent.

@@ -132,3 +132,18 @@ Keyboard-accessible controls, visible focus, labels/errors, subtitle contrast pr
 - **Why:** React handles editors, virtualized lists, players, and progress dashboards well; Vite provides focused browser tooling; Fastify provides the local API boundary.
 - **Trade-offs:** native filesystem features need backend endpoints; shared TypeScript DTOs must not expose persistence/domain internals.
 - **Future impact:** the same SPA can be wrapped as a desktop app or hosted remotely if requirements change.
+
+## Production workspace
+
+The project editor includes a Production surface with:
+
+- profile and chapter-scope selection;
+- read-only preflight and bounded plan classifications;
+- create/start/pause/resume/cancel and stage retry controls;
+- persisted stage progress, blockers, review/configuration interventions, and
+  fallback warnings;
+- revisioned publication metadata, current video/thumbnail preview, chapter
+  markers, manifest validation, and safe local export history.
+
+The surface never exposes a YouTube upload action. It may show GPU/provider
+readiness and pending work without starting GPU-heavy execution.

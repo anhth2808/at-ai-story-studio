@@ -194,3 +194,17 @@ ComfyUI normally remains a separately managed service accessed through its API. 
 - **Why:** one TypeScript toolchain maximizes practical language, type, validation, and tooling reuse while independent API and worker processes isolate long jobs. The optional Bun host satisfies the current OMP SDK runtime without giving it a service-owned database or workflow.
 - **Trade-offs:** package boundaries need discipline; API and worker coordinate through SQLite; the OMP integration adds a supervised runtime when intelligent features begin; process-tree handling requires platform-specific verification.
 - **Future impact:** OMP can move in-process if it officially supports the approved runtime, and remote worker transport or specialized provider sidecars can replace adapters later, without rewriting story, workflow, or media contracts.
+
+## Production application boundary
+
+Prompt #14 adds `ProductionOrchestrator` and `PublicationPackageService` inside
+the existing workflow/application module. The orchestrator persists
+project-owned profiles, scoped runs, ordered stages, bounded stage work, and
+interventions, but delegates canonical records and media to existing services.
+`ADVANCE_PRODUCTION_RUN` is a coordination step on the same SQLite queue, not a
+new scheduler.
+
+The publication service creates revisioned metadata/manifests from current
+Asset IDs, hashes, and measured durations. Safe export uses managed
+workspace-relative paths and staging; no external publishing credentials or
+platform API belong in the V1 boundary.

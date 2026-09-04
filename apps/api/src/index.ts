@@ -70,8 +70,19 @@ import {
   sceneImageManualUploadSchema,
   sceneImageRegenerationSchema,
   sceneImageReviewUpdateSchema,
+  productionPlanRequestSchema,
+  productionProfileKeySchema,
+  productionProfileUpdateSchema,
+  productionRunCreateSchema,
+  productionRunCommandSchema,
+  productionStageKeySchema,
+  productionStageRetrySchema,
+  productionInterventionResolutionSchema,
+  publicationMetadataUpdateSchema,
+  publicationThumbnailSelectionSchema,
+  publicationExportRequestSchema,
 } from '@studio/shared';
-import type { OmpReadiness, RenderScope } from '@studio/shared';
+import type { Id, OmpReadiness, RenderScope } from '@studio/shared';
 import {
   StudioService,
   createOmpAgent,
@@ -2165,6 +2176,7 @@ app.get('/api/assets/:id', async (request, reply) => {
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= size)
     throw new AppError('INVALID_RANGE', 'Byte range is not satisfiable', 416);
   return reply
+
     .code(206)
     .type(row.mediaType)
     .header('Content-Range', `bytes ${start}-${end}/${size}`)
@@ -2172,6 +2184,204 @@ app.get('/api/assets/:id', async (request, reply) => {
     .header('Content-Length', end - start + 1)
     .send(createReadStream(filename, { start, end }));
 });
+function productionProject(projectId: string): Id {
+  const id = idSchema.parse(projectId);
+  if (!service.getProject(id)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+  return id;
+}
+
+function productionRun(projectId: string, runId: string) {
+  const run = service.production.runs.get(idSchema.parse(runId));
+  if (!run || run.projectId !== productionProject(projectId))
+    throw new AppError('NOT_FOUND', 'Production run not found', 404);
+  return run;
+}
+
+function publicationPackage(projectId: string, packageId: string) {
+  const packageRecord = service.publication.packages.get(idSchema.parse(packageId));
+  if (!packageRecord || packageRecord.projectId !== productionProject(projectId))
+    throw new AppError('NOT_FOUND', 'Publication package not found', 404);
+  return packageRecord;
+}
+
+app.get('/api/projects/:projectId/production/profiles', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = productionProject(params.projectId);
+  for (const key of ['MANUAL_REVIEW', 'BALANCED', 'AUTO'] as const)
+    service.production.profiles.getOrCreate(projectId, key);
+  return service.production.profiles.list(projectId);
+});
+
+app.patch('/api/projects/:projectId/production/profiles/:profileKey', async (request) => {
+  const params = request.params as { projectId: string; profileKey: string };
+  const projectId = productionProject(params.projectId);
+  const profileKey = productionProfileKeySchema.parse(params.profileKey);
+  const input = productionProfileUpdateSchema.parse(request.body);
+  return service.production.profiles.update(projectId, profileKey, input);
+});
+
+app.post('/api/projects/:projectId/production/preflight', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = productionProject(params.projectId);
+  const input = productionPlanRequestSchema.parse(request.body);
+  return service.production.check(projectId, input.scope, input.profileId);
+});
+
+app.post('/api/projects/:projectId/production/plan', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = productionProject(params.projectId);
+  const input = productionPlanRequestSchema.parse(request.body);
+  return service.production.plan(projectId, input.scope, input.profileId);
+});
+
+app.post('/api/projects/:projectId/production/runs', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  const projectId = productionProject(params.projectId);
+  const input = productionRunCreateSchema.parse(request.body);
+  const run = service.production.createRun(projectId, input.scope, input.profileId);
+  return reply.code(201).send(service.production.status(run.id));
+});
+
+app.get('/api/projects/:projectId/production/runs', async (request) => {
+  const params = request.params as { projectId: string };
+  const projectId = productionProject(params.projectId);
+  const query = request.query as { limit?: string };
+  return service.production.runs.list(projectId, parsePageValue(query.limit, 50, 100));
+});
+
+app.get('/api/projects/:projectId/production/runs/:runId', async (request) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  return service.production.status(run.id);
+});
+
+app.post('/api/projects/:projectId/production/runs/:runId/start', async (request, reply) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const input = productionRunCommandSchema.parse(request.body ?? {});
+  return reply.code(202).send(await service.production.startRun(run.id, input.expectedRowVersion));
+});
+
+app.post('/api/projects/:projectId/production/runs/:runId/pause', async (request) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const input = productionRunCommandSchema.parse(request.body ?? {});
+  return service.production.pauseRun(run.id, input.expectedRowVersion);
+});
+
+app.post('/api/projects/:projectId/production/runs/:runId/resume', async (request, reply) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const input = productionRunCommandSchema.parse(request.body ?? {});
+  const advance = service.production.resumeRun(run.id, input.expectedRowVersion);
+  return reply.code(202).send({ ...advance, status: service.production.status(run.id) });
+});
+
+app.post('/api/projects/:projectId/production/runs/:runId/cancel', async (request) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const input = productionRunCommandSchema.parse(request.body ?? {});
+  return service.production.cancelRun(run.id, input.expectedRowVersion);
+});
+
+app.post('/api/projects/:projectId/production/runs/:runId/advance', async (request, reply) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const advance = service.production.requestAdvance(run.id, 'MANUAL');
+  return reply.code(202).send({ ...advance, status: service.production.status(run.id) });
+});
+
+app.post(
+  '/api/projects/:projectId/production/runs/:runId/stages/:stageKey/retry',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; runId: string; stageKey: string };
+    const run = productionRun(params.projectId, params.runId);
+    const input = productionStageRetrySchema.parse(request.body ?? {});
+    const stageKey = productionStageKeySchema.parse(params.stageKey);
+    const advance = service.production.retryStage(run.id, stageKey, input.unitKey);
+    return reply.code(202).send({ ...advance, status: service.production.status(run.id) });
+  },
+);
+
+app.post(
+  '/api/projects/:projectId/production/runs/:runId/interventions/:interventionId/resolve',
+  async (request) => {
+    const params = request.params as { projectId: string; runId: string; interventionId: string };
+    const run = productionRun(params.projectId, params.runId);
+    const interventionId = idSchema.parse(params.interventionId);
+    if (!service.production.status(run.id).interventions.some((item) => item.id === interventionId))
+      throw new AppError('NOT_FOUND', 'Production intervention not found', 404);
+    const input = productionInterventionResolutionSchema.parse(request.body ?? {});
+    return service.production.interventions.resolve(interventionId, input);
+  },
+);
+
+app.post(
+  '/api/projects/:projectId/production/runs/:runId/interventions/:interventionId/dismiss',
+  async (request) => {
+    const params = request.params as { projectId: string; runId: string; interventionId: string };
+    const run = productionRun(params.projectId, params.runId);
+    const interventionId = idSchema.parse(params.interventionId);
+    if (!service.production.status(run.id).interventions.some((item) => item.id === interventionId))
+      throw new AppError('NOT_FOUND', 'Production intervention not found', 404);
+    const input = productionInterventionResolutionSchema.parse(request.body ?? {});
+    return service.production.interventions.dismiss(interventionId, input);
+  },
+);
+
+app.get('/api/projects/:projectId/production/runs/:runId/publication-package', async (request) => {
+  const params = request.params as { projectId: string; runId: string };
+  const run = productionRun(params.projectId, params.runId);
+  const packageRecord = service.publication.packages.getByRun(run.id);
+  if (!packageRecord) throw new AppError('NOT_FOUND', 'Publication package not found', 404);
+  return packageRecord;
+});
+
+app.post(
+  '/api/projects/:projectId/production/runs/:runId/publication-package/rebuild',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; runId: string };
+    const run = productionRun(params.projectId, params.runId);
+    return reply.code(202).send(service.publication.scheduleBuild(run.id));
+  },
+);
+
+app.get('/api/projects/:projectId/production/packages/:packageId/exports', async (request) => {
+  const params = request.params as { projectId: string; packageId: string };
+  const packageRecord = publicationPackage(params.projectId, params.packageId);
+  const query = request.query as { limit?: string };
+  return service.publication.exports.list(packageRecord.id, parsePageValue(query.limit, 50, 100));
+});
+
+app.patch('/api/projects/:projectId/production/packages/:packageId/metadata', async (request) => {
+  const params = request.params as { projectId: string; packageId: string };
+  const packageRecord = publicationPackage(params.projectId, params.packageId);
+  const input = publicationMetadataUpdateSchema.parse(request.body);
+  return service.publication.updateMetadata(packageRecord.id, input);
+});
+
+app.post('/api/projects/:projectId/production/packages/:packageId/thumbnail', async (request) => {
+  const params = request.params as { projectId: string; packageId: string };
+  const packageRecord = publicationPackage(params.projectId, params.packageId);
+  const input = publicationThumbnailSelectionSchema.parse(request.body);
+  return service.publication.selectThumbnail(
+    packageRecord.id,
+    input.assetId,
+    input.expectedRevision,
+  );
+});
+
+app.post(
+  '/api/projects/:projectId/production/packages/:packageId/export',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; packageId: string };
+    const packageRecord = publicationPackage(params.projectId, params.packageId);
+    const input = publicationExportRequestSchema.parse(request.body);
+    return reply
+      .code(202)
+      .send(service.publication.scheduleExport(packageRecord.id, input.directoryName));
+  },
+);
 
 await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
 console.log(`API listening on http://127.0.0.1:${port}`);

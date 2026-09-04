@@ -173,3 +173,16 @@ Do not introduce distributed infrastructure merely because the lease model leave
 - **Why:** workflow already needs fine-grained persisted status, dependencies, attempts, cancellation, and invalidation; using the same rows avoids conflicting sources of truth.
 - **Trade-offs:** claim/recovery code is load-bearing; SQLite allows one writer; arbitrary crashes cannot guarantee exactly-once external side effects.
 - **Future impact:** a transport or database can evolve later without moving workflow ownership out of TypeScript application modules.
+
+## Production coordinator
+
+`ADVANCE_PRODUCTION_RUN` is a small persisted step that coordinates one
+project-scoped run. It uses a monotonic per-run sequence and atomic dedupe so
+repeated API clicks cannot create concurrent coordinators. Each coordinator
+reconciles linked stage work, schedules at most the configured bounded batch,
+and requests the next advance only after existing child steps settle.
+
+GPU-heavy image and AI-motion steps remain ordinary provider-backed workflow
+steps. When local GPU capacity is reserved, the API may still preflight,
+plan, persist, reuse, and export existing outputs, but the worker must not
+start those provider steps until the resource is available.

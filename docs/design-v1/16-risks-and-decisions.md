@@ -131,6 +131,20 @@
 | OMP dependency becomes unsuitable for a required feature | Low/high | Keep the `AiAgent` contract narrow and application-owned; add a replacement implementation only after a concrete incompatibility or missing capability is demonstrated. |
 | “Deterministic render” mistaken for byte identity | Medium/low | define determinism as recorded inputs/timeline/args/environment; software encoder default; validate semantic output. |
 
+### Prompt #14 production decisions
+
+- Keep production coordination in the existing workflow package and SQLite
+  queue. Do not add a general scheduler or external broker for one local
+  worker.
+- Treat stage projections and publication packages as durable records with
+  immutable revisions. Reuse is allowed only for current matching fingerprints
+  and managed Asset ownership.
+- Keep external publishing out of V1. A local, validated publication export is
+  useful for handoff without introducing platform credentials or API failure
+  modes.
+- Treat GPU contention as a resource gate, not a reason to retry blindly.
+  Preflight and planning remain available while provider execution is paused.
+
 ## Deferred decisions with triggers
 
 - **PostgreSQL/broker:** only with multi-machine workers or measured SQLite contention.
