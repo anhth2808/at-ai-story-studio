@@ -17,6 +17,7 @@ import {
   createStoryEngine,
   createVisualConsistencyService,
   SceneEngine,
+  SceneVideoService,
 } from '@studio/workflow';
 const root =
   process.env.STUDIO_WORKSPACE ??
@@ -41,6 +42,7 @@ const batches = new StoryBatchRepository(database);
 const heartbeat = new HeartbeatRepository(database);
 const visualService = createVisualConsistencyService(database, agent);
 const imageService = createImageGenerationService(context);
+const videoService = new SceneVideoService(context);
 const executor = new WorkerExecutor(
   context,
   workerId,
@@ -49,6 +51,7 @@ const executor = new WorkerExecutor(
   sceneEngine,
   visualService,
   imageService,
+  videoService,
 );
 let stopping = false;
 let activeController: AbortController | undefined;

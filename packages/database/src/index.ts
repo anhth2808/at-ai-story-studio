@@ -8,3 +8,4 @@ export * from './visual.js';
 export * from './image.js';
 export * from './timeline-repositories.js';
 export * from './render-jobs.js';
+export * from './video.js';

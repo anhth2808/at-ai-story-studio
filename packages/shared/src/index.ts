@@ -45,8 +45,8 @@ export const workflowStepTypeSchema = z.enum([
   'GENERATE_LOCATION_VISUAL_PROFILE',
   'GENERATE_OBJECT_VISUAL_PROFILE',
   'BUILD_VISUAL_PROMPT',
-  'REFINE_VISUAL_PROMPT',
   'GENERATE_SCENE_IMAGE',
+  'GENERATE_AI_SCENE_VIDEO',
 ]);
 export type WorkflowStepType = z.infer<typeof workflowStepTypeSchema>;
 export const assetStatusSchema = z.enum(['READY', 'INVALID']);
@@ -65,9 +65,8 @@ export const assetTypeSchema = z.enum([
   'TIMELINE_MANIFEST',
   'SCENE_IMAGE',
   'CHARACTER_REFERENCE_IMAGE',
-  'LOCATION_REFERENCE_IMAGE',
-  'OBJECT_REFERENCE_IMAGE',
   'STYLE_REFERENCE_IMAGE',
+  'AI_SCENE_VIDEO',
 ]);
 
 export const projectInputSchema = z
@@ -232,3 +231,4 @@ export * from './visual.js';
 export * from './image.js';
 export * from './story.js';
 export * from './timeline.js';
+export * from './video.js';

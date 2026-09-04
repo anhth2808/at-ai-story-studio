@@ -311,6 +311,15 @@ Chapter Video and dependent Project Videos; project music or render settings
 must not invalidate reusable Scene Clips or unrelated Chapter Videos.
 
 
+# AI Video
+
+AI Video is a SceneClip source. It must not own Chapter or Project rendering.
+
+Raw expensive AI motion assets must remain reusable when only timing, subtitle,
+music, or final render settings change.
+
+Ken Burns remains a first-class fallback.
+
 # TTS
 
 Never assume a provider accepts arbitrarily long text.

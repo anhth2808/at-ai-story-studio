@@ -104,3 +104,18 @@ $env:FFPROBE_PATH = "C:\ffmpeg\bin\ffprobe.exe"
 ## Long-story first run
 
 For a target over 20 chapters, save settings, generate the blueprint, generate and review arcs, generate bounded plan windows, then create a contiguous batch. The batch is resumable and sequential. Generate narration, subtitles, and rendering only from explicit reviewed chapter actions.
+
+## AI video models (Prompt #13)
+
+AI video needs a ComfyUI server (0.33.1 or compatible) with the Wan 2.2
+TI2V-5B components in place; Studio never downloads them:
+
+- `ComfyUI/models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors` (9.3 GB)
+- `ComfyUI/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` (6.3 GB)
+- `ComfyUI/models/vae/wan2.2_vae.safetensors` (1.3 GB)
+
+Source: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` (Apache 2.0). Verify with
+`POST /api/projects/:id/video-settings/readiness`; a missing file reports
+`VIDEO_MODEL_MISSING` naming the file. Generation presets: LOW_VRAM
+(704x384x81), BALANCED (832x480x81, default), QUALITY (1280x704x121). See
+`video-benchmark.md` for measured RTX 3060 12GB timings.

@@ -1474,3 +1474,183 @@ export const sceneImageCandidateSets = sqliteTable(
     project: index('scene_image_candidate_sets_project_idx').on(table.projectId, table.createdAt),
   }),
 );
+
+export const videoGenerationSettings = sqliteTable(
+  'video_generation_settings',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull().default('COMFYUI'),
+    baseUrl: text('base_url').notNull().default('http://127.0.0.1:8188'),
+    workflowTemplate: text('workflow_template').notNull().default('image-to-video-v1'),
+    diffusionModel: text('diffusion_model').notNull().default(''),
+    textEncoder: text('text_encoder').notNull().default(''),
+    vaeName: text('vae_name').notNull().default(''),
+    sampler: text('sampler').notNull().default('uni_pc'),
+    scheduler: text('scheduler').notNull().default('simple'),
+    steps: integer('steps').notNull().default(20),
+    guidance: real('guidance').notNull().default(5),
+    shift: real('shift').notNull().default(8),
+    preset: text('preset').notNull().default('BALANCED'),
+    connectionTimeoutMs: integer('connection_timeout_ms').notNull().default(5000),
+    generationTimeoutMs: integer('generation_timeout_ms').notNull().default(3_600_000),
+    seedMode: text('seed_mode').notNull().default('RANDOM'),
+    fixedSeed: integer('fixed_seed'),
+    rowVersion: integer('row_version').notNull().default(1),
+    requireMotionApproval: integer('require_motion_approval', { mode: 'boolean' })
+      .notNull()
+      .default(true),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    project: uniqueIndex('video_generation_settings_project_idx').on(table.projectId),
+  }),
+);
+
+export const sceneMotionSources = sqliteTable(
+  'scene_motion_sources',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    motionSource: text('motion_source').notNull().default('KEN_BURNS'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    scene: uniqueIndex('scene_motion_sources_scene_idx').on(table.projectId, table.sceneStableId),
+    project: index('scene_motion_sources_project_idx').on(table.projectId, table.motionSource),
+  }),
+);
+
+export const aiMotionPlanRevisions = sqliteTable(
+  'ai_motion_plan_revisions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    characterAction: text('character_action').notNull().default(''),
+    environmentMotion: text('environment_motion').notNull().default(''),
+    cameraMotion: text('camera_motion').notNull().default('STATIC'),
+    intensity: text('intensity').notNull().default('SUBTLE'),
+    priority: text('priority').notNull().default('NONE'),
+    motionPrompt: text('motion_prompt').notNull(),
+    negativePrompt: text('negative_prompt'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    status: text('status').notNull().default('CURRENT'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    revision: uniqueIndex('ai_motion_plan_revisions_revision_idx').on(
+      table.sceneRevisionId,
+      table.revision,
+    ),
+    current: uniqueIndex('ai_motion_plan_revisions_current_idx')
+      .on(table.sceneRevisionId)
+      .where(sql`${table.isCurrent} = 1`),
+    scene: index('ai_motion_plan_revisions_scene_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+  }),
+);
+
+export const sceneVideoGenerations = sqliteTable(
+  'scene_video_generations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    aiMotionPlanRevisionId: text('ai_motion_plan_revision_id').references(
+      () => aiMotionPlanRevisions.id,
+      { onDelete: 'set null' },
+    ),
+    revision: integer('revision').notNull(),
+    provider: text('provider'),
+    status: text('status').notNull().default('PENDING'),
+    reviewStatus: text('review_status').notNull().default('UNREVIEWED'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    requestedSeed: integer('requested_seed'),
+    actualSeed: integer('actual_seed'),
+    requestedWidth: integer('requested_width'),
+    requestedHeight: integer('requested_height'),
+    actualWidth: integer('actual_width'),
+    actualHeight: integer('actual_height'),
+    frameCount: integer('frame_count'),
+    fps: integer('fps'),
+    providerJobId: text('provider_job_id'),
+    workflowTemplate: text('workflow_template'),
+    modelSettings: text('model_settings').notNull().default('{}'),
+    requestSnapshot: text('request_snapshot').notNull().default('{}'),
+    motionPlanFingerprint: text('motion_plan_fingerprint'),
+    settingsFingerprint: text('settings_fingerprint'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    sourceImageAssetId: text('source_image_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    sourceImageSha256: text('source_image_sha256'),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    assetId: text('asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    reviewIssues: text('review_issues').notNull().default('[]'),
+    reviewNotes: text('review_notes').notNull().default(''),
+    attempt: integer('attempt').notNull().default(0),
+    clipDurationMs: integer('clip_duration_ms'),
+    generationDurationMs: integer('generation_duration_ms'),
+    errorCode: text('error_code'),
+    error: text('error'),
+    generationInstructions: text('generation_instructions'),
+    metadata: text('metadata').notNull().default('{}'),
+    createdAt: text('created_at').notNull(),
+    startedAt: text('started_at'),
+    completedAt: text('completed_at'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => ({
+    revision: uniqueIndex('scene_video_generations_revision_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+    current: uniqueIndex('scene_video_generations_current_idx')
+      .on(table.projectId, table.sceneStableId)
+      .where(sql`${table.isCurrent} = 1`),
+    scene: index('scene_video_generations_scene_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+    providerJob: index('scene_video_generations_provider_job_idx').on(table.providerJobId),
+    status: index('scene_video_generations_status_idx').on(
+      table.projectId,
+      table.status,
+      table.updatedAt,
+    ),
+  }),
+);

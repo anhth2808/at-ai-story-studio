@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Id, WorkflowStatus } from './index.js';
+import { motionSourceSchema } from './video.js';
 
 const idSchema = z.string().uuid();
 const workflowStatusSchema = z.enum([
@@ -196,6 +197,16 @@ export const sceneTimingUpdateSchema = z
   .strict();
 export type SceneTimingUpdate = z.infer<typeof sceneTimingUpdateSchema>;
 
+export const sceneAiMotionStatusSchema = z
+  .object({
+    generationId: idSchema.nullable(),
+    status: z.enum(['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'MISSING']),
+    reviewStatus: z.enum(['UNREVIEWED', 'ACCEPTED', 'REJECTED']).default('UNREVIEWED'),
+    hasAcceptedClip: z.boolean(),
+  })
+  .strict();
+export type SceneAiMotionStatus = z.infer<typeof sceneAiMotionStatusSchema>;
+
 export const sceneTimelineItemSchema = z
   .object({
     sceneId: idSchema,
@@ -209,6 +220,8 @@ export const sceneTimelineItemSchema = z
     durationMs: positiveMilliseconds,
     motionPlan: motionPlanSchema.nullable(),
     transition: transitionTypeSchema,
+    motionSource: motionSourceSchema.default('KEN_BURNS'),
+    aiMotion: sceneAiMotionStatusSchema.nullable(),
     transitionDurationMs: z.number().int().min(0).max(800),
     imageAssetId: idSchema.nullable(),
     imageAssetUrl: assetUrlSchema.nullable(),
@@ -375,6 +388,16 @@ export const renderPlanSchema = z
         fingerprint: boundedFingerprint.nullable(),
       })
       .strict(),
+    ai: z
+      .object({
+        scenesSelected: z.number().int().nonnegative(),
+        missingMotion: z.number().int().nonnegative(),
+        clipsToNormalize: z.number().int().nonnegative(),
+        estimatedGenerations: z.number().int().nonnegative(),
+        estimatedGenerationMs: nonNegativeMilliseconds.nullable(),
+      })
+      .strict()
+      .nullable(),
     expectedDurationMs: nonNegativeMilliseconds.nullable(),
     blockers: z.array(renderBlockerSchema).max(1_000),
     generatedAt: z.string().datetime(),

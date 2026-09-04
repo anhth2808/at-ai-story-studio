@@ -2,6 +2,13 @@
 
 AI Story Studio is a modular monolith with one SQLite-backed worker.
 
+Prompt #13 adds AI Video as a SceneClip source below the render hierarchy:
+`VideoGenerationProvider` (ComfyUI Wan 2.2 TI2V-5B, native nodes) produces
+raw reviewed AI motion Assets; SceneClip normalization turns them into the
+same SceneClip Assets the hierarchical renderer has always consumed. Chapter
+and Project rendering, timeline, subtitle, and narration are unchanged, and
+Ken Burns remains the deterministic fallback.
+
 ```text
 apps/web -> apps/api -> packages/workflow -> packages/database
                               |             -> packages/media

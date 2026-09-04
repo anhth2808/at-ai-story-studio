@@ -25,6 +25,7 @@ import {
   buildConcatArguments,
   buildProjectVideoArguments,
   buildRenderArguments,
+  buildAiSceneClipArguments,
   buildSceneClipArguments,
   promoteManagedFile,
   safeWorkspacePath,
@@ -86,6 +87,7 @@ import type { AiAgentProgress } from './omp-agent.js';
 import { SceneEngine } from './scene-engine.js';
 import { VisualConsistencyService, createVisualConsistencyService } from './visual-service.js';
 import { ImageGenerationService, createImageGenerationService } from './image-service.js';
+import { SceneVideoService, createSceneVideoService } from './video-service.js';
 import { ComfyUiImageProvider, ImageProviderError } from './comfyui.js';
 export {
   ComfyUiImageProvider,
@@ -120,6 +122,7 @@ export {
   resolveImageSeed,
 } from './image-generation.js';
 export { projectVideoRole } from './timeline-workflow.js';
+export { SceneVideoService, createSceneVideoService } from './video-service.js';
 export type StudioContext = {
   database: DatabaseHandle;
   workspace: WorkspacePaths;
@@ -141,6 +144,7 @@ export class StudioService {
   readonly visualPackages: VisualPromptPackageRepository;
   readonly visual: VisualConsistencyService;
   readonly images: ImageGenerationService;
+  readonly videos: SceneVideoService;
   readonly timeline: TimelineWorkflowService;
   constructor(private readonly context: StudioContext) {
     this.projects = new ProjectRepository(context.database);
@@ -163,6 +167,7 @@ export class StudioService {
       this.assets,
     );
     this.images = createImageGenerationService(context);
+    this.videos = createSceneVideoService(context);
     this.timeline = new TimelineWorkflowService(context);
   }
   createProject(input: ProjectInput): ProjectDto {
@@ -1458,6 +1463,7 @@ export class WorkerExecutor {
     private readonly sceneEngine?: SceneEngine,
     private readonly visualService?: VisualConsistencyService,
     private readonly imageService?: ImageGenerationService,
+    private readonly videoService?: SceneVideoService,
   ) {
     this.workflow = new WorkflowRepository(context.database);
     this.timeline = new TimelineWorkflowService(context);
@@ -1467,6 +1473,14 @@ export class WorkerExecutor {
       if (!this.imageService)
         throw new AppError('CONFIGURATION_ERROR', 'Image generation worker is not configured', 500);
       await this.imageService.executeStep(step, this.workerId, signal, (progress, message) => {
+        this.workflow.progress(step, progress, message);
+      });
+      return;
+    }
+    if (step.type === 'GENERATE_AI_SCENE_VIDEO') {
+      if (!this.videoService)
+        throw new AppError('CONFIGURATION_ERROR', 'Video generation worker is not configured', 500);
+      await this.videoService.executeStep(step, this.workerId, signal, (progress, message) => {
         this.workflow.progress(step, progress, message);
       });
       return;
@@ -2036,23 +2050,50 @@ export class WorkerExecutor {
     const stagingPath = safeWorkspacePath(this.context.workspace.root, stagingRelativePath);
     await mkdir(dirname(stagingPath), { recursive: true });
     const job = this.renderJob(step);
+    const isAiClip = payload.clipSource !== 'KEN_BURNS' && payload.rawClipPath;
+    if (isAiClip && (!payload.imagePath || !payload.imageWidth || !payload.imageHeight))
+      throw new AppError(
+        'RENDER_INPUT_INVALID',
+        'AI scene clips require the accepted scene image',
+        400,
+      );
+    const clipArguments = isAiClip
+      ? buildAiSceneClipArguments({
+          rawClipPath: safeWorkspacePath(this.context.workspace.root, payload.rawClipPath!),
+          rawClipDurationMs: payload.rawClipDurationMs ?? 0,
+          sourceImagePath: safeWorkspacePath(this.context.workspace.root, payload.imagePath!),
+          sourceWidth: payload.imageWidth ?? 0,
+          sourceHeight: payload.imageHeight ?? 0,
+          outputPath: stagingPath,
+          sceneDurationMs: payload.timing.durationMs,
+          crossfadeMs: payload.crossfadeMs,
+          profile: {
+            width: payload.config.width,
+            height: payload.config.height,
+            fps: payload.config.fps,
+            qualityPreset: payload.config.qualityPreset,
+          },
+          fitMode: payload.config.fitMode,
+          continuationMotion: payload.motionPlan,
+        })
+      : buildSceneClipArguments({
+          sourcePath,
+          outputPath: stagingPath,
+          durationMs: payload.timing.durationMs,
+          sourceWidth: payload.imageWidth,
+          sourceHeight: payload.imageHeight,
+          profile: {
+            width: payload.config.width,
+            height: payload.config.height,
+            fps: payload.config.fps,
+            qualityPreset: payload.config.qualityPreset,
+          },
+          fitMode: payload.config.fitMode,
+          motionPlan: payload.motionPlan,
+          fallback: payload.fallbackPolicy === 'BLACK' ? 'BLACK' : undefined,
+        });
     await this.context.media.runWithProgress(
-      buildSceneClipArguments({
-        sourcePath,
-        outputPath: stagingPath,
-        durationMs: payload.timing.durationMs,
-        sourceWidth: payload.imageWidth,
-        sourceHeight: payload.imageHeight,
-        profile: {
-          width: payload.config.width,
-          height: payload.config.height,
-          fps: payload.config.fps,
-          qualityPreset: payload.config.qualityPreset,
-        },
-        fitMode: payload.config.fitMode,
-        motionPlan: payload.motionPlan,
-        fallback: payload.fallbackPolicy === 'BLACK' ? 'BLACK' : undefined,
-      }),
+      clipArguments,
       (update) =>
         this.reportRenderProgress(step, job.id, update.outTimeMs, payload.timing.durationMs),
       { cwd: this.context.workspace.root, signal },

@@ -128,3 +128,14 @@ Changing settings, blueprint, an arc, a plan window, or a chapter invalidates on
 5. Generate subtitles explicitly.
 6. Render MP4 explicitly.
 7. Poll the job until `COMPLETED`; retry a failed job from its job endpoint.
+
+## AI video workflow (Prompt #13)
+
+AI motion is prepared explicitly before rendering: pick Scenes, set their
+motion source (AI_VIDEO or HYBRID), optionally edit the AI motion plan, then
+generate. Each generation is a durable `GENERATE_AI_SCENE_VIDEO` step
+(submit -> poll -> download -> probe -> promote -> review). Accepted raw
+clips normalize into SceneClips during the normal scoped render. RenderPlan
+reports AI-specific counts (missing motion, clips to normalize, estimated
+generation time) and never schedules AI generation implicitly. See
+`ai-video.md` and `video-provider.md`.

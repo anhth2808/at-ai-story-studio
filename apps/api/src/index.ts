@@ -62,6 +62,11 @@ import {
   imageGenerationSettingsUpdateSchema,
   sceneImageCurrentSelectionSchema,
   sceneImageGenerationScheduleSchema,
+  aiVideoBatchSchema,
+  sceneMotionSourceUpdateSchema,
+  sceneVideoRegenerationSchema,
+  sceneVideoReviewUpdateSchema,
+  videoGenerationSettingsUpdateSchema,
   sceneImageManualUploadSchema,
   sceneImageRegenerationSchema,
   sceneImageReviewUpdateSchema,
@@ -1190,6 +1195,166 @@ app.post(
       );
   },
 );
+
+// ---- AI video (image-to-video) ----
+app.get('/api/projects/:projectId/video-settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.videos.getSettings(idSchema.parse(params.projectId));
+});
+app.put('/api/projects/:projectId/video-settings', async (request) => {
+  const params = request.params as { projectId: string };
+  return service.videos.updateSettings(
+    idSchema.parse(params.projectId),
+    videoGenerationSettingsUpdateSchema.parse(request.body),
+  );
+});
+app.post('/api/projects/:projectId/video-settings/readiness', async (request) => {
+  const params = request.params as { projectId: string };
+  return await service.videos.readiness(idSchema.parse(params.projectId), request.signal);
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/ai-motion', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const sceneId = idSchema.parse(params.sceneId);
+  return {
+    motionSource: service.videos.getMotionSource(projectId, sceneId),
+    motionPlan: service.videos.getMotionPlan(projectId, sceneId),
+    current: service.videos.getCurrentGeneration(projectId, sceneId),
+    generations: service.videos.listGenerations(projectId, sceneId),
+  };
+});
+app.put('/api/projects/:projectId/scenes/:sceneId/ai-motion', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return service.videos.updateMotionPlan(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    request.body ?? {},
+  );
+});
+app.put('/api/projects/:projectId/scenes/:sceneId/motion-source', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return {
+    sceneId: idSchema.parse(params.sceneId),
+    motionSource: service.videos.setMotionSource(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      sceneMotionSourceUpdateSchema.parse(request.body),
+    ),
+  };
+});
+app.post('/api/projects/:projectId/scenes/:sceneId/ai-video/generate', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return reply
+    .code(202)
+    .send(
+      service.videos.schedule(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        request.body ?? {},
+      ),
+    );
+});
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/regenerate',
+  async (request, reply) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      generationId: string;
+    };
+    return reply
+      .code(202)
+      .send(
+        service.videos.regenerate(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          idSchema.parse(params.generationId),
+          sceneVideoRegenerationSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/review', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.videos.updateReview(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+    sceneVideoReviewUpdateSchema.parse(request.body),
+  );
+});
+app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/accept', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.videos.accept(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+    request.body ?? {},
+  );
+});
+app.put('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId/current', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.videos.setCurrent(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+  );
+});
+app.post('/api/projects/:projectId/ai-video/generate-batch', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  return reply
+    .code(202)
+    .send(
+      service.videos.scheduleBatch(
+        idSchema.parse(params.projectId),
+        aiVideoBatchSchema.parse(request.body),
+      ),
+    );
+});
+app.post('/api/projects/:projectId/chapters/:chapterId/ai-video/generate-missing', async (request, reply) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  return reply
+    .code(202)
+    .send(
+      service.videos.scheduleChapterMissing(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.chapterId),
+      ),
+    );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/ai-video/current', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  const clip = service.videos.getCurrentGeneration(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+  );
+  if (!clip) throw new AppError('NOT_FOUND', 'Current AI motion not found', 404);
+  return clip;
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/ai-video/:generationId', async (request) => {
+  const params = request.params as {
+    projectId: string;
+    sceneId: string;
+    generationId: string;
+  };
+  return service.videos.getGeneration(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    idSchema.parse(params.generationId),
+  );
+});
 app.get('/api/projects/:projectId/story/state', async (request) => {
   const params = request.params as { projectId: string };
   const projectId = idSchema.parse(params.projectId);

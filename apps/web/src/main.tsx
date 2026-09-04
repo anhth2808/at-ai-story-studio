@@ -32,6 +32,14 @@ import type {
   ImageGenerationSettingsDto,
   ImageReadiness,
   SceneImageGenerationDto,
+  MotionSource,
+  AiMotionIntensity,
+  AiMotionPlanDto,
+  AiMotionPlanUpdate,
+  SceneVideoGenerationDto,
+  VideoReadiness,
+  VideoGenerationSettingsDto,
+  VideoGenerationSettingsUpdate,
   ChapterTimeline,
   MotionPlan,
   RenderPlan,
@@ -471,6 +479,19 @@ type ImageScheduleDto = {
   jobId: string;
   generation: SceneImageGenerationDto;
 };
+type VideoScheduleDto = {
+  executionId: string;
+  stepId: string;
+  jobId: string;
+  generation: SceneVideoGenerationDto;
+  reused: boolean;
+};
+type AiMotionStateDto = {
+  motionSource: MotionSource;
+  motionPlan: AiMotionPlanDto | null;
+  current: SceneVideoGenerationDto | null;
+  generations: SceneVideoGenerationDto[];
+};
 type CharacterReferenceItem = {
   id: string;
   url: string;
@@ -653,6 +674,88 @@ const imageApi = {
     api<{ jobs: ImageScheduleDto[] }>(
       `/api/projects/${projectId}/chapters/${chapterId}/images/generate-batch`,
       { method: 'POST', body: JSON.stringify({ onlyMissing: true, includeStale: true }) },
+    ),
+};
+const videoApi = {
+  settings: (projectId: string) =>
+    api<VideoGenerationSettingsDto>(`/api/projects/${projectId}/video-settings`),
+  saveSettings: (projectId: string, body: VideoGenerationSettingsUpdate) =>
+    api<VideoGenerationSettingsDto>(`/api/projects/${projectId}/video-settings`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  readiness: (projectId: string) =>
+    api<VideoReadiness>(`/api/projects/${projectId}/video-settings/readiness`, {
+      method: 'POST',
+    }),
+  aiMotion: (projectId: string, sceneId: string) =>
+    api<AiMotionStateDto>(`/api/projects/${projectId}/scenes/${sceneId}/ai-motion`),
+  setMotionSource: (projectId: string, sceneId: string, motionSource: MotionSource) =>
+    api<{ sceneId: string; motionSource: MotionSource }>(
+      `/api/projects/${projectId}/scenes/${sceneId}/motion-source`,
+      { method: 'PUT', body: JSON.stringify({ motionSource }) },
+    ),
+  saveMotionPlan: (projectId: string, sceneId: string, body: AiMotionPlanUpdate) =>
+    api<AiMotionPlanDto>(`/api/projects/${projectId}/scenes/${sceneId}/ai-motion`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  generate: (projectId: string, sceneId: string, instructions = '') =>
+    api<VideoScheduleDto>(`/api/projects/${projectId}/scenes/${sceneId}/ai-video/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ instructions }),
+    }),
+  regenerate: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+    instructions = '',
+    useReviewFeedback = false,
+  ) =>
+    api<VideoScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/ai-video/${generationId}/regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode, instructions, useReviewFeedback }),
+      },
+    ),
+  review: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    issues: string[] = [],
+    notes = '',
+  ) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/ai-video/${generationId}/review`,
+      { method: 'PUT', body: JSON.stringify({ status: 'REJECTED', issues, notes }) },
+    ),
+  accept: (
+    projectId: string,
+    sceneId: string,
+    generationId: string,
+    issues: string[] = [],
+    notes = '',
+  ) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/ai-video/${generationId}/accept`,
+      { method: 'PUT', body: JSON.stringify({ issues, notes }) },
+    ),
+  setCurrent: (projectId: string, sceneId: string, generationId: string) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/ai-video/${generationId}/current`,
+      { method: 'PUT' },
+    ),
+  generateBatch: (projectId: string, sceneIds: string[], onlyMissing = false) =>
+    api<{ executionId: string; jobs: VideoScheduleDto[]; skippedSceneIds: string[] }>(
+      `/api/projects/${projectId}/ai-video/generate-batch`,
+      { method: 'POST', body: JSON.stringify({ sceneIds, onlyMissing }) },
+    ),
+  generateChapterMissing: (projectId: string, chapterId: string) =>
+    api<{ executionId: string; jobs: VideoScheduleDto[]; skippedSceneIds: string[] }>(
+      `/api/projects/${projectId}/chapters/${chapterId}/ai-video/generate-missing`,
+      { method: 'POST' },
     ),
 };
 async function loadRender(projectId: string): Promise<RenderAsset | null> {
@@ -1394,6 +1497,11 @@ const timelineMotionTypes: MotionPlan['motionType'][] = [
   'PAN_ZOOM',
   'SLOW_PUSH_IN',
 ];
+const motionSourceBadges: Record<MotionSource, string> = {
+  KEN_BURNS: 'KB',
+  AI_VIDEO: 'AI',
+  HYBRID: 'HY',
+};
 
 function timelineTime(ms: number): string {
   return `${(ms / 1_000).toFixed(2)}s`;
@@ -1981,6 +2089,18 @@ function TimelinePanel({
                         ? timelineTime(renderPlan.expectedDurationMs)
                         : 'chưa biết'}
                     </span>
+                    {renderPlan.ai && (
+                      <span>
+                        AI: {renderPlan.ai.scenesSelected} cảnh chọn /{' '}
+                        {renderPlan.ai.missingMotion} thiếu motion /{' '}
+                        {renderPlan.ai.clipsToNormalize} cần ghép; ước lượng ~
+                        {renderPlan.ai.estimatedGenerations} video (
+                        {renderPlan.ai.estimatedGenerationMs != null
+                          ? timelineTime(renderPlan.ai.estimatedGenerationMs)
+                          : 'chưa có dữ liệu'}
+                        )
+                      </span>
+                    )}
                   </div>
                   {renderPlan.blockers.length > 0 && (
                     <ul className="timeline-blockers">
@@ -2011,7 +2131,20 @@ function TimelinePanel({
                 <article className="panel timeline-scene" key={item.sceneId}>
                   <div className="section-head">
                     <div>
-                      <p className="eyebrow">SCENE {item.sceneNumber}</p>
+                      <p className="eyebrow">
+                        SCENE {item.sceneNumber}
+                        <span className="status-chip">
+                          {motionSourceBadges[item.motionSource]}
+                        </span>
+                        {item.aiMotion && (
+                          <span
+                            className={`status-chip status-${item.aiMotion.status.toLowerCase()}`}
+                          >
+                            {item.aiMotion.status}
+                            {item.aiMotion.hasAcceptedClip ? ' ✓' : ''}
+                          </span>
+                        )}
+                      </p>
                       <h3>
                         {timelineTime(item.startMs)} - {timelineTime(item.endMs)}
                       </h3>
@@ -2044,6 +2177,18 @@ function TimelinePanel({
                           </div>
                         )}
                       </div>
+                      {item.sceneClipAssetUrl && (
+                        <video
+                          className="video"
+                          controls
+                          preload="metadata"
+                          src={
+                            item.sceneClipAssetUrl.startsWith('http')
+                              ? item.sceneClipAssetUrl
+                              : `${API_BASE}${item.sceneClipAssetUrl}`
+                          }
+                        />
+                      )}
                       <div className="timeline-image-picker">
                         <button
                           className="secondary"
@@ -3962,6 +4107,20 @@ function ScenesWorkspace({
     'REFERENCE_POSE_BLEED',
     'OTHER',
   ] as const;
+  const videoIssueTags = [
+    'IDENTITY_DRIFT',
+    'FACE_DISTORTION',
+    'BODY_DISTORTION',
+    'EXTRA_LIMBS',
+    'MOTION_TOO_STRONG',
+    'MOTION_TOO_WEAK',
+    'CAMERA_WRONG',
+    'OBJECT_MORPHING',
+    'BACKGROUND_MORPHING',
+    'FLICKER',
+    'LOOP_BAD',
+    'OTHER',
+  ] as const;
   const [style, setStyle] = useState<VisualStyleSettingsDto | null>(null);
   const [styleForm, setStyleForm] = useState<SceneStyleForm>(defaultSceneStyleForm);
   const [showStyle, setShowStyle] = useState(false);
@@ -3971,6 +4130,21 @@ function ScenesWorkspace({
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [sceneJobIds, setSceneJobIds] = useState<string[]>([]);
+  const [aiMotion, setAiMotion] = useState<AiMotionStateDto | null>(null);
+  const [motionPlanDraft, setMotionPlanDraft] = useState<{
+    characterAction: string;
+    environmentMotion: string;
+    intensity: AiMotionIntensity;
+  }>({ characterAction: '', environmentMotion: '', intensity: 'SUBTLE' });
+  const [videoInstructions, setVideoInstructions] = useState('');
+  const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+  const [videoReadiness, setVideoReadiness] = useState<VideoReadiness | null>(null);
+  const [videoReviewDraft, setVideoReviewDraft] = useState<{
+    generationId: string | null;
+    issues: string[];
+    notes: string;
+  }>({ generationId: null, issues: [], notes: '' });
+  const [videoJobIds, setVideoJobIds] = useState<string[]>([]);
 
   const loadSceneChapters = async (): Promise<void> => {
     try {
@@ -4038,6 +4212,8 @@ function ScenesWorkspace({
       setScenePackage(null);
       setSceneImages([]);
       setSelectedImageId(null);
+      setAiMotion(null);
+      setSelectedVideoId(null);
       return;
     }
     const selectedScene = sceneList.find((scene) => scene.id === selectedSceneId);
@@ -4046,8 +4222,9 @@ function ScenesWorkspace({
         sceneApi.get(projectId, selectedScene.id),
         visualApi.scenePackage(projectId, selectedScene.id).catch(() => null),
         imageApi.list(projectId, selectedScene.id),
+        videoApi.aiMotion(projectId, selectedScene.id).catch(() => null),
       ])
-        .then(([nextDraft, nextPackage, nextImages]) => {
+        .then(([nextDraft, nextPackage, nextImages, nextMotion]) => {
           setDraft(nextDraft);
           setScenePackage(nextPackage);
           setSceneImages(nextImages);
@@ -4056,6 +4233,14 @@ function ScenesWorkspace({
               ? current
               : (nextImages.find((image) => image.isCurrent)?.id ?? nextImages[0]?.id ?? null),
           );
+          setAiMotion(nextMotion);
+          if (nextMotion?.motionPlan) {
+            setMotionPlanDraft({
+              characterAction: nextMotion.motionPlan.intent.characterAction,
+              environmentMotion: nextMotion.motionPlan.intent.environmentMotion,
+              intensity: nextMotion.motionPlan.intent.intensity,
+            });
+          }
         })
         .catch((cause) =>
           onError(cause instanceof Error ? cause.message : 'Không thể tải chi tiết cảnh'),
@@ -4102,6 +4287,45 @@ function ScenesWorkspace({
       window.clearInterval(timer);
     };
   }, [projectId, sceneJobIds, selectedSceneId]);
+  useEffect(() => {
+    if (!videoJobIds.length) return;
+    let disposed = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const jobs = await Promise.all(
+          videoJobIds.map((jobId) => api<JobDto>(`/api/jobs/${jobId}`)),
+        );
+        const finished = jobs.some((job) =>
+          ['COMPLETED', 'FAILED', 'CANCELLED', 'INVALIDATED'].includes(job.status),
+        );
+        if (!disposed && finished) {
+          setVideoJobIds((current) =>
+            current.filter(
+              (jobId) =>
+                !jobs.some(
+                  (job) =>
+                    job.id === jobId &&
+                    ['COMPLETED', 'FAILED', 'CANCELLED', 'INVALIDATED'].includes(job.status),
+                ),
+            ),
+          );
+          if (selectedSceneId) setAiMotion(await videoApi.aiMotion(projectId, selectedSceneId));
+          onChanged();
+          const failed = jobs.find((job) => job.status === 'FAILED');
+          if (failed?.error) onError(failed.error);
+        }
+      } catch (cause) {
+        if (!disposed)
+          onError(cause instanceof Error ? cause.message : 'Không thể theo dõi job video AI');
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [projectId, videoJobIds, selectedSceneId]);
 
   const chapter = sceneChapters.find((item) => item.chapterId === selectedChapterId);
   const sceneJobBody = (): Record<string, unknown> => {
@@ -4429,6 +4653,118 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể tạo ảnh theo chương');
     }
   };
+  const queueVideo = (result: VideoScheduleDto): void => {
+    setAiMotion((current) => ({
+      motionSource: current?.motionSource ?? 'KEN_BURNS',
+      motionPlan: current?.motionPlan ?? null,
+      current: result.generation,
+      generations: [
+        result.generation,
+        ...(current?.generations ?? []).filter((item) => item.id !== result.generation.id),
+      ],
+    }));
+    setSelectedVideoId(result.generation.id);
+    setVideoJobIds((current) => [...new Set([...current, result.jobId])]);
+  };
+  const changeMotionSource = async (motionSource: MotionSource): Promise<void> => {
+    if (!draft) return;
+    try {
+      await videoApi.setMotionSource(projectId, draft.id, motionSource);
+      setAiMotion((current) => (current ? { ...current, motionSource } : current));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể đổi nguồn chuyển động');
+    }
+  };
+  const saveAiMotionPlan = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      const plan = await videoApi.saveMotionPlan(projectId, draft.id, {
+        expectedRevision: aiMotion?.motionPlan?.revision,
+        characterAction: motionPlanDraft.characterAction,
+        environmentMotion: motionPlanDraft.environmentMotion,
+        intensity: motionPlanDraft.intensity,
+      });
+      setAiMotion((current) => (current ? { ...current, motionPlan: plan } : current));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu kế hoạch chuyển động');
+    }
+  };
+  const generateVideo = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      queueVideo(await videoApi.generate(projectId, draft.id, videoInstructions.trim()));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lên lịch tạo video AI');
+    }
+  };
+  const regenerateVideo = async (
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+    useReviewFeedback = false,
+  ): Promise<void> => {
+    if (!draft) return;
+    try {
+      queueVideo(
+        await videoApi.regenerate(
+          projectId,
+          draft.id,
+          generationId,
+          mode,
+          videoInstructions.trim(),
+          useReviewFeedback,
+        ),
+      );
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo lại video AI');
+    }
+  };
+  const reviewVideo = async (generationId: string, issues: string[], notes: string): Promise<void> => {
+    if (!draft) return;
+    try {
+      const saved = await videoApi.review(projectId, draft.id, generationId, issues, notes);
+      setAiMotion((current) =>
+        current
+          ? {
+              ...current,
+              generations: current.generations.map((item) =>
+                item.id === saved.id ? saved : item,
+              ),
+            }
+          : current,
+      );
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá video');
+    }
+  };
+  const acceptVideo = async (generationId: string, issues: string[], notes: string): Promise<void> => {
+    if (!draft) return;
+    try {
+      await videoApi.accept(projectId, draft.id, generationId, issues, notes);
+      if (selectedSceneId) setAiMotion(await videoApi.aiMotion(projectId, selectedSceneId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chấp nhận video AI');
+    }
+  };
+  const selectCurrentVideo = async (generationId: string): Promise<void> => {
+    if (!draft) return;
+    try {
+      await videoApi.setCurrent(projectId, draft.id, generationId);
+      if (selectedSceneId) setAiMotion(await videoApi.aiMotion(projectId, selectedSceneId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chọn video hiện hành');
+    }
+  };
+  const checkVideoReadiness = async (): Promise<void> => {
+    try {
+      setVideoReadiness(await videoApi.readiness(projectId));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể kiểm tra ComfyUI video');
+    }
+  };
   const updateDraft = <K extends keyof SceneDto>(key: K, value: SceneDto[K]): void => {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
   };
@@ -4452,6 +4788,14 @@ function ScenesWorkspace({
   const imageGenerationActive = sceneImages.some((image) =>
     ['PENDING', 'RUNNING'].includes(image.status),
   );
+  const displayedVideo =
+    aiMotion?.generations.find((video) => video.id === selectedVideoId) ??
+    aiMotion?.generations.find((video) => video.isCurrent) ??
+    aiMotion?.current ??
+    null;
+  const videoGenerationActive =
+    videoJobIds.length > 0 ||
+    (aiMotion?.generations ?? []).some((video) => ['PENDING', 'RUNNING'].includes(video.status));
 
   if (loading) {
     return (
@@ -5390,6 +5734,332 @@ function ScenesWorkspace({
                           </figure>
                         );
                       })}
+                    </div>
+                  </div>
+                )}
+              </section>
+              <section className="scene-image-panel field-wide">
+                <div className="section-head">
+                  <div>
+                    <span className="field-label">Chuyển động AI</span>
+                    <p className="muted">
+                      Lập kế hoạch motion và tạo clip AI từ ảnh hiện hành của cảnh.
+                    </p>
+                  </div>
+                  <div className="chip-row">
+                    {displayedVideo && (
+                      <>
+                        <span
+                          className={`status-chip status-${displayedVideo.status.toLowerCase()}`}
+                        >
+                          {displayedVideo.status}
+                        </span>
+                        <span
+                          className={`status-chip status-${displayedVideo.freshness.toLowerCase()}`}
+                        >
+                          {displayedVideo.freshness}
+                        </span>
+                        <span className="status-chip">
+                          Duyệt:{' '}
+                          {displayedVideo.reviewStatus === 'ACCEPTED'
+                            ? 'Đã chấp nhận'
+                            : displayedVideo.reviewStatus === 'REJECTED'
+                              ? 'Đã từ chối'
+                              : 'Chưa duyệt'}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="scene-form-grid">
+                  <label className="field">
+                    <span>Nguồn chuyển động</span>
+                    <select
+                      value={aiMotion?.motionSource ?? 'KEN_BURNS'}
+                      onChange={(event) =>
+                        void changeMotionSource(event.target.value as MotionSource)
+                      }
+                    >
+                      <option value="KEN_BURNS">Ken Burns</option>
+                      <option value="AI_VIDEO">AI Video</option>
+                      <option value="HYBRID">Kết hợp</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Cường độ</span>
+                    <select
+                      value={motionPlanDraft.intensity}
+                      onChange={(event) =>
+                        setMotionPlanDraft({
+                          ...motionPlanDraft,
+                          intensity: event.target.value as AiMotionIntensity,
+                        })
+                      }
+                    >
+                      <option value="SUBTLE">Nhẹ</option>
+                      <option value="MEDIUM">Vừa</option>
+                      <option value="STRONG">Mạnh</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Hành động nhân vật</span>
+                    <input
+                      maxLength={500}
+                      value={motionPlanDraft.characterAction}
+                      onChange={(event) =>
+                        setMotionPlanDraft({
+                          ...motionPlanDraft,
+                          characterAction: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Chuyển động môi trường</span>
+                    <input
+                      maxLength={500}
+                      value={motionPlanDraft.environmentMotion}
+                      onChange={(event) =>
+                        setMotionPlanDraft({
+                          ...motionPlanDraft,
+                          environmentMotion: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!draft}
+                    onClick={() => void saveAiMotionPlan()}
+                  >
+                    Lưu kế hoạch
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void checkVideoReadiness()}
+                  >
+                    Kiểm tra AI video
+                  </button>
+                </div>
+                {videoReadiness && (
+                  <div
+                    className={`scene-job-status readiness-${videoReadiness.status.toLowerCase()}`}
+                    role="status"
+                  >
+                    {videoReadiness.status}: {videoReadiness.message}
+                  </div>
+                )}
+                <label className="field field-wide">
+                  <span>Chỉ dẫn bổ sung cho video</span>
+                  <textarea
+                    maxLength={2000}
+                    value={videoInstructions}
+                    onChange={(event) => setVideoInstructions(event.target.value)}
+                  />
+                </label>
+                <div className="actions">
+                  <button
+                    type="button"
+                    disabled={!displayedImage || videoGenerationActive}
+                    onClick={() => void generateVideo()}
+                  >
+                    Tạo video AI
+                  </button>
+                  {displayedVideo?.status === 'FAILED' && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={videoGenerationActive}
+                      onClick={() => void generateVideo()}
+                    >
+                      Thử lại
+                    </button>
+                  )}
+                  {displayedVideo?.status === 'COMPLETED' && (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={videoGenerationActive}
+                        onClick={() => void regenerateVideo(displayedVideo.id, 'SAME_SEED')}
+                      >
+                        Tạo lại cùng seed
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={videoGenerationActive}
+                        onClick={() => void regenerateVideo(displayedVideo.id, 'NEW_SEED')}
+                      >
+                        Tạo lại seed mới
+                      </button>
+                    </>
+                  )}
+                </div>
+                {displayedVideo?.error && (
+                  <div className="scene-job-error" role="alert">
+                    {displayedVideo.errorCode}: {displayedVideo.error}
+                  </div>
+                )}
+                {displayedVideo?.assetUrl && (
+                  <video
+                    className="video"
+                    controls
+                    preload="metadata"
+                    src={`${API_BASE}${displayedVideo.assetUrl}`}
+                  />
+                )}
+                {displayedVideo && (
+                  <div className="scene-image-meta">
+                    <span>
+                      Seed {displayedVideo.actualSeed ?? displayedVideo.requestedSeed ?? 'n/a'}
+                    </span>
+                    <span>
+                      {displayedVideo.actualWidth ?? displayedVideo.requestedWidth ?? '?'} ×{' '}
+                      {displayedVideo.actualHeight ?? displayedVideo.requestedHeight ?? '?'}
+                    </span>
+                    {displayedVideo.clipDurationMs != null && (
+                      <span>{(displayedVideo.clipDurationMs / 1_000).toFixed(2)}s</span>
+                    )}
+                    <span>Lần thử {displayedVideo.attempt}</span>
+                  </div>
+                )}
+                {(aiMotion?.generations.length ?? 0) > 0 && (
+                  <div className="candidate-grid" aria-label="Lưới video AI">
+                    {aiMotion?.generations.map((video) => (
+                      <article
+                        key={video.id}
+                        className={`candidate-card${video.id === displayedVideo?.id ? ' active' : ''}`}
+                      >
+                        {video.assetUrl ? (
+                          <video
+                            controls
+                            preload="metadata"
+                            src={`${API_BASE}${video.assetUrl}`}
+                            onClick={() => setSelectedVideoId(video.id)}
+                          />
+                        ) : (
+                          <div className="candidate-empty">{video.status}</div>
+                        )}
+                        <div className="candidate-meta">
+                          <span>v{video.revision}</span>
+                          <span>Seed {video.actualSeed ?? video.requestedSeed ?? 'n/a'}</span>
+                          <span>{video.reviewStatus}</span>
+                          {video.isCurrent && <strong>HIỆN HÀNH</strong>}
+                          {video.freshness === 'STALE' && <em>Stale</em>}
+                        </div>
+                        <div className="candidate-actions">
+                          <button type="button" onClick={() => setSelectedVideoId(video.id)}>
+                            Xem
+                          </button>
+                          {video.status === 'COMPLETED' && (
+                            <button
+                              type="button"
+                              onClick={() => void acceptVideo(video.id, [], '')}
+                            >
+                              Chấp nhận
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {displayedVideo?.status === 'COMPLETED' && (
+                  <div className="quality-review">
+                    <span className="field-label">
+                      Đánh giá chất lượng video v{displayedVideo.revision}
+                    </span>
+                    <fieldset>
+                      <legend>Vấn đề</legend>
+                      {videoIssueTags.map((tag) => (
+                        <label key={tag} className="issue-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={
+                              videoReviewDraft.generationId === displayedVideo.id &&
+                              videoReviewDraft.issues.includes(tag)
+                            }
+                            onChange={(event) =>
+                              setVideoReviewDraft({
+                                generationId: displayedVideo.id,
+                                issues: event.target.checked
+                                  ? [...videoReviewDraft.issues, tag]
+                                  : videoReviewDraft.issues.filter((value) => value !== tag),
+                                notes: videoReviewDraft.notes,
+                              })
+                            }
+                          />
+                          {tag}
+                        </label>
+                      ))}
+                    </fieldset>
+                    <label>
+                      <span>Ghi chú</span>
+                      <textarea
+                        maxLength={1000}
+                        value={
+                          videoReviewDraft.generationId === displayedVideo.id
+                            ? videoReviewDraft.notes
+                            : ''
+                        }
+                        onChange={(event) =>
+                          setVideoReviewDraft({
+                            generationId: displayedVideo.id,
+                            issues: videoReviewDraft.issues,
+                            notes: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <div className="actions">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() =>
+                          void reviewVideo(
+                            displayedVideo.id,
+                            videoReviewDraft.generationId === displayedVideo.id
+                              ? videoReviewDraft.issues
+                              : [],
+                            videoReviewDraft.generationId === displayedVideo.id
+                              ? videoReviewDraft.notes
+                              : '',
+                          )
+                        }
+                      >
+                        Lưu đánh giá (Từ chối)
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() =>
+                          void acceptVideo(
+                            displayedVideo.id,
+                            videoReviewDraft.generationId === displayedVideo.id
+                              ? videoReviewDraft.issues
+                              : [],
+                            videoReviewDraft.generationId === displayedVideo.id
+                              ? videoReviewDraft.notes
+                              : '',
+                          )
+                        }
+                      >
+                        Chấp nhận video
+                      </button>
+                      {!displayedVideo.isCurrent && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void selectCurrentVideo(displayedVideo.id)}
+                        >
+                          Chọn làm video hiện hành
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}

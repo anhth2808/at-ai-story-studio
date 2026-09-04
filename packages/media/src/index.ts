@@ -113,6 +113,8 @@ export async function prepareProjectDirectories(
       'video/scenes',
       'video/chapters',
       'video/projects',
+      'video/scenes',
+      'video/motion',
     ].map((part) => mkdir(join(base, part), { recursive: true })),
   );
 }
@@ -153,6 +155,23 @@ export function managedVideoRelativePath(
   if (!Number.isInteger(revision) || revision < 1)
     throw new AppError('INVALID_MEDIA', 'Video revision is invalid', 400);
   return `projects/${projectId}/video/${kind}s/${entityId}-r${revision}.mp4`;
+}
+
+export function managedMotionRelativePath(
+  projectId: string,
+  sceneStableId: string,
+  generationId: string,
+): string {
+  if (
+    !projectId.trim() ||
+    !sceneStableId.trim() ||
+    !generationId.trim() ||
+    /[\\/]/u.test(projectId) ||
+    /[\\/]/u.test(sceneStableId) ||
+    /[\\/]/u.test(generationId)
+  )
+    throw new AppError('UNSAFE_PATH', 'Managed motion identifiers are invalid', 400);
+  return `projects/${projectId}/video/motion/${sceneStableId}/${generationId}.mp4`;
 }
 
 export async function promoteManagedFile(
@@ -523,6 +542,69 @@ export async function validateImageFile(
     await handle.close();
   }
 }
+export type ValidatedRawVideo = {
+  width: number;
+  height: number;
+  durationMs: number;
+  fps: number;
+  frameCount: number;
+  codec: string;
+  probe: Record<string, unknown>;
+};
+
+// Raw AI provider output must be a real, readable, sane video file before it
+// may be persisted as an Asset. Strict format normalization happens later at
+// the SceneClip stage; this gate only rejects corrupt or empty output.
+export async function validateRawAiVideo(
+  tools: FfmpegTools,
+  filename: string,
+): Promise<ValidatedRawVideo> {
+  const info = await stat(filename);
+  if (!info.isFile() || info.size === 0)
+    throw new AppError('INVALID_MEDIA', 'Raw AI video file is empty', 400);
+  const probe = await tools.validateProbe(filename, 'video');
+  const streams = Array.isArray(probe.streams) ? probe.streams : [];
+  const stream = streams.find((value): value is Record<string, unknown> => {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as Record<string, unknown>;
+    return candidate.codec_type === 'video' && Number(candidate.width) >= 16;
+  });
+  if (!stream)
+    throw new AppError('INVALID_MEDIA', 'Raw AI video has no usable video stream', 400);
+  const width = Number(stream.width);
+  const height = Number(stream.height);
+  const rateText = String(stream.avg_frame_rate ?? stream.r_frame_rate ?? '0/1');
+  const rateParts = rateText.split('/').map((value) => Number(value));
+  const rateNum = rateParts[0] ?? 0;
+  const rateDen = rateParts[1] ?? 0;
+  const fps = rateDen ? rateNum / rateDen : 0;
+  const format = (probe.format ?? {}) as Record<string, unknown>;
+  const durationSeconds = Number(format.duration ?? 0);
+  const frameCount = Number(stream.nb_frames ?? 0);
+  if (
+    !Number.isFinite(width) ||
+    width < 16 ||
+    width > 16_384 ||
+    !Number.isFinite(height) ||
+    height < 16 ||
+    height > 16_384 ||
+    !Number.isFinite(fps) ||
+    fps < 1 ||
+    fps > 240 ||
+    !Number.isFinite(durationSeconds) ||
+    durationSeconds <= 0
+  )
+    throw new AppError('INVALID_MEDIA', 'Raw AI video probe values are not plausible', 400);
+  return {
+    width,
+    height,
+    durationMs: Math.round(durationSeconds * 1_000),
+    fps,
+    frameCount: Number.isFinite(frameCount) ? frameCount : Math.round(durationSeconds * fps),
+    codec: String(stream.codec_name ?? 'unknown'),
+    probe,
+  }
+}
 export type RenderArguments = {
   backgroundPath: string;
   backgroundType: 'BACKGROUND_IMAGE' | 'BACKGROUND_VIDEO';
@@ -633,5 +715,6 @@ export function relativeAssetPath(workspaceRoot: string, filename: string): stri
 }
 export * from './crop.js';
 export * from './ffmpeg-progress.js';
+export * from './ai-clip-render.js';
 export * from './timeline-render.js';
 export * from './hierarchical-probe.js';

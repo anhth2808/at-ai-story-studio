@@ -6,13 +6,18 @@ import {
   ProjectRepository,
   RenderJobRepository,
   SceneRepository,
+  SceneMotionSourceRepository,
+  SceneVideoGenerationRepository,
   TimelineRepository,
   WorkflowRepository,
+  sceneVideoRole,
   type CreateSceneTimingInput,
   type DatabaseHandle,
 } from '@studio/database';
 import {
+  AI_CLIP_CROSSFADE_MAX_MS,
   AppError,
+  resolveAiCrossfadeMs,
   chapterTimelineSchema,
   motionPlanSchema,
   renderFallbackPolicySchema,
@@ -43,6 +48,11 @@ import {
 import type { FfmpegTools, WorkspacePaths } from '@studio/media';
 import { buildSceneTiming, validateManualSceneTiming } from './scene-timing.js';
 import { createDefaultMotionPlan } from './motion-plan.js';
+
+type AiClipSource = {
+  clipSource: 'KEN_BURNS' | 'AI_VIDEO' | 'HYBRID';
+  raw: { path: string; sha256: string; durationMs: number; fingerprint: string } | null;
+};
 
 export type TimelineWorkflowContext = {
   database: DatabaseHandle;
@@ -157,10 +167,15 @@ export const renderSceneClipPayloadSchema = z
     config: renderConfigSchema,
     outputPath: renderAssetPathSchema,
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    clipSource: z.enum(['KEN_BURNS', 'AI_VIDEO', 'HYBRID']).default('KEN_BURNS'),
+    rawClipPath: renderAssetPathSchema.nullable().default(null),
+    rawClipDurationMs: z.number().positive().nullable().default(null),
+    crossfadeMs: z.number().int().min(0).max(AI_CLIP_CROSSFADE_MAX_MS).default(0),
   })
   .strict();
 const RENDER_COMPILER_VERSIONS = {
   scene: 'scene-clip-ffmpeg-v1',
+  aiScene: 'ai-scene-clip-ffmpeg-v1',
   chapter: 'chapter-video-ffmpeg-v1',
   project: 'project-video-ffmpeg-v1',
 } as const;
@@ -287,6 +302,8 @@ export class TimelineWorkflowService {
     private readonly chapters = new ChapterRepository(context.database),
     private readonly scenes = new SceneRepository(context.database),
     private readonly workflow = new WorkflowRepository(context.database),
+    private readonly sceneVideos = new SceneVideoGenerationRepository(context.database),
+    private readonly motionSources = new SceneMotionSourceRepository(context.database),
   ) {
     this.timeline = new TimelineRepository(context.database);
     this.renderJobs = new RenderJobRepository(context.database);
@@ -365,6 +382,8 @@ export class TimelineWorkflowService {
         imageAssetUrl: assetUrl(image?.id ?? fallback?.id ?? null),
         sceneClipAssetId: currentClip?.id ?? null,
         sceneClipAssetUrl: assetUrl(currentClip?.id ?? null),
+        motionSource: this.motionSources.get(projectId, scene.stableId),
+        aiMotion: this.aiMotionStatus(projectId, scene.stableId),
         status: blockers.length === 0 ? ('COMPLETED' as const) : ('PENDING' as const),
         blockers,
       };
@@ -741,6 +760,9 @@ export class TimelineWorkflowService {
       entityId: Id | null;
       retryable: boolean;
     }> = [];
+    let aiSelected = 0;
+    let aiMissing = 0;
+    let aiToNormalize = 0;
     if (parsedRequest.source === 'BACKGROUND') {
       return renderPlanSchema.parse({
         projectId,
@@ -756,6 +778,13 @@ export class TimelineWorkflowService {
           blocked: 0,
         },
         project: { required: true, reusable: false, fingerprint: null },
+        ai: {
+          scenesSelected: 0,
+          missingMotion: 0,
+          clipsToNormalize: 0,
+          estimatedGenerations: 0,
+          estimatedGenerationMs: 0,
+        },
         expectedDurationMs: null,
         blockers,
         generatedAt: new Date().toISOString(),
@@ -845,6 +874,22 @@ export class TimelineWorkflowService {
         const clip = this.currentAsset(projectId, `scene:${scene.stableId}:video`);
         if (clip?.inputFingerprint === sceneFingerprint) sceneReusable += 1;
         sceneFingerprints.push(sceneFingerprint);
+        const aiClip = this.aiClipSource(projectId, scene.stableId);
+        if (aiClip) {
+          aiSelected += 1;
+          if (!aiClip.raw) {
+            aiMissing += 1;
+            if (parsedRequest.fallbackPolicy === 'FAIL')
+              blockers.push({
+                code: 'AI_MOTION_REQUIRED',
+                message: `Scene ${scene.sceneNumber} requires accepted AI motion or a non-FAIL fallback`,
+                entityId: scene.id,
+                retryable: true,
+              });
+          } else if (clip?.inputFingerprint !== sceneFingerprint) {
+            aiToNormalize += 1;
+          }
+        }
       }
       if (timing) expectedDurationMs += timing.durationMs;
       const chapterFingerprint = fingerprint({
@@ -905,6 +950,17 @@ export class TimelineWorkflowService {
         reusable: projectVideo?.inputFingerprint === projectFingerprint,
         fingerprint: projectFingerprint,
       },
+      ai: (() => {
+        const unit = aiMissing > 0 ? this.sceneVideos.recentGenerationDurationMs(projectId) : null;
+        return {
+          scenesSelected: aiSelected,
+          missingMotion: aiMissing,
+          clipsToNormalize: aiToNormalize,
+          estimatedGenerations: aiMissing,
+          estimatedGenerationMs:
+            aiMissing > 0 ? (unit ? aiMissing * unit : null) : 0,
+        };
+      })(),
       expectedDurationMs: expectedDurationMs || null,
       blockers: [
         ...new Map(
@@ -1008,6 +1064,17 @@ export class TimelineWorkflowService {
               `Scene ${scene.sceneNumber} is missing timeline inputs`,
               409,
             );
+          const aiSource = this.aiRenderSource(
+            projectId,
+            scene.stableId,
+            parsedRequest.fallbackPolicy,
+          );
+          if (aiSource && !aiSource.raw)
+            throw new AppError(
+              'RENDER_BLOCKED',
+              `Scene ${scene.sceneNumber} is missing accepted AI motion`,
+              409,
+            );
           const effectiveImage = image ?? fallback;
           const imageWidth =
             typeof effectiveImage?.metadata.width === 'number'
@@ -1052,6 +1119,13 @@ export class TimelineWorkflowService {
             config,
             outputPath: `projects/${projectId}/video/scenes/${scene.id}-${randomUUID()}.mp4`,
             fingerprint: sceneFingerprint,
+            clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
+            rawClipPath: aiSource?.raw?.path ?? null,
+            rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
+            crossfadeMs:
+              aiSource?.raw
+                ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
+                : 0,
           };
           const stepId = this.workflow.createStep(
             executionId,
@@ -1284,6 +1358,18 @@ export class TimelineWorkflowService {
       },
       chapters: { total: 0, reusable: 0, required: 0, blocked: 0 },
       project: { required: false, reusable: false, fingerprint: null },
+      ai: (() => {
+        const aiClip = scene ? this.aiClipSource(projectId, scene.stableId) : null;
+        const unit = aiClip ? this.sceneVideos.recentGenerationDurationMs(projectId) : null;
+        return {
+          scenesSelected: aiClip ? 1 : 0,
+          missingMotion: aiClip && !aiClip.raw ? 1 : 0,
+          clipsToNormalize: aiClip && aiClip.raw && !reusable ? 1 : 0,
+          estimatedGenerations: aiClip && !aiClip.raw ? 1 : 0,
+          estimatedGenerationMs:
+            aiClip && !aiClip.raw ? (unit ? unit : null) : 0,
+        };
+      })(),
       expectedDurationMs: timingItem?.durationMs ?? null,
       blockers,
       generatedAt: new Date().toISOString(),
@@ -1325,6 +1411,13 @@ export class TimelineWorkflowService {
         409,
       );
     const config = this.config(projectId, request);
+    const aiSource = this.aiRenderSource(projectId, scene.stableId, request.fallbackPolicy);
+    if (aiSource && !aiSource.raw)
+      throw new AppError(
+        'RENDER_BLOCKED',
+        `Scene ${scene.sceneNumber} is missing accepted AI motion`,
+        409,
+      );
     const sceneFingerprint = this.sceneClipFingerprint(
       scene,
       timingItem,
@@ -1355,6 +1448,13 @@ export class TimelineWorkflowService {
       config,
       outputPath: `projects/${projectId}/video/scenes/${scene.id}-${randomUUID()}.mp4`,
       fingerprint: sceneFingerprint,
+      clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
+      rawClipPath: aiSource?.raw?.path ?? null,
+      rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
+      crossfadeMs:
+        aiSource?.raw
+          ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
+          : 0,
     };
     const stepId = this.workflow.createStep(
       executionId,
@@ -1571,10 +1671,37 @@ export class TimelineWorkflowService {
     fallbackPolicy = 'FAIL' as RenderFallbackPolicy,
     fallbackAsset: AssetDetails | null = null,
   ): string {
+    // AI sources change the fingerprint inputs; Ken Burns output must stay
+    // byte-identical to the Prompt #12 fingerprint so existing caches hold.
+    const aiSource = this.aiRenderSource(scene.projectId, scene.stableId, fallbackPolicy);
+    if (!aiSource)
+      return fingerprint({
+        compilerVersion: RENDER_COMPILER_VERSIONS.scene,
+        sceneId: scene.id,
+        sceneRevision: scene.revision,
+        timing: {
+          revision: timing.sceneRevision,
+          startMs: timing.startMs,
+          endMs: timing.endMs,
+          sourceRange: timing.sourceRange,
+        },
+        motion: motion.inputFingerprint,
+        image: image?.sha256 ?? null,
+        fallbackPolicy,
+        fallbackAsset: fallbackAsset?.sha256 ?? null,
+        profile: {
+          width: config.width,
+          height: config.height,
+          fps: config.fps,
+          qualityPreset: config.qualityPreset,
+        },
+        fitMode: config.fitMode,
+      });
     return fingerprint({
-      compilerVersion: RENDER_COMPILER_VERSIONS.scene,
+      compilerVersion: RENDER_COMPILER_VERSIONS.aiScene,
       sceneId: scene.id,
       sceneRevision: scene.revision,
+      clipSource: aiSource.clipSource,
       timing: {
         revision: timing.sceneRevision,
         startMs: timing.startMs,
@@ -1583,6 +1710,7 @@ export class TimelineWorkflowService {
       },
       motion: motion.inputFingerprint,
       image: image?.sha256 ?? null,
+      raw: aiSource.raw?.fingerprint ?? null,
       fallbackPolicy,
       fallbackAsset: fallbackAsset?.sha256 ?? null,
       profile: {
@@ -1592,7 +1720,74 @@ export class TimelineWorkflowService {
         qualityPreset: config.qualityPreset,
       },
       fitMode: config.fitMode,
+      crossfadeMs: aiSource.raw
+        ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timing.durationMs)
+        : 0,
     });
+  }
+
+  // Raw AI motion availability for a Scene. null means Ken Burns (the
+  // default): no AI request exists for this Scene.
+  private aiClipSource(projectId: Id, sceneStableId: string): AiClipSource | null {
+    const clipSource = this.motionSources.get(projectId, sceneStableId);
+    if (clipSource === 'KEN_BURNS') return null;
+    const generation = this.sceneVideos.getCurrent(projectId, sceneStableId);
+    if (
+      !generation ||
+      generation.status !== 'COMPLETED' ||
+      generation.freshness !== 'CURRENT' ||
+      generation.reviewStatus !== 'ACCEPTED' ||
+      !generation.assetId
+    )
+      return { clipSource, raw: null };
+    const asset = this.currentAsset(projectId, sceneVideoRole(sceneStableId));
+    const rawDuration = asset?.metadata.clipDurationMs;
+    if (
+      !asset ||
+      typeof rawDuration !== 'number' ||
+      rawDuration <= 0
+    )
+      return { clipSource, raw: null };
+    return {
+      clipSource,
+      raw: {
+        path: asset.path,
+        sha256: asset.sha256,
+        durationMs: rawDuration,
+        fingerprint: generation.inputFingerprint,
+      },
+    };
+  }
+
+  private aiMotionStatus(projectId: Id, sceneStableId: string) {
+    const source = this.motionSources.get(projectId, sceneStableId);
+    if (source === 'KEN_BURNS') return null;
+    const generation = this.sceneVideos.getCurrent(projectId, sceneStableId);
+    return {
+      generationId: generation?.id ?? null,
+      status:
+        generation?.status ??
+        ('MISSING' as 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'MISSING'),
+      reviewStatus: generation?.reviewStatus ?? ('UNREVIEWED' as const),
+      hasAcceptedClip: Boolean(
+        generation &&
+          generation.status === 'COMPLETED' &&
+          generation.reviewStatus === 'ACCEPTED' &&
+          generation.freshness === 'CURRENT',
+      ),
+    };
+  }
+
+  // Render-decision view: without a usable raw clip and a non-FAIL fallback
+  // policy the scene renders through the Ken Burns path instead.
+  private aiRenderSource(
+    projectId: Id,
+    sceneStableId: string,
+    fallbackPolicy: RenderFallbackPolicy,
+  ): AiClipSource | null {
+    const source = this.aiClipSource(projectId, sceneStableId);
+    if (source && !source.raw && fallbackPolicy !== 'FAIL') return null;
+    return source;
   }
 
   private assertNoActiveRenderJobs(projectId: Id, scope: RenderScope): void {

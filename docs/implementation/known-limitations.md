@@ -2,9 +2,10 @@
 
 - Edge TTS is the only implemented narration provider. It requires network
   access and may be rate-limited or unavailable offline.
-- The media renderer still assembles the first working video path around the
-  selected chapter. Multi-chapter media timeline assembly is not part of this
-  change.
+- The media renderer assembles Scene Clips into Chapter Videos and ordered
+  Chapter Videos into Project Videos with hierarchical caching and scoped
+  invalidation (Prompt #12). Legacy background rendering remains available for
+  explicit background-source projects.
 - Subtitle burn-in is implemented through FFmpeg when a current SRT asset
   exists. Subtitle replacement is available, but styled or word-aligned
   subtitles remain out of scope.
@@ -13,8 +14,7 @@
   parameter.
 - Background uploads are classified by MIME type. Full media probing and
   corruption rejection still rely on render-time ffprobe validation.
-- Asset streaming does not yet implement HTTP byte ranges or a download
-  disposition.
+- Asset streaming does not yet implement a download disposition header.
 - IDs use cryptographically random UUIDs rather than UUIDv7.
 - The render manifest is represented by persisted fingerprints and asset
   lineage. A standalone immutable manifest file is not emitted.

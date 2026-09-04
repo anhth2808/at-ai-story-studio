@@ -73,7 +73,7 @@ export type ProjectVideoRenderInput = {
 
 type QualityProfile = { preset: 'ultrafast' | 'medium' | 'slow'; crf: number };
 
-const QUALITY_PROFILES: Record<QualityPreset, QualityProfile> = {
+export const QUALITY_PROFILES: Record<QualityPreset, QualityProfile> = {
   FAST_PREVIEW: { preset: 'ultrafast', crf: 30 },
   STANDARD: { preset: 'medium', crf: 23 },
   HIGH: { preset: 'slow', crf: 18 },

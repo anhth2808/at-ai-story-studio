@@ -1,13 +1,13 @@
 # Animated Story Timeline
 
-The V1 animated story path renders accepted Scene images with deterministic FFmpeg motion. It does not use image-to-video or an AI video provider.
+The V1 animated story path renders accepted Scene images with deterministic FFmpeg motion (Ken Burns), and - since Prompt #13 - can additionally render selected Scenes through AI image-to-video. See `ai-video.md`; the timeline, Chapter Video, and Project Video contracts below are unchanged: AI motion produces the same normalized SceneClip Assets.
 
 ```text
 chapter source text
   -> TTS segments with UTF-16 source ranges and measured durations
   -> SceneTiming revision
   -> provider-neutral MotionPlan revisions
-  -> Scene Clips (video only)
+  -> Scene Clips (video only; sources: KEN_BURNS, AI_VIDEO, HYBRID)
   -> Chapter Videos (narration and subtitles)
   -> Project Video (optional project music)
 ```
@@ -39,7 +39,15 @@ A current MANUAL timing revision is not replaced by an automatic rebuild while i
 
 ## Media boundaries
 
-`packages/media/src/timeline-render.ts` is the only timeline FFmpeg argument compiler:
+Scene Clips have two sources. Ken Burns scenes compile through
+`buildSceneClipArguments` (looped still, bounded motion). AI_VIDEO/HYBRID
+scenes compile through `buildAiSceneClipArguments`
+(`ai-clip-render.ts`): the accepted raw AI clip is normalized, and
+`AI_THEN_KEN_BURNS` continues to the exact SceneTiming duration with a
+crossfade into bounded Ken Burns over the accepted image. Raw AI clips reuse
+across timing/subtitle/music/quality changes; the video provider runs only
+when source image, motion plan, settings, workflow, or seed change.
+`packages/media/src/timeline-render.ts` remains the Chapter/Project compiler:
 
 - Scene Clip: looped still image, bounded motion, H.264, configured FPS, `yuv420p`, no narration requirement.
 - Chapter Video: CUT, CROSSFADE, or FADE; narration duration is authoritative; the current Chapter SRT is burned in here.

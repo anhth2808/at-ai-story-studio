@@ -7,7 +7,10 @@ import {
   createDatabase,
   migrateDatabase,
   SceneImageGenerationRepository,
+  VideoGenerationSettingsRepository,
   WorkflowRepository,
+  sceneVideoRole,
+  videoSettingsFingerprint,
 } from '@studio/database';
 import {
   FfmpegTools,
@@ -867,6 +870,140 @@ describe('timeline workflow integration', () => {
       scope: selectedRequest.scope,
       chapters: [{ chapterId: fixture.chapters[0]!.id }, { chapterId: fixture.chapters[2]!.id }],
     });
+    fixture.database.sqlite.close();
+  }, 30_000);
+
+  it('plans mixed AI motion modes metadata-only and renders without provider calls', async () => {
+    const fixture = await setupFixture();
+    const assets = new AssetRepository(fixture.database);
+    const database = fixture.database;
+    for (const chapter of fixture.chapters) {
+      await fixture.service.timeline.buildSceneTiming(chapter.id);
+      fixture.service.timeline.buildMotionPlans(chapter.id);
+    }
+    const aiScene = fixture.chapters[0]!.scenes[0]!;
+    const hybridScene = fixture.chapters[0]!.scenes[1]!;
+    // Motion sources: first scene AI_VIDEO, second HYBRID.
+    for (const [scene, source] of [
+      [aiScene, 'AI_VIDEO'],
+      [hybridScene, 'HYBRID'],
+    ] as const) {
+      database.sqlite
+        .prepare(
+          `INSERT INTO scene_motion_sources(id,project_id,scene_stable_id,motion_source,created_at,updated_at)
+           VALUES(?,?,?,?,?,?)`,
+        )
+        .run(randomUUID(), fixture.projectId, scene.stableId, source, '2026-01-01', '2026-01-01');
+    }
+    // Settings + current accepted AI motion for both scenes.
+    const settingsRepo = new VideoGenerationSettingsRepository(database);
+    const settings = settingsRepo.getOrCreate(fixture.projectId);
+    const settingsFingerprint = videoSettingsFingerprint(settings);
+    for (const [scene, fingerprintSeed] of [
+      [aiScene, 'ai-gen-fp-1'],
+      [hybridScene, 'ai-gen-fp-2'],
+    ] as const) {
+      const planId = randomUUID();
+      database.sqlite
+        .prepare(
+          `INSERT INTO ai_motion_plan_revisions(id,project_id,chapter_id,scene_stable_id,scene_revision_id,
+            revision,motion_prompt,input_fingerprint,status,is_current,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          planId,
+          fixture.projectId,
+          fixture.chapters[0]!.id,
+          scene.stableId,
+          scene.id,
+          1,
+          'the scene breathes gently',
+          `plan-${fingerprintSeed}`,
+          'CURRENT',
+          1,
+          '2026-01-01',
+          '2026-01-01',
+        );
+      const assetId = randomUUID();
+      const imageAsset = database.sqlite
+        .prepare(
+          "SELECT id,sha256 FROM assets WHERE project_id=? AND role=? AND is_current=1 AND status='READY' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(fixture.projectId, `scene:${scene.stableId}:image`) as {
+        id: string;
+        sha256: string;
+      };
+      await registerFile(fixture.workspace, assets, {
+        id: assetId,
+        projectId: fixture.projectId,
+        type: 'AI_SCENE_VIDEO',
+        role: sceneVideoRole(scene.stableId),
+        relativePath: `projects/${fixture.projectId}/video/motion/${scene.stableId}/gen.mp4`,
+        mediaType: 'video/mp4',
+        metadata: { clipDurationMs: 5_000, fps: 24, frameCount: 121, seed: 42 },
+        sourceEntityId: scene.id,
+      });
+      database.sqlite
+        .prepare(
+          `INSERT INTO scene_video_generations(id,project_id,chapter_id,scene_stable_id,scene_revision_id,
+            revision,provider,status,review_status,is_current,provider_job_id,workflow_template,
+            input_fingerprint,source_image_asset_id,source_image_sha256,asset_id,
+            motion_plan_fingerprint,settings_fingerprint,attempt,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          randomUUID(),
+          fixture.projectId,
+          fixture.chapters[0]!.id,
+          scene.stableId,
+          scene.id,
+          1,
+          'COMFYUI',
+          'COMPLETED',
+          'ACCEPTED',
+          1,
+          randomUUID(),
+          'image-to-video-v1',
+          fingerprintSeed,
+          imageAsset.id,
+          imageAsset.sha256,
+          assetId,
+          `plan-${fingerprintSeed}`,
+          settingsFingerprint,
+          1,
+          '2026-01-01',
+          '2026-01-01',
+        );
+    }
+    const stepsBefore = (
+      database.sqlite.prepare('SELECT COUNT(*) as n FROM workflow_steps').get() as { n: number }
+    ).n;
+    const request = {
+      source: 'SCENES' as const,
+      scope: { kind: 'FULL_STORY' as const },
+      autoBuild: false,
+      fallbackPolicy: 'FAIL' as const,
+    };
+    const plan = fixture.service.getRenderPlan(fixture.projectId, request);
+    expect(plan.ai).toMatchObject({ scenesSelected: 2, missingMotion: 0, clipsToNormalize: 2 });
+    expect(plan.ai?.estimatedGenerations).toBe(0);
+    const stepsAfterPlan = (
+      database.sqlite.prepare('SELECT COUNT(*) as n FROM workflow_steps').get() as { n: number }
+    ).n;
+    expect(stepsAfterPlan).toBe(stepsBefore);
+    const schedule = await fixture.service.scheduleTimelineRender(fixture.projectId, request);
+    const aiJobTypes = database.sqlite
+      .prepare("SELECT COUNT(*) as n FROM workflow_steps WHERE type='GENERATE_AI_SCENE_VIDEO'").get() as { n: number };
+    expect(aiJobTypes.n).toBe(0);
+    await drainTimelineWorker(fixture, 'timeline-worker-ai');
+    // Raw AI motion assets survive renders untouched.
+    const rawCount = (
+      database.sqlite
+        .prepare("SELECT COUNT(*) as n FROM scene_video_generations WHERE status='COMPLETED'")
+        .get() as { n: number }
+    ).n;
+    expect(rawCount).toBe(2);
+    void schedule;
     fixture.database.sqlite.close();
   }, 30_000);
 });
