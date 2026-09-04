@@ -63,3 +63,10 @@ Timeline controls SHALL use the existing web visual language and native accessib
 #### Scenario: View on a narrow viewport
 - **WHEN** the Timeline is opened at approximately 375 px width
 - **THEN** Scene metadata and actions SHALL remain readable and operable without relying on hover or color-only status
+
+### Requirement: Clip source and AI status in timeline
+The timeline per-Scene card SHALL display the SceneClip source mode (KEN_BURNS/AI_VIDEO/HYBRID), the AI motion generation/review status when applicable, and a playable normalized SceneClip preview. AI controls SHALL integrate into the existing timeline/Scene surfaces; no separate AI video timeline view SHALL be created.
+
+#### Scenario: Scene clip preview in timeline
+- **WHEN** a Scene has a current normalized SceneClip of AI origin
+- **THEN** the timeline card SHALL offer playback of that clip and show its source badge

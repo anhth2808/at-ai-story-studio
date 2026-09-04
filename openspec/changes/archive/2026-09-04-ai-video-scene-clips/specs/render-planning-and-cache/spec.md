@@ -15,6 +15,8 @@ The system SHALL be able to build a dry-run RenderPlan for a Scene, Chapter, Cha
 - **WHEN** a plan covers Scenes in AI_VIDEO/HYBRID mode lacking accepted raw clips
 - **THEN** the plan SHALL count them as AI-missing, report the estimated generation workload, and mark the affected clips blocked or fallback-eligible per policy without starting generation
 
+## ADDED Requirements
+
 ### Requirement: Raw AI asset reuse across render-only changes
 Render-scoped changes - SceneTiming adjustments, subtitle or music changes, quality preset or final resolution changes - SHALL reuse current raw AI Motion Assets and SHALL not invoke the video provider. Only normalized SceneClips and downstream Chapter/Project outputs rebuild. Provider calls SHALL occur only when the raw generation fingerprint inputs change (source image, motion plan, provider settings, workflow version, seed).
 

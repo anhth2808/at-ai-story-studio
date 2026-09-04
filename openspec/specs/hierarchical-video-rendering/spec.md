@@ -103,3 +103,10 @@ This capability SHALL not call or require any AI video, image-to-video, lip-sync
 #### Scenario: AI provider unavailable
 - **WHEN** no AI video provider is configured
 - **THEN** Scene Clip, Chapter Video, and Project Video rendering SHALL still be supported from accepted still images and local media inputs
+
+### Requirement: Source-agnostic SceneClip consumption
+Chapter Video and Project Video rendering SHALL consume normalized SceneClip Assets by role and fingerprint exactly as in the existing hierarchy, regardless of whether a clip was produced by Ken Burns FFmpeg motion or AI clip normalization. No AI-specific Chapter or Project renderer, timeline, or assembly path SHALL exist. Narration duration, subtitle burn-in, transitions, and probe validation SHALL behave identically for mixed-source Chapters.
+
+#### Scenario: Mixed-source chapter renders unchanged
+- **WHEN** a Chapter Video renders over clips of mixed origin
+- **THEN** the existing `buildChapterVideoArguments` path, narration-authoritative duration, subtitle burn-in, and validation tolerances apply with no source-specific branches
