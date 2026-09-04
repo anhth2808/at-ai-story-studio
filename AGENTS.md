@@ -11,6 +11,7 @@ pass `-c user.name=` / `-c user.email=` overrides.
 - Site content (UI copy, Sanity content, SEO metadata) is Vietnamese. Code, comments, and planning artifacts are English.
 - Imporant: only use Vietnamese or English. No chinese here.
 - ALWAYS use /ponytail-review before comimt anything
+- Please use  .omp/rules/[opsx-autopilot.md](http://opsx-autopilot.md) rule to make sure we are not lost any spec/change when coding
 
 This repository contains AI Story Studio.
 
@@ -309,7 +310,6 @@ change invalidates that Scene Clip, its containing Chapter Video, and dependent
 Project Videos only. Chapter narration or subtitles invalidate only that
 Chapter Video and dependent Project Videos; project music or render settings
 must not invalidate reusable Scene Clips or unrelated Chapter Videos.
-
 
 # AI Video
 
@@ -638,13 +638,13 @@ historical revisions.
 - Strictly validate OMP structured output at the boundary. Persist provider
 usage when available and leave unavailable token or cost values unknown.
 
-
 # Reference-conditioned image generation rules
 
-- Reference-conditioned image generation must retain an explicit CharacterId ->
-  ReferenceAsset mapping (asset id, content hash, and profile revision) in the
-  persisted request and metadata; never resolve conditioning by prompt name
-  order.
+- Reference-conditioned image generation must retain an explicit CharacterId -&gt;
+ReferenceAsset mapping (asset id, content hash, and profile revision) in the
+persisted request and metadata; never resolve conditioning by prompt name
+order.
 - Changing a character reference must never invalidate unrelated characters'
-  images or Story/TTS data. Reference changes propagate only through the
-  per-character profile dependency model.
+images or Story/TTS data. Reference changes propagate only through the
+per-character profile dependency model.
+
