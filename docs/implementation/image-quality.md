@@ -35,3 +35,14 @@ Rejecting a candidate preserves its image, seed, metadata, and candidate-set mem
 ## Restart safety
 
 Review scores, issues, and notes live in SQLite columns on the generation row and survive API/worker restart. Verified by the repository test that writes a rejection, closes the database, reopens it, and reads the review back intact.
+
+## Automatic critic and candidate settlement
+
+Automatic image critics are evaluator-only. They receive the exact generated
+Asset and validated reference Assets, persist structured scores, issue tags,
+confidence, explanation, guidance, evaluator, version, and input fingerprints,
+then return `PASSED`, `REJECTED`, `MANUAL_REVIEW_REQUIRED`, or `UNAVAILABLE`.
+Only `PASSED` evaluations enter deterministic weighted ranking. Candidate sets
+persist one immutable ranking; rejected, uncertain, stale, or missing-hash
+evidence never becomes current. Human `ACCEPTED` approval remains a separate
+gate.

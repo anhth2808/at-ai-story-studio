@@ -11,3 +11,6 @@ export * from './render-jobs.js';
 export * from './video.js';
 export * from './production.js';
 export * from './publication.js';
+export * from './shot.js';
+export * from './quality.js';
+export * from './visual-reference.js';

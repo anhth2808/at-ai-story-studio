@@ -40,6 +40,7 @@ export function migrateDatabase(database: DatabaseHandle): string {
     '0013_animated_story_timeline',
     '0014_ai_video',
     '0015_production_pipeline',
+    '0016_perceptual_quality',
   ];
   database.sqlite.exec(readFileSync(join(migrationDirectory, '0000_initial.sql'), 'utf8'));
   database.sqlite.exec(

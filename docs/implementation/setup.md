@@ -138,3 +138,16 @@ When the GPU is reserved by another workload, leave image and AI-motion
 provider steps pending and use preflight, planning, existing-output reuse,
 package validation, and API/UI checks only. Do not start a production run
 until the provider execution window is available.
+
+## Quality pipeline readiness
+
+Shot plans, visual references, candidate critics, temporal keyframe critics,
+and TTS anomaly checks are durable worker steps. Automatic critic status is
+not human approval: `UNAVAILABLE` pauses or escalates according to the
+production profile and never passes a gate. Reuse is fingerprinted by the
+current Shot, Asset hashes, package, settings, backend, and evaluator inputs.
+
+For the local LTX path, use the existing ComfyUI server and verify readiness
+before generation. The application-owned `LTX2_19B_DISTILLED` adapter selects
+the discovered checkpoint, text encoder, and VAE; it does not download models
+or modify global ComfyUI workflows.

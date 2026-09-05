@@ -22,6 +22,7 @@ export type AiAgentRequest = {
   inputFingerprint: string;
   systemPrompt: string;
   userPrompt: string;
+  imagePaths?: string[];
   deadlineMs?: number;
 };
 
@@ -126,6 +127,7 @@ export class OmpAgent implements AiAgent {
       systemPrompt: request.systemPrompt,
       userPrompt: request.userPrompt,
       deadlineMs: request.deadlineMs ?? 120_000,
+      ...(request.imagePaths?.length ? { imagePaths: request.imagePaths } : {}),
     });
     let result;
     try {

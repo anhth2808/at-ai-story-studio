@@ -66,3 +66,11 @@ current managed Assets and measured chapter durations. It writes only
 workspace-relative manifest references and exports through a staging directory
 with path, ownership, and checksum validation. External platform publishing
 is intentionally absent.
+
+## Perceptual quality boundary
+
+Shot planning, reference generation, image/video critics, and TTS inspection
+are durable worker work. Critics are evaluator-only and report explicit
+`PASSED`, `REJECTED`, `MANUAL_REVIEW_REQUIRED`, or `UNAVAILABLE`; human
+approval remains separate. Backend-specific video descriptors stay behind
+adapters, and all media evidence is hash-bound to managed Assets.

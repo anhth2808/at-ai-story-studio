@@ -395,6 +395,110 @@ export class FfmpegTools {
       .map((line) => line.trim().split(/\s+/u)[1])
       .filter((name): name is string => Boolean(name));
   }
+  async measureAudioDuration(
+    filename: string,
+  ): Promise<{ durationMs: number; provenance: 'DECODED_FRAMES' | 'CONTAINER_METADATA' }> {
+    try {
+      const result = await this.runner.run({
+        executable: this.ffmpeg,
+        arguments: [
+          '-v',
+          'error',
+          '-i',
+          filename,
+          '-map',
+          '0:a:0',
+          '-f',
+          'null',
+          '-',
+          '-progress',
+          'pipe:1',
+          '-nostats',
+        ],
+        timeoutMs: 120_000,
+      });
+      const times = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gmu)].map((match) =>
+        Number(match[1]),
+      );
+      const decoded = times.at(-1);
+      if (decoded && Number.isFinite(decoded))
+        return { durationMs: Math.round(decoded / 1_000), provenance: 'DECODED_FRAMES' };
+    } catch {
+      // Probe metadata remains an explicit fallback when decoding is unavailable.
+    }
+    const probe = await this.probe(filename);
+    const seconds = Number((probe.format as { duration?: string } | undefined)?.duration ?? 0);
+    const durationMs = Math.round(seconds * 1_000);
+    if (durationMs < 1) throw new AppError('INVALID_MEDIA', 'Audio duration is unavailable', 400);
+    return { durationMs, provenance: 'CONTAINER_METADATA' };
+  }
+
+  async detectAudioSilence(
+    filename: string,
+    durationMs?: number,
+  ): Promise<{ totalSilenceMs: number; activityRatio: number }> {
+    const duration = durationMs ?? (await this.measureAudioDuration(filename)).durationMs;
+    const result = await this.runner.run({
+      executable: this.ffmpeg,
+      arguments: [
+        '-v',
+        'info',
+        '-i',
+        filename,
+        '-af',
+        'silencedetect=noise=-45dB:d=0.35',
+        '-f',
+        'null',
+        '-',
+      ],
+      timeoutMs: 120_000,
+    });
+    const totalSilenceMs = [...result.stderr.matchAll(/silence_duration: ([0-9.]+)/gu)].reduce(
+      (sum, match) => sum + Math.round(Number(match[1]) * 1_000),
+      0,
+    );
+    return {
+      totalSilenceMs,
+      activityRatio: Math.max(0, 1 - totalSilenceMs / duration),
+    };
+  }
+  async extractVideoFrame(
+    input: string,
+    output: string,
+    positionMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!Number.isFinite(positionMs) || positionMs < 0)
+      throw new AppError('INVALID_INPUT', 'Frame position must be non-negative', 400);
+    await this.runner.run({
+      executable: this.ffmpeg,
+      arguments: [
+        '-y',
+        '-ss',
+        (positionMs / 1_000).toFixed(3),
+        '-i',
+        input,
+        '-frames:v',
+        '1',
+        '-update',
+        '1',
+        output,
+      ],
+      timeoutMs: 60_000,
+      ...(signal ? { signal } : {}),
+    });
+    await this.validateProbe(output, 'image');
+  }
+
+  async extractFinalVideoFrame(input: string, output: string, signal?: AbortSignal): Promise<void> {
+    await this.runner.run({
+      executable: this.ffmpeg,
+      arguments: ['-y', '-sseof', '-0.05', '-i', input, '-frames:v', '1', '-update', '1', output],
+      timeoutMs: 60_000,
+      ...(signal ? { signal } : {}),
+    });
+    await this.validateProbe(output, 'image');
+  }
   async probe(filename: string): Promise<Record<string, unknown>> {
     const result = await this.runner.run({
       executable: this.ffprobe,

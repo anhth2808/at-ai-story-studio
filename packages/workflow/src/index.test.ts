@@ -22,6 +22,8 @@ async function setup(content = 'Một. Hai. Ba.') {
   const runner = new ProcessRunner();
   const media = {
     probe: async () => ({ format: { duration: '1' } }),
+    measureAudioDuration: async () => ({ durationMs: 1_000, provenance: 'DECODED_FRAMES' }),
+    detectAudioSilence: async () => ({ totalSilenceMs: 0, activityRatio: 1 }),
     run: async (args: string[]) => {
       await writeFile(args.at(-1)!, Buffer.from('merged-audio'));
       return { stdout: '', stderr: '', exitCode: 0, signal: null, durationMs: 1 };

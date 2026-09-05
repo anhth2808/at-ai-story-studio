@@ -25,3 +25,10 @@ conditioned generation         ->  uses APPROVED primary (first attached entry)
 ## Reference changes and invalidation
 
 Attaching, reordering, or removing references creates a new profile revision. Packages that depend on that character profile become `STALE` through the existing dependency model, and their dependent Scene images become visually stale on the next freshness check. Scenes whose packages do not depend on the character, and all Story/TTS/render state, are untouched. Historical images are never deleted.
+
+## Generated reference candidates
+
+The canonical generated path is prototype first, then an exact profile-revision
+appearance stage. Generated images remain `CANDIDATE` until explicit approval.
+Stage payloads contain clothing, accessories, and equipment only; Shot state
+owns pose, expression, lighting, weather, and action.

@@ -60,6 +60,21 @@ describe('Story Engine schemas', () => {
     ).toMatchObject({ kind: 'result', operation: 'BLUEPRINT' });
   });
 
+  it('bounds managed multimodal evidence paths', () => {
+    expect(
+      ompProtocolRequestSchema.parse({
+        ...request,
+        imagePaths: ['projects/p/a.png', 'staging/frame.webp'],
+      }),
+    ).toMatchObject({ imagePaths: ['projects/p/a.png', 'staging/frame.webp'] });
+    expect(() =>
+      ompProtocolRequestSchema.parse({ ...request, imagePaths: ['../secret.png'] }),
+    ).toThrow();
+    expect(() =>
+      ompProtocolRequestSchema.parse({ ...request, imagePaths: ['C:/secret.png'] }),
+    ).toThrow();
+  });
+
   it('rejects malformed, oversized, and duplicate-terminal-shaped payloads', () => {
     expect(() => ompProtocolRequestSchema.parse({ ...request, version: 2 })).toThrow();
     expect(() =>

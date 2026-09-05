@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  imageCandidateRankingSchema,
+  imageGenerationErrorCodeSchema,
   imageGenerationRequestSchema,
   imageGenerationSettingsSchema,
   imageGenerationSettingsUpdateSchema,
+  imageQualityIssueSchema,
+  imageQualityReviewSchema,
   imageQualityReviewUpdateSchema,
   sceneImageGenerationDtoSchema,
   sceneImageGenerationScheduleSchema,
@@ -139,5 +143,37 @@ describe('image contracts', () => {
 
   it('defaults approval policy off', () => {
     expect(imageGenerationSettingsSchema.parse(settings).requireImageApproval).toBe(false);
+  });
+
+  it('extends quality contracts without breaking manual review payloads', () => {
+    expect(
+      imageQualityReviewSchema.parse({
+        status: 'REJECTED',
+        scores: { IDENTITY: 2, OVERALL: 2 },
+        issues: ['WRONG_FACE'],
+        notes: 'Identity mismatch',
+      }),
+    ).toMatchObject({ status: 'REJECTED', issues: ['WRONG_FACE'] });
+    expect(imageQualityIssueSchema.parse('STAGE_MISMATCH')).toBe('STAGE_MISMATCH');
+    expect(imageGenerationErrorCodeSchema.parse('REFERENCE_BINDING_INVALID')).toBe(
+      'REFERENCE_BINDING_INVALID',
+    );
+    expect(() =>
+      imageCandidateRankingSchema.parse({
+        version: 'image-ranking-v1',
+        entries: [
+          {
+            generationId: generation.providerJobId,
+            candidateIndex: 1,
+            score: 4,
+            severeIssueCount: 0,
+            excluded: true,
+            reason: 'Critic unavailable',
+          },
+        ],
+        winnerGenerationId: generation.providerJobId,
+        reason: 'No eligible candidate',
+      }),
+    ).toThrow();
   });
 });

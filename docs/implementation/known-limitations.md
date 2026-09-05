@@ -262,3 +262,38 @@ long-story authoring, hierarchical multi-chapter rendering, first working
 image workflows, reference-conditioned generation, and AI video SceneClips.
 They do not enable character-memory retrieval, scene graphs, shot planning,
 publishing, or generic workflow/plugin systems.
+
+## Perceptual quality pipeline limits
+
+Automatic image and video critics are structured evaluator boundaries, not a
+substitute for human approval. They require an OMP model with multimodal
+support; unavailable or malformed evaluations remain explicit `UNAVAILABLE`
+and do not pass quality gates. The temporal implementation extracts bounded
+first, middle, and final samples plus the source keyframe. Semantic retry
+exhaustion and full Shot-level acceptance remain follow-up work.
+
+The local LTX smoke completed against the existing ComfyUI graph without model
+downloads or global mutation. It used checkpoint
+`ltx-2-19b-distilled-fp8.safetensors`, 704x384, 9 frames, 25 FPS, H.264 MP4,
+and centralized decoded-duration measurement of 360 ms. Automatic temporal
+critic evaluation was not part of this direct provider smoke.
+
+## Prompt #15 release evidence
+
+| Gate                                         | Result  | Evidence                                                                                      |
+| -------------------------------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| Shared contracts and migrations              | PASS    | Full Vitest: 62 files, 251 tests; typecheck and build passed                                  |
+| Shot Director and visual-only compiler       | PASS    | Focused Vitest: 10 files, 34 tests; deterministic prompt and bounded OMP tests passed         |
+| Image candidate policy and persistence       | PASS    | Candidate policy, immutable ranking, critic-state, and repository tests passed                |
+| Wan/LTX backend isolation                    | PASS    | Backend tests passed; LTX direct ComfyUI smoke completed with the documented graph            |
+| TTS decoded duration and silence checks      | PASS    | Focused TTS/media tests passed; padded MP3 measured decoded duration and silence              |
+| Browser quality surfaces                     | PASS    | Desktop screenshot and 375px viewport inspection; mobile `scrollWidth=360`, `clientWidth=360` |
+| Real FLUX reference/critic smoke             | NOT_RUN | No end-to-end prototype, stage, Location, and critic run recorded                             |
+| Real Wan regression smoke                    | NOT_RUN | No post-abstraction Wan run recorded                                                          |
+| Real three-Chapter production/restart/reuse  | NOT_RUN | Release-scale run remains unexecuted                                                          |
+| Automatic temporal critic on real LTX output | NOT_RUN | Direct LTX provider smoke did not invoke the OMP critic                                       |
+| YouTube publication                          | BLOCKED | Explicitly out of scope; `READY_FOR_YOUTUBE_PUBLISH=NO`                                       |
+
+`PROMPT_15_HARDENED=YES`
+`READY_FOR_QUALITY_E2E=NO`
+`READY_FOR_YOUTUBE_PUBLISH=NO`

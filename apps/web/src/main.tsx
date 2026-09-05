@@ -44,6 +44,8 @@ import type {
   MotionPlan,
   RenderPlan,
   SceneTimingUpdate,
+  ShotPlanDto,
+  VisualReferenceGeneration,
 } from '@studio/shared';
 import './styles.css';
 import { ProductionWorkspace } from './ProductionWorkspace.js';
@@ -274,6 +276,46 @@ const sceneApi = {
       method: 'PUT',
       body: JSON.stringify(input),
     }),
+};
+const shotApi = {
+  current: (projectId: string, sceneId: string) =>
+    api<ShotPlanDto | null>(`/api/projects/${projectId}/scenes/${sceneId}/shot-plan`),
+  generate: (
+    projectId: string,
+    sceneId: string,
+    expectedSceneRevision: number,
+    regenerate = false,
+  ) =>
+    api<StoryJobScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shot-plan/${regenerate ? 'regenerate' : 'generate'}`,
+      { method: 'POST', body: JSON.stringify({ expectedSceneRevision }) },
+    ),
+  review: (
+    projectId: string,
+    shotPlanId: string,
+    status: 'APPROVED' | 'REJECTED',
+    expectedRowVersion: number,
+  ) =>
+    api<ShotPlanDto>(`/api/projects/${projectId}/shot-plans/${shotPlanId}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ status, notes: '', expectedRowVersion }),
+    }),
+};
+const visualReferenceApi = {
+  list: (projectId: string, targetKind: string, targetEntityId: string) =>
+    api<VisualReferenceGeneration[]>(
+      `/api/projects/${projectId}/visual-references?targetKind=${encodeURIComponent(targetKind)}&targetEntityId=${encodeURIComponent(targetEntityId)}&limit=20`,
+    ),
+  generate: (projectId: string, targetKind: string, targetEntityId: string) =>
+    api<{ jobId: string }>(`/api/projects/${projectId}/visual-references/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ targetKind, targetEntityId }),
+    }),
+  review: (projectId: string, generationId: string, approval: 'APPROVED' | 'REJECTED') =>
+    api<VisualReferenceGeneration>(
+      `/api/projects/${projectId}/visual-references/${generationId}/review`,
+      { method: 'POST', body: JSON.stringify({ approval }) },
+    ),
 };
 type TimelineRenderRequest = {
   source: 'SCENES';
@@ -2943,17 +2985,48 @@ function CharacterReferenceStrip({
   onChanged: () => void;
 }) {
   const [references, setReferences] = useState<CharacterReferenceItem[] | null>(null);
+  const [generated, setGenerated] = useState<VisualReferenceGeneration[]>([]);
   const load = async (): Promise<void> => {
     try {
-      const response = await imageApi.references(projectId, characterId);
+      const [response, candidates] = await Promise.all([
+        imageApi.references(projectId, characterId),
+        visualReferenceApi.list(projectId, 'CHARACTER_PROTOTYPE', characterId),
+      ]);
       setReferences(response.references);
+      setGenerated(candidates);
     } catch {
       setReferences([]);
+      setGenerated([]);
     }
   };
   useEffect(() => {
     void load();
   }, [projectId, characterId, profileRevision]);
+  useEffect(() => {
+    if (!generated.some((item) => item.status === 'PENDING' || item.status === 'RUNNING')) return;
+    const timer = window.setInterval(() => void load(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [projectId, characterId, generated]);
+  const generatePrototype = async (): Promise<void> => {
+    try {
+      await visualReferenceApi.generate(projectId, 'CHARACTER_PROTOTYPE', characterId);
+      await load();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể tạo ảnh nguyên mẫu');
+    }
+  };
+  const reviewGenerated = async (
+    generationId: string,
+    approval: 'APPROVED' | 'REJECTED',
+  ): Promise<void> => {
+    try {
+      await visualReferenceApi.review(projectId, generationId, approval);
+      await load();
+      onChanged();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể duyệt ảnh nguyên mẫu');
+    }
+  };
   const upload = async (file: File | undefined): Promise<void> => {
     if (!file) return;
     try {
@@ -3057,6 +3130,42 @@ function CharacterReferenceStrip({
           <span className="muted">Chưa có ảnh tham chiếu.</span>
         )}
       </div>
+      <div className="reference-grid">
+        {generated.map((item) => (
+          <figure
+            key={item.id}
+            className={`reference-item approval-${item.approval.toLowerCase()}`}
+          >
+            {item.assetId ? (
+              <img src={`${API_BASE}/api/assets/${item.assetId}`} alt="Ảnh nguyên mẫu tự động" />
+            ) : (
+              <div className="scene-image-empty">{item.status}</div>
+            )}
+            <figcaption>
+              <span className="status-chip">
+                Nguyên mẫu - {item.status} - {item.approval}
+              </span>
+              {item.status === 'COMPLETED' && item.approval === 'CANDIDATE' && (
+                <div className="actions">
+                  <button type="button" onClick={() => void reviewGenerated(item.id, 'APPROVED')}>
+                    Duyệt
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void reviewGenerated(item.id, 'REJECTED')}
+                  >
+                    Từ chối
+                  </button>
+                </div>
+              )}
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+      <button type="button" onClick={() => void generatePrototype()} disabled={!profileRevision}>
+        Tạo nguyên mẫu tự động
+      </button>
       <label className="button secondary upload-button">
         Tải ảnh tham chiếu
         <input
@@ -4059,6 +4168,7 @@ function ScenesWorkspace({
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [draft, setDraft] = useState<SceneDto | null>(null);
   const [scenePackage, setScenePackage] = useState<VisualPromptPackageDto | null>(null);
+  const [shotPlan, setShotPlan] = useState<ShotPlanDto | null>(null);
   const [imageSettings, setImageSettings] = useState<ImageGenerationSettingsDto | null>(null);
   const [imageReadiness, setImageReadiness] = useState<ImageReadiness | null>(null);
   const [sceneImages, setSceneImages] = useState<SceneImageGenerationDto[]>([]);
@@ -4141,6 +4251,7 @@ function ScenesWorkspace({
   const [videoInstructions, setVideoInstructions] = useState('');
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const [videoReadiness, setVideoReadiness] = useState<VideoReadiness | null>(null);
+  const [videoSettings, setVideoSettings] = useState<VideoGenerationSettingsDto | null>(null);
   const [videoReviewDraft, setVideoReviewDraft] = useState<{
     generationId: string | null;
     issues: string[];
@@ -4183,6 +4294,14 @@ function ScenesWorkspace({
       setLoading(false);
     }
   };
+  useEffect(() => {
+    void videoApi
+      .settings(projectId)
+      .then(setVideoSettings)
+      .catch((cause) =>
+        onError(cause instanceof Error ? cause.message : 'Không thể tải cấu hình video'),
+      );
+  }, [projectId]);
 
   const loadScenes = async (): Promise<void> => {
     if (!selectedChapterId) {
@@ -4212,6 +4331,7 @@ function ScenesWorkspace({
     if (!selectedSceneId) {
       setDraft(null);
       setScenePackage(null);
+      setShotPlan(null);
       setSceneImages([]);
       setSelectedImageId(null);
       setAiMotion(null);
@@ -4223,12 +4343,14 @@ function ScenesWorkspace({
       void Promise.all([
         sceneApi.get(projectId, selectedScene.id),
         visualApi.scenePackage(projectId, selectedScene.id).catch(() => null),
+        shotApi.current(projectId, selectedScene.id).catch(() => null),
         imageApi.list(projectId, selectedScene.id),
         videoApi.aiMotion(projectId, selectedScene.id).catch(() => null),
       ])
-        .then(([nextDraft, nextPackage, nextImages, nextMotion]) => {
+        .then(([nextDraft, nextPackage, nextShotPlan, nextImages, nextMotion]) => {
           setDraft(nextDraft);
           setScenePackage(nextPackage);
+          setShotPlan(nextShotPlan);
           setSceneImages(nextImages);
           setSelectedImageId((current) =>
             current && nextImages.some((image) => image.id === current)
@@ -4249,6 +4371,31 @@ function ScenesWorkspace({
         );
     }
   }, [projectId, selectedSceneId, sceneList]);
+
+  const generateShotPlan = async (): Promise<void> => {
+    if (!draft) return;
+    try {
+      const scheduled = await shotApi.generate(
+        projectId,
+        draft.id,
+        draft.revision,
+        Boolean(shotPlan),
+      );
+      if (scheduled.jobId)
+        setSceneJobIds((current) => [...new Set([...current, scheduled.jobId!])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lập kế hoạch shot');
+    }
+  };
+
+  const reviewShotPlan = async (status: 'APPROVED' | 'REJECTED'): Promise<void> => {
+    if (!shotPlan) return;
+    try {
+      setShotPlan(await shotApi.review(projectId, shotPlan.id, status, shotPlan.rowVersion));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể duyệt kế hoạch shot');
+    }
+  };
   useEffect(() => {
     if (!sceneJobIds.length) return;
     let disposed = false;
@@ -4272,7 +4419,10 @@ function ScenesWorkspace({
             ),
           );
           await loadScenes();
-          if (selectedSceneId) setSceneImages(await imageApi.list(projectId, selectedSceneId));
+          if (selectedSceneId) {
+            setSceneImages(await imageApi.list(projectId, selectedSceneId));
+            setShotPlan(await shotApi.current(projectId, selectedSceneId).catch(() => null));
+          }
           onChanged();
           const failed = jobs.find((job) => job.status === 'FAILED');
           if (failed) setSceneFailedJob(failed);
@@ -4773,6 +4923,35 @@ function ScenesWorkspace({
       onError(cause instanceof Error ? cause.message : 'Không thể kiểm tra ComfyUI video');
     }
   };
+  const saveVideoBackend = async (
+    backend: VideoGenerationSettingsDto['backend'],
+  ): Promise<void> => {
+    if (!videoSettings) return;
+    try {
+      const {
+        id,
+        projectId: settingsProjectId,
+        inputFingerprint,
+        createdAt,
+        updatedAt,
+        rowVersion,
+        ...settings
+      } = videoSettings;
+      void [id, settingsProjectId, inputFingerprint, createdAt, updatedAt];
+      setVideoSettings(
+        await videoApi.saveSettings(projectId, {
+          ...settings,
+          backend,
+          workflowTemplate:
+            backend === 'LTX2_19B_DISTILLED' ? 'ltx2-image-to-video-v1' : 'image-to-video-v1',
+          expectedRowVersion: rowVersion,
+        }),
+      );
+      setVideoReadiness(null);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu backend video');
+    }
+  };
   const updateDraft = <K extends keyof SceneDto>(key: K, value: SceneDto[K]): void => {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
   };
@@ -5213,6 +5392,63 @@ function ScenesWorkspace({
                 </span>
                 <span>Bản kế hoạch: {draft.planRevision}</span>
               </div>
+              <section
+                className="visual-package-summary field-wide"
+                aria-labelledby="shot-plan-heading"
+              >
+                <div className="section-head">
+                  <div>
+                    <span className="field-label" id="shot-plan-heading">
+                      Kế hoạch shot
+                    </span>
+                    <p className="muted">
+                      {shotPlan
+                        ? `${shotPlan.candidate.shots.length} shot - bản ${shotPlan.revision} - ${shotPlan.reviewStatus}`
+                        : 'Chưa có kế hoạch shot cho cảnh này.'}
+                    </p>
+                  </div>
+                  <div className="chip-row">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={sceneJobIds.length > 0}
+                      onClick={() => void generateShotPlan()}
+                    >
+                      {shotPlan ? 'Lập lại shot' : 'Lập shot'}
+                    </button>
+                    {shotPlan && (
+                      <>
+                        <button type="button" onClick={() => void reviewShotPlan('APPROVED')}>
+                          Duyệt
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void reviewShotPlan('REJECTED')}
+                        >
+                          Từ chối
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {shotPlan && (
+                  <ol className="compact-list">
+                    {shotPlan.candidate.shots.slice(0, 24).map((shot) => (
+                      <li key={shot.id}>
+                        <strong>Shot {shot.ordinal}</strong>
+                        <span>
+                          {shot.primaryBeat} - {shot.staticIntent.framing} -{' '}
+                          {shot.plannedDurationMs} ms
+                        </span>
+                      </li>
+                    ))}
+                    {shotPlan.candidate.shots.length > 24 && (
+                      <li>Còn {shotPlan.candidate.shots.length - 24} shot trong trang chi tiết.</li>
+                    )}
+                  </ol>
+                )}
+              </section>
               <label className="field">
                 <span>Đoạn trích nguồn (chỉ đọc)</span>
                 <pre className="source-excerpt">
@@ -5791,6 +6027,21 @@ function ScenesWorkspace({
                       <option value="KEN_BURNS">Ken Burns</option>
                       <option value="AI_VIDEO">AI Video</option>
                       <option value="HYBRID">Kết hợp</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Backend video</span>
+                    <select
+                      value={videoSettings?.backend ?? 'WAN22_TI2V_5B'}
+                      disabled={!videoSettings}
+                      onChange={(event) =>
+                        void saveVideoBackend(
+                          event.target.value as VideoGenerationSettingsDto['backend'],
+                        )
+                      }
+                    >
+                      <option value="WAN22_TI2V_5B">Wan 2.2 TI2V 5B</option>
+                      <option value="LTX2_19B_DISTILLED">LTX-2 19B Distilled</option>
                     </select>
                   </label>
                   <label className="field">

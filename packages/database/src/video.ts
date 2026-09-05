@@ -45,10 +45,15 @@ export function videoSettingsFingerprint(settings: VideoGenerationSettings): str
     input: {
       provider: settings.provider,
       baseUrl: settings.baseUrl,
+      backend: settings.backend,
       workflowTemplate: settings.workflowTemplate,
       diffusionModel: settings.diffusionModel,
       textEncoder: settings.textEncoder,
       vaeName: settings.vaeName,
+      ltxCheckpoint: settings.ltxCheckpoint,
+      ltxTextEncoder: settings.ltxTextEncoder,
+      ltxVaeName: settings.ltxVaeName,
+      ltxFps: settings.ltxFps,
       sampler: settings.sampler,
       scheduler: settings.scheduler,
       steps: settings.steps,
@@ -92,10 +97,15 @@ type VideoSettingsRow = {
   projectId: Id;
   provider: string;
   baseUrl: string;
+  backend: string;
   workflowTemplate: string;
   diffusionModel: string;
   textEncoder: string;
   vaeName: string;
+  ltxCheckpoint: string;
+  ltxTextEncoder: string;
+  ltxVaeName: string;
+  ltxFps: number;
   sampler: string;
   scheduler: string;
   steps: number;
@@ -116,10 +126,15 @@ function parseSettings(row: VideoSettingsRow): VideoGenerationSettingsDto {
   const settings = videoGenerationSettingsSchema.parse({
     provider: row.provider,
     baseUrl: row.baseUrl,
+    backend: row.backend,
     workflowTemplate: row.workflowTemplate,
     diffusionModel: row.diffusionModel,
     textEncoder: row.textEncoder,
     vaeName: row.vaeName,
+    ltxCheckpoint: row.ltxCheckpoint,
+    ltxTextEncoder: row.ltxTextEncoder,
+    ltxVaeName: row.ltxVaeName,
+    ltxFps: row.ltxFps,
     sampler: row.sampler,
     scheduler: row.scheduler,
     steps: row.steps,
@@ -144,8 +159,9 @@ function parseSettings(row: VideoSettingsRow): VideoGenerationSettingsDto {
 }
 
 const SETTINGS_COLUMNS = `id,project_id as projectId,provider,base_url as baseUrl,
-  workflow_template as workflowTemplate,diffusion_model as diffusionModel,text_encoder as textEncoder,
-  vae_name as vaeName,sampler,scheduler,steps,guidance,shift,preset,
+  backend,workflow_template as workflowTemplate,diffusion_model as diffusionModel,text_encoder as textEncoder,
+  vae_name as vaeName,ltx_checkpoint as ltxCheckpoint,ltx_text_encoder as ltxTextEncoder,
+  ltx_vae_name as ltxVaeName,ltx_fps as ltxFps,sampler,scheduler,steps,guidance,shift,preset,
   connection_timeout_ms as connectionTimeoutMs,generation_timeout_ms as generationTimeoutMs,
   seed_mode as seedMode,fixed_seed as fixedSeed,require_motion_approval as requireMotionApproval,
   row_version as rowVersion,created_at as createdAt,updated_at as updatedAt`;
@@ -172,20 +188,25 @@ export class VideoGenerationSettingsRepository {
     this.database.sqlite
       .prepare(
         `INSERT OR IGNORE INTO video_generation_settings(
-          id,project_id,provider,base_url,workflow_template,diffusion_model,text_encoder,vae_name,
-          sampler,scheduler,steps,guidance,shift,preset,connection_timeout_ms,generation_timeout_ms,
-          seed_mode,fixed_seed,require_motion_approval,row_version,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          id,project_id,provider,base_url,backend,workflow_template,diffusion_model,text_encoder,vae_name,
+          ltx_checkpoint,ltx_text_encoder,ltx_vae_name,ltx_fps,sampler,scheduler,steps,guidance,shift,preset,
+          connection_timeout_ms,generation_timeout_ms,seed_mode,fixed_seed,require_motion_approval,row_version,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         randomUUID(),
         projectId,
         settings.provider,
         settings.baseUrl,
+        settings.backend,
         settings.workflowTemplate,
         settings.diffusionModel,
         settings.textEncoder,
         settings.vaeName,
+        settings.ltxCheckpoint,
+        settings.ltxTextEncoder,
+        settings.ltxVaeName,
+        settings.ltxFps,
         settings.sampler,
         settings.scheduler,
         settings.steps,
@@ -213,8 +234,9 @@ export class VideoGenerationSettingsRepository {
     const settings = videoGenerationSettingsSchema.parse(settingsInput);
     const result = this.database.sqlite
       .prepare(
-        `UPDATE video_generation_settings SET provider=?,base_url=?,workflow_template=?,diffusion_model=?,
-          text_encoder=?,vae_name=?,sampler=?,scheduler=?,steps=?,guidance=?,shift=?,preset=?,
+        `UPDATE video_generation_settings SET provider=?,base_url=?,backend=?,workflow_template=?,diffusion_model=?,
+          text_encoder=?,vae_name=?,ltx_checkpoint=?,ltx_text_encoder=?,ltx_vae_name=?,ltx_fps=?,
+          sampler=?,scheduler=?,steps=?,guidance=?,shift=?,preset=?,
           connection_timeout_ms=?,generation_timeout_ms=?,seed_mode=?,fixed_seed=?,
           require_motion_approval=?,row_version=row_version+1,updated_at=?
          WHERE project_id=? AND row_version=?`,
@@ -222,10 +244,15 @@ export class VideoGenerationSettingsRepository {
       .run(
         settings.provider,
         settings.baseUrl,
+        settings.backend,
         settings.workflowTemplate,
         settings.diffusionModel,
         settings.textEncoder,
         settings.vaeName,
+        settings.ltxCheckpoint,
+        settings.ltxTextEncoder,
+        settings.ltxVaeName,
+        settings.ltxFps,
         settings.sampler,
         settings.scheduler,
         settings.steps,

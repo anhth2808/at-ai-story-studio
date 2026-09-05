@@ -37,6 +37,18 @@ describe('production contracts', () => {
     expect(() =>
       productionProfileCreateSchema.parse({ key: 'BALANCED', settings: { unknown: true } }),
     ).toThrow();
+    expect(() =>
+      productionProfileSettingsSchema.parse({
+        ...defaultProductionProfileSettings,
+        temporalRetryLimit: 4,
+      }),
+    ).toThrow();
+    expect(() =>
+      productionProfileSettingsSchema.parse({
+        ...defaultProductionProfileSettings,
+        providerGraph: {},
+      }),
+    ).toThrow();
   });
 
   it('accepts a bounded plan request', () => {
@@ -45,6 +57,20 @@ describe('production contracts', () => {
         scope: { type: 'CHAPTER_RANGE', startChapter: 1, endChapter: 3 },
       }).scope,
     ).toEqual({ type: 'CHAPTER_RANGE', startChapter: 1, endChapter: 3 });
+  });
+
+  it('defaults production profiles to explicit bounded quality policy', () => {
+    expect(defaultProductionProfileSettings).toMatchObject({
+      imageCandidatePolicy: 'BALANCED',
+      imageQualityGate: 'REQUIRED',
+      imageAutoAcceptThreshold: 4,
+      videoBackendPreference: 'WAN22_TI2V_5B',
+      videoQualityGate: 'REQUIRED',
+      temporalRetryLimit: 2,
+      qualityFallback: 'MANUAL_REVIEW',
+      strictReferenceRequirement: false,
+      allowedVideoFallback: 'WAN22_TI2V_5B',
+    });
   });
 });
 

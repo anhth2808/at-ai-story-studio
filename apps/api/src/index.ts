@@ -43,8 +43,14 @@ import {
   sceneGenerationRequestSchema,
   scenePromptRequestSchema,
   sceneRegenerationRequestSchema,
+  shotPlanningRequestSchema,
+  shotPlanReviewRequestSchema,
   sceneStatusSchema,
   visualStyleUpdateSchema,
+  appearanceStageCreateSchema,
+  visualReferenceReviewSchema,
+  visualReferenceScheduleSchema,
+  visualReferenceTargetKindSchema,
   visualProfileGenerateRequestSchema,
   visualProfileUpdateSchema,
   visualProfileApprovalSchema,
@@ -434,6 +440,118 @@ app.post('/api/projects/:projectId/scenes/:sceneId/prompt', async (request, repl
         idSchema.parse(params.projectId),
         idSchema.parse(params.sceneId),
         scenePromptRequestSchema.parse(request.body ?? {}),
+      ),
+    );
+});
+app.get('/api/projects/:projectId/scenes/:sceneId/shot-plan', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return service.getCurrentShotPlan(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+  );
+});
+app.get('/api/projects/:projectId/shot-plans/:shotPlanId', async (request) => {
+  const params = request.params as { projectId: string; shotPlanId: string };
+  return service.getShotPlan(idSchema.parse(params.projectId), idSchema.parse(params.shotPlanId));
+});
+app.get('/api/projects/:projectId/chapters/:chapterId/shot-plans', async (request) => {
+  const params = request.params as { projectId: string; chapterId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.listChapterShotPlans(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.chapterId),
+    query.limit ? Number(query.limit) : 100,
+    query.offset ? Number(query.offset) : 0,
+  );
+});
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shot-plan/regenerate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleShotPlanning(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          shotPlanningRequestSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.post('/api/projects/:projectId/shot-plans/:shotPlanId/review', async (request) => {
+  const params = request.params as { projectId: string; shotPlanId: string };
+  return service.reviewShotPlan(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.shotPlanId),
+    shotPlanReviewRequestSchema.parse(request.body),
+  );
+});
+app.get('/api/projects/:projectId/visual-references', async (request) => {
+  const params = request.params as { projectId: string };
+  const query = request.query as { targetKind?: string; targetEntityId?: string; limit?: string };
+  return service.listVisualReferences(
+    idSchema.parse(params.projectId),
+    visualReferenceTargetKindSchema.parse(query.targetKind),
+    String(query.targetEntityId ?? ''),
+    query.limit ? Number(query.limit) : 50,
+  );
+});
+app.post('/api/projects/:projectId/visual-references/generate', async (request, reply) => {
+  const params = request.params as { projectId: string };
+  const body = visualReferenceScheduleSchema.parse(request.body);
+  return reply
+    .code(202)
+    .send(
+      service.scheduleVisualReference(
+        idSchema.parse(params.projectId),
+        body.targetKind,
+        body.targetEntityId,
+      ),
+    );
+});
+app.post('/api/projects/:projectId/visual-references/:generationId/review', async (request) => {
+  const params = request.params as { projectId: string; generationId: string };
+  const body = visualReferenceReviewSchema.parse(request.body);
+  return service.reviewVisualReference(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.generationId),
+    body.approval,
+  );
+});
+app.get('/api/projects/:projectId/characters/:characterId/appearance-stages', async (request) => {
+  const params = request.params as { projectId: string; characterId: string };
+  const query = request.query as { limit?: string };
+  return service.listAppearanceStages(
+    idSchema.parse(params.projectId),
+    storyStableIdSchema.parse(params.characterId),
+    query.limit ? Number(query.limit) : 50,
+  );
+});
+app.post(
+  '/api/projects/:projectId/characters/:characterId/appearance-stages',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; characterId: string };
+    return reply
+      .code(201)
+      .send(
+        service.saveAppearanceStage(
+          idSchema.parse(params.projectId),
+          storyStableIdSchema.parse(params.characterId),
+          appearanceStageCreateSchema.parse(request.body),
+        ),
+      );
+  },
+);
+app.post('/api/projects/:projectId/scenes/:sceneId/shot-plan/generate', async (request, reply) => {
+  const params = request.params as { projectId: string; sceneId: string };
+  return reply
+    .code(202)
+    .send(
+      service.scheduleShotPlanning(
+        idSchema.parse(params.projectId),
+        idSchema.parse(params.sceneId),
+        shotPlanningRequestSchema.parse(request.body ?? {}),
       ),
     );
 });

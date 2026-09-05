@@ -48,3 +48,11 @@ commit a strictly validated result that returns that same fingerprint. The
 refined text is an additional revision and does not replace canonical package
 constraints. No package build or refinement generates pixels or starts media
 rendering.
+
+## Shot package quality
+
+Shot packages store deterministic ordered bindings with stable entity IDs,
+Asset IDs, hashes, and revisions. Prompts contain visible facts only:
+Location remains available at every framing size, while off-screen identity
+text is removed. Safety refinement preserves the binding placeholder
+multiset; stale or missing bindings fail before provider submission.

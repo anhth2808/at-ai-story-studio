@@ -51,3 +51,11 @@ Per-project `video_generation_settings` row (`GET/PUT
 /api/projects/:id/video-settings`): provider, base URL, the three Wan model
 files, sampler/scheduler, steps/guidance/shift, preset, timeouts, seed mode,
 and `requireMotionApproval`. Optimistic concurrency via `expectedRowVersion`.
+
+## Backend adapters
+
+Wan 2.2 and local `LTX2_19B_DISTILLED` are closed application-owned backend
+adapters. LTX uses the existing local 12-node graph and discovered model
+inventory, owns its FPS and legal `8k + 1` frame lattice, and records mapping
+version plus reproducibility metadata. It never downloads models, accepts raw
+graphs, or changes global ComfyUI state.

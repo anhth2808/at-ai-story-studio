@@ -16,6 +16,11 @@ import {
   type VideoReadiness,
 } from '@studio/shared';
 import { safeWorkspacePath } from '@studio/media';
+import {
+  LTX2_19B_MAPPING_VERSION,
+  LTX2_REQUIRED_NODE_CLASSES,
+  buildLtx2VideoPrompt,
+} from './ltx-video.js';
 
 export type VideoProviderFailure = {
   code: VideoGenerationErrorCode;
@@ -321,12 +326,22 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
 
   async readiness(settings: VideoProviderSettings, signal?: AbortSignal): Promise<VideoReadiness> {
     const checkedAt = new Date(this.clock()).toISOString();
-    if (!settings.diffusionModel || !settings.textEncoder || !settings.vaeName)
+    const ltx = settings.backend === 'LTX2_19B_DISTILLED';
+    if (
+      ltx
+        ? !settings.ltxCheckpoint || !settings.ltxTextEncoder
+        : !settings.diffusionModel || !settings.textEncoder || !settings.vaeName
+    )
       return videoReadinessSchema.parse({
         provider: 'COMFYUI',
+        backend: settings.backend,
         status: 'NOT_CONFIGURED',
         message: 'ComfyUI video model components are not configured',
-        details: { required: ['diffusionModel', 'textEncoder', 'vaeName'] },
+        details: {
+          required: ltx
+            ? ['ltxCheckpoint', 'ltxTextEncoder']
+            : ['diffusionModel', 'textEncoder', 'vaeName'],
+        },
       });
     try {
       const system = await this.json(
@@ -338,35 +353,44 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       if (!system || typeof system !== 'object')
         return this.parseReadiness(checkedAt, 'ERROR', 'ComfyUI system_stats is invalid');
       const objectInfo = await this.loadObjectInfo(settings, signal);
-      const missingNodes = REQUIRED_NATIVE_NODE_CLASSES.filter(
+      const requiredNodes = ltx ? LTX2_REQUIRED_NODE_CLASSES : REQUIRED_NATIVE_NODE_CLASSES;
+      const missingNodes = requiredNodes.filter(
         (classType) => !objectInfo[classType] || typeof objectInfo[classType] !== 'object',
       );
       if (missingNodes.length)
         return videoReadinessSchema.parse({
           provider: 'COMFYUI',
-          status: 'WORKFLOW_MISSING',
-          message: 'ComfyUI does not expose the native nodes required by image-to-video-v1',
+          backend: settings.backend,
+          status: ltx ? 'LTX_WORKFLOW_INVALID' : 'WORKFLOW_MISSING',
+          message: `ComfyUI does not expose the native nodes required by ${ltx ? 'LTX-2' : 'Wan 2.2'}`,
           checkedAt,
           details: { missingNodes },
         });
-      const [diffusionModels, textEncoders, vaes] = await Promise.all([
+      const [diffusionModels, textEncoders, vaes, checkpoints] = await Promise.all([
         this.array(settings, '/models/diffusion_models', settings.connectionTimeoutMs, signal),
         this.array(settings, '/models/text_encoders', settings.connectionTimeoutMs, signal),
         this.array(settings, '/models/vae', settings.connectionTimeoutMs, signal),
+        this.array(settings, '/models/checkpoints', settings.connectionTimeoutMs, signal),
       ]);
-      const modelChecks = [
-        ['diffusionModel', settings.diffusionModel, diffusionModels],
-        ['textEncoder', settings.textEncoder, textEncoders],
-        ['vaeName', settings.vaeName, vaes],
-      ] as const;
+      const modelChecks = ltx
+        ? [
+            ['ltxCheckpoint', settings.ltxCheckpoint, checkpoints],
+            ['ltxTextEncoder', settings.ltxTextEncoder, textEncoders],
+          ]
+        : [
+            ['diffusionModel', settings.diffusionModel, diffusionModels],
+            ['textEncoder', settings.textEncoder, textEncoders],
+            ['vaeName', settings.vaeName, vaes],
+          ];
       const missingModels = modelChecks
-        .filter(([, expected, available]) => !available.includes(expected))
+        .filter(([, expected, available]) => !(available as string[]).includes(expected as string))
         .map(([name, expected]) => `${name}:${expected}`);
       if (missingModels.length)
         return videoReadinessSchema.parse({
           provider: 'COMFYUI',
-          status: 'VIDEO_MODEL_MISSING',
-          message: 'Required Wan 2.2 video model files are missing on the ComfyUI server',
+          backend: settings.backend,
+          status: ltx ? 'LTX_MODEL_MISSING' : 'VIDEO_MODEL_MISSING',
+          message: `Required ${ltx ? 'LTX-2' : 'Wan 2.2'} model files are missing on the ComfyUI server`,
           checkedAt,
           details: { missingModels },
         });
@@ -391,8 +415,9 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       this.supportsTargetedCancellation = await this.hasTargetedCancellation(settings, signal);
       return videoReadinessSchema.parse({
         provider: 'COMFYUI',
+        backend: settings.backend,
         status: 'READY',
-        message: 'ComfyUI is ready for Wan 2.2 TI2V-5B image-to-video generation',
+        message: `ComfyUI is ready for ${ltx ? 'LTX-2 19B distilled' : 'Wan 2.2 TI2V-5B'} image-to-video generation`,
         checkedAt,
         supportsCancellation: this.supportsTargetedCancellation,
         details: {
@@ -401,6 +426,7 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
             diffusion: diffusionModels.length,
             textEncoder: textEncoders.length,
             vae: vaes.length,
+            checkpoints: checkpoints.length,
           },
           samplerChoices,
           schedulerChoices,
@@ -447,7 +473,10 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     const readiness = await this.readiness(parsedRequest.providerSettings, signal);
     if (readiness.status !== 'READY') throw readinessError(readiness);
     const uploadedImage = await this.uploadSourceImage(parsedRequest, signal);
-    const prompt = buildComfyUiVideoPrompt(parsedRequest, uploadedImage);
+    const prompt =
+      parsedRequest.providerSettings.backend === 'LTX2_19B_DISTILLED'
+        ? buildLtx2VideoPrompt(parsedRequest, uploadedImage)
+        : buildComfyUiVideoPrompt(parsedRequest, uploadedImage);
     let record = await this.history(
       parsedRequest.providerSettings,
       parsedRequest.providerJobId,
@@ -481,7 +510,11 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       if (record) break;
       await this.sleep(2_000);
     }
-    const output = this.completedOutput(record, parsedRequest.providerJobId);
+    const output = this.completedOutput(
+      record,
+      parsedRequest.providerJobId,
+      parsedRequest.providerSettings.backend,
+    );
     const video = await this.downloadVideo(
       parsedRequest.providerSettings,
       parsedRequest.providerJobId,
@@ -500,9 +533,16 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       clipDurationMs: Math.round((parsedRequest.frameCount / parsedRequest.fps) * 1_000),
       videos: [video],
       metadata: {
+        backend: parsedRequest.providerSettings.backend,
         workflowTemplate: parsedRequest.providerSettings.workflowTemplate,
-        mappingVersion: IMAGE_TO_VIDEO_V1_MAPPING_VERSION,
-        model: parsedRequest.providerSettings.diffusionModel,
+        mappingVersion:
+          parsedRequest.providerSettings.backend === 'LTX2_19B_DISTILLED'
+            ? LTX2_19B_MAPPING_VERSION
+            : IMAGE_TO_VIDEO_V1_MAPPING_VERSION,
+        model:
+          parsedRequest.providerSettings.backend === 'LTX2_19B_DISTILLED'
+            ? parsedRequest.providerSettings.ltxCheckpoint
+            : parsedRequest.providerSettings.diffusionModel,
       },
     });
   }
@@ -688,7 +728,11 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
 
   // SaveVideo output containers have moved between ComfyUI releases, so scan
   // the output record for the first array of files instead of pinning one key.
-  private completedOutput(record: ComfyHistoryRecord, providerJobId: string): ComfyOutputFile {
+  private completedOutput(
+    record: ComfyHistoryRecord,
+    providerJobId: string,
+    backend: VideoProviderSettings['backend'],
+  ): ComfyOutputFile {
     const status = record.status;
     const statusValue =
       status && typeof status.status_str === 'string' ? status.status_str.toLowerCase() : '';
@@ -703,7 +747,7 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
         oom ? 'OUT_OF_MEMORY' : undefined,
       );
     }
-    const output = record.outputs?.[ids.saveVideo];
+    const output = record.outputs?.[backend === 'LTX2_19B_DISTILLED' ? '12' : ids.saveVideo];
     if (output && typeof output === 'object') {
       for (const value of Object.values(output as Record<string, unknown>)) {
         if (!Array.isArray(value)) continue;

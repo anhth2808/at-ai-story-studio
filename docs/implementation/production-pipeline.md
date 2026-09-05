@@ -118,3 +118,12 @@ through the worker; the remaining release-scale limitations are recorded in
 | YouTube publication                                | OUT OF SCOPE | No external publishing route or credential handling exists                                           |
 
 `READY_FOR_YOUTUBE_PUBLISH = NO`.
+
+## Prompt 15 quality gates
+
+Production consumes bounded Shot plans, exact reference bindings, current
+accepted media, and persisted critic evaluations. Automatic image and video
+critics run independently of human approval; missing, stale, rejected,
+uncertain, or unavailable evidence blocks or escalates by profile. The worker
+owns retries and reconciliation, while the coordinator only schedules
+durable steps.

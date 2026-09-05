@@ -43,3 +43,13 @@ LoadImage -> ImageScaleToTotalPixels (lanczos, 1.0 MP, resolution_steps 1)
 ## Fingerprint and staleness
 
 The generation fingerprint input includes the package fingerprint, settings fingerprint, actual `workflowTemplate`, and the full request - which carries the conditioning block with per-character asset ids and content hashes. Assets are immutable, so hashes cannot produce false staleness. Reference changes flow ONLY through the existing profile-dependency invalidation (profile revision -> package STALE -> dependent images stale). Unrelated characters' images and all Story/TTS/render data are untouched. A conditioned result completing after its reference changed is stored as history and never becomes current.
+
+## Prototype and appearance-stage ownership
+
+Character prototype generation is a candidate until explicit approval.
+Appearance-stage generation requires the exact approved prototype Asset and
+hash for the same Character profile revision. Stage prompts exclude transient
+state; Shot prompts own pose, expression, lighting, weather, and action.
+Changing one Character reference invalidates only dependent bindings and image
+descendants. Location references are text-only and contain no Character
+conditioning.

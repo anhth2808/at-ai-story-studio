@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import {
+  automaticQualityStatusSchema,
+  criticEvidenceSchema,
+  criticIdentitySchema,
+} from './quality.js';
+import { referenceBindingsSchema } from './visual.js';
 
 const idSchema = z.string().uuid();
 const boundedString = (max: number) => z.string().max(max);
@@ -50,11 +56,18 @@ export type SceneImageReviewStatus = z.infer<typeof sceneImageReviewStatusSchema
 
 export const imageQualityScoreCategorySchema = z.enum([
   'IDENTITY',
+  'FACE_CONSISTENCY',
+  'HAIR',
+  'CLOTHING_STAGE',
+  'VISIBLE_CHARACTER_COUNT',
   'PROMPT_ADHERENCE',
   'COMPOSITION',
   'POSE_ACTION',
+  'CAMERA_FRAMING',
   'LOCATION',
   'IMPORTANT_OBJECTS',
+  'ANATOMY',
+  'HANDS',
   'STYLE',
   'ARTIFACTS',
   'OVERALL',
@@ -65,6 +78,9 @@ export const imageQualityIssueSchema = z.enum([
   'WRONG_FACE',
   'WRONG_HAIR',
   'WRONG_CLOTHING',
+  'STAGE_MISMATCH',
+  'MISSING_CHARACTER',
+  'EXTRA_CHARACTER',
   'WRONG_POSE',
   'WRONG_COMPOSITION',
   'WRONG_CAMERA',
@@ -73,6 +89,7 @@ export const imageQualityIssueSchema = z.enum([
   'EXTRA_OBJECT',
   'DUPLICATE_OBJECT',
   'BAD_HANDS',
+  'ANATOMY_DEFECT',
   'BAD_TEXT',
   'STYLE_DRIFT',
   'REFERENCE_POSE_BLEED',
@@ -95,6 +112,11 @@ export const imageGenerationErrorCodeSchema = z.enum([
   'OUTCOME_UNKNOWN',
   'CONFIGURATION_ERROR',
   'REFERENCE_UPLOAD_FAILED',
+  'REFERENCE_REQUIRED',
+  'REFERENCE_STALE',
+  'REFERENCE_BINDING_INVALID',
+  'QUALITY_REJECTED',
+  'CRITIC_UNAVAILABLE',
 ]);
 export type ImageGenerationErrorCode = z.infer<typeof imageGenerationErrorCodeSchema>;
 
@@ -255,6 +277,91 @@ export const imageQualityReviewSchema = z
   .strict();
 export type ImageQualityReview = z.infer<typeof imageQualityReviewSchema>;
 
+export const imageCriticResultSchema = z
+  .object({
+    status: automaticQualityStatusSchema,
+    scores: imageQualityScoreSchema,
+    issues: uniqueIssues,
+    hardFailure: z.boolean(),
+    confidence: z.number().min(0).max(1),
+    explanation: boundedString(2_000),
+    guidance: boundedString(2_000),
+  })
+  .strict();
+export type ImageCriticResult = z.infer<typeof imageCriticResultSchema>;
+
+export const imageCriticEvaluationSchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    generationId: idSchema,
+    candidateSetId: idSchema.nullable(),
+    shotId: z.string().trim().min(1).max(120).nullable(),
+    sceneRevisionId: idSchema,
+    assetId: idSchema,
+    assetSha256: referenceSha256Schema,
+    packageFingerprint: z.string().trim().min(1).max(128),
+    referenceFingerprint: z.string().trim().min(1).max(128),
+    inputFingerprint: z.string().trim().min(1).max(128),
+    status: automaticQualityStatusSchema,
+    critic: criticIdentitySchema,
+    evidence: z.array(criticEvidenceSchema).min(1).max(20),
+    scores: imageQualityScoreSchema,
+    issues: uniqueIssues,
+    hardFailure: z.boolean(),
+    confidence: z.number().min(0).max(1),
+    explanation: boundedString(2_000),
+    guidance: boundedString(2_000),
+    attempt: z.number().int().nonnegative(),
+    createdAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
+  })
+  .strict();
+export type ImageCriticEvaluation = z.infer<typeof imageCriticEvaluationSchema>;
+
+export const imageCandidateRankingEntrySchema = z
+  .object({
+    generationId: idSchema,
+    candidateIndex: z.number().int().positive(),
+    score: z.number().finite().min(0).max(5),
+    severeIssueCount: z.number().int().nonnegative(),
+    excluded: z.boolean(),
+    reason: boundedString(500),
+  })
+  .strict();
+
+export const imageCandidateRankingSchema = z
+  .object({
+    version: z.string().trim().min(1).max(80),
+    entries: z.array(imageCandidateRankingEntrySchema).min(1).max(4),
+    winnerGenerationId: idSchema.nullable(),
+    reason: boundedString(1_000),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = value.entries.map((entry) => entry.generationId);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['entries'],
+        message: 'Ranked candidate IDs must be unique',
+      });
+    }
+    if (
+      value.winnerGenerationId !== null &&
+      !value.entries.some(
+        (entry) => entry.generationId === value.winnerGenerationId && !entry.excluded,
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['winnerGenerationId'],
+        message: 'Ranking winner must be an eligible entry',
+      });
+    }
+  });
+export type ImageCandidateRanking = z.infer<typeof imageCandidateRankingSchema>;
+
 export type ImageGenerationRequest = z.infer<typeof imageGenerationRequestSchema>;
 
 export const imageGenerationRequestSchema = z
@@ -262,6 +369,8 @@ export const imageGenerationRequestSchema = z
     projectId: idSchema,
     sceneId: idSchema,
     visualPromptPackageId: idSchema,
+    shotId: z.string().trim().min(1).max(120).nullable().optional(),
+    shotRevision: z.number().int().positive().nullable().optional(),
     providerJobId: idSchema,
     prompt: boundedString(8_000),
     negativePrompt: boundedString(3_000).nullable(),
@@ -273,6 +382,7 @@ export const imageGenerationRequestSchema = z
     samplerHint: z.string().trim().min(1).max(120),
     referenceImages: z.array(imageReferenceInputSchema).max(12).default([]),
     providerSettings: imageProviderSettingsSchema,
+    referenceBindings: referenceBindingsSchema.optional(),
     conditioning: imageConditioningSchema.default(textOnlyConditioning),
     generationInstructions: boundedString(2_000).default(''),
     reviewFeedback: imageReviewFeedbackSchema.nullable().default(null),
@@ -474,6 +584,7 @@ export const sceneImageCandidateSetDtoSchema = z
     sourceGenerationId: idSchema.nullable(),
     generationInstructions: boundedString(2_000).nullable(),
     metadata: z.record(z.unknown()),
+    ranking: imageCandidateRankingSchema.nullable().default(null),
     createdAt: z.string(),
     updatedAt: z.string(),
   })

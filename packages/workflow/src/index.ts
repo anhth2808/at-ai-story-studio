@@ -12,6 +12,7 @@ import {
   SceneRepository,
   SceneObjectResolutionRepository,
   VisualProfileRepository,
+  ShotPlanRepository,
   VisualPromptPackageRepository,
   WorkflowRepository,
   type ClaimedStep,
@@ -47,6 +48,9 @@ import {
   motionPlanUpdateSchema,
   sceneTimingUpdateSchema,
   scenePromptRequestSchema,
+  shotPlanningRequestSchema,
+  shotPlanReviewRequestSchema,
+  appearanceStageCreateSchema,
   sceneRegenerationRequestSchema,
   visualProfileGenerateRequestSchema,
   visualObjectKeySchema,
@@ -85,17 +89,24 @@ import {
   type StoryEngine,
 } from './story-engine.js';
 import { buildSceneGenerationContext, buildSceneRegenerationContext } from './scene-context.js';
-import type { AiAgentProgress } from './omp-agent.js';
+import type { AiAgent, AiAgentProgress } from './omp-agent.js';
 import { SceneEngine } from './scene-engine.js';
+import { renderShotPlanningPrompt } from './shot-prompts.js';
 import { VisualConsistencyService, createVisualConsistencyService } from './visual-service.js';
 import { ImageGenerationService, createImageGenerationService } from './image-service.js';
 import { SceneVideoService, createSceneVideoService } from './video-service.js';
+import { imageCandidateCount } from './quality-policy.js';
+import { ShotDirector } from './shot-director.js';
+import { ttsQualityIssues } from './tts-quality.js';
+import { VisualReferenceService } from './visual-reference-service.js';
 import { ComfyUiImageProvider, ImageProviderError } from './comfyui.js';
 export {
   ComfyUiImageProvider,
   ImageGenerationService,
   ImageProviderError,
   SceneEngine,
+  ShotDirector,
+  VisualReferenceService,
   VisualConsistencyService,
   createImageGenerationService,
   createVisualConsistencyService,
@@ -156,6 +167,7 @@ export class StudioService {
   readonly chapters: ChapterRepository;
   readonly story: StoryRepository;
   readonly scenes: SceneRepository;
+  readonly shotPlans: ShotPlanRepository;
   readonly batches: StoryBatchRepository;
   readonly workflow: WorkflowRepository;
   readonly assets: AssetRepository;
@@ -165,14 +177,19 @@ export class StudioService {
   readonly visual: VisualConsistencyService;
   readonly images: ImageGenerationService;
   readonly videos: SceneVideoService;
+  readonly visualReferences: VisualReferenceService;
   readonly timeline: TimelineWorkflowService;
   readonly publication: PublicationPackageService;
   readonly production: ProductionOrchestrator;
-  constructor(private readonly context: StudioContext) {
+  constructor(
+    private readonly context: StudioContext,
+    agent?: AiAgent,
+  ) {
     this.projects = new ProjectRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.story = new StoryRepository(context.database);
     this.scenes = new SceneRepository(context.database);
+    this.shotPlans = new ShotPlanRepository(context.database);
     this.batches = new StoryBatchRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.assets = new AssetRepository(context.database);
@@ -188,8 +205,9 @@ export class StudioService {
       this.visualPackages,
       this.assets,
     );
-    this.images = createImageGenerationService(context);
-    this.videos = createSceneVideoService(context);
+    this.images = createImageGenerationService(context, undefined, agent);
+    this.videos = createSceneVideoService(context, undefined, agent);
+    this.visualReferences = new VisualReferenceService(context);
     this.timeline = new TimelineWorkflowService(context);
     this.publication = new PublicationPackageService(context);
     this.production = new ProductionOrchestrator(context, this.productionAdapters(), undefined, {
@@ -684,6 +702,7 @@ export class StudioService {
           };
         },
         schedule: (run, _stage, limit) => {
+          const settings = this.production.profiles.get(run.profileId)?.settings;
           const scenes = this.productionSceneRows(run)
             .filter(
               (scene) => !this.assets.currentRenderableSceneImage(run.projectId, scene.stableId),
@@ -699,8 +718,7 @@ export class StudioService {
               .map((step) => this.productionWork(step, `image:${step.stepId}`));
           const result = this.images.scheduleBatch(run.projectId, {
             sceneIds: scenes.map((scene) => scene.id),
-            candidateCount: 1,
-            onlyMissing: true,
+            candidateCount: settings ? imageCandidateCount(settings) : 1,
             includeStale: false,
           });
           return result.jobs.slice(0, limit).map((job) =>
@@ -1312,6 +1330,118 @@ export class StudioService {
       stepId,
       jobId: this.workflow.createJob('GENERATE_SCENE_PROMPT', sceneId, stepId),
     };
+  }
+
+  getCurrentShotPlan(projectId: Id, sceneId: Id) {
+    const scene = this.getScene(projectId, sceneId);
+    return this.shotPlans.getCurrent(projectId, scene.id);
+  }
+  getShotPlan(projectId: Id, shotPlanId: Id) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    const plan = this.shotPlans.getById(projectId, shotPlanId);
+    if (!plan) throw new AppError('NOT_FOUND', 'Shot plan not found', 404);
+    return plan;
+  }
+  listChapterShotPlans(projectId: Id, chapterId: Id, limit = 100, offset = 0) {
+    const chapter = this.chapters.get(chapterId);
+    if (!chapter || chapter.projectId !== projectId)
+      throw new AppError('NOT_FOUND', 'Chapter not found', 404);
+    return this.shotPlans.listCurrentForChapter(projectId, chapterId, limit, offset);
+  }
+
+  reviewShotPlan(projectId: Id, shotPlanId: Id, requestInput: unknown) {
+    const request = shotPlanReviewRequestSchema.parse(requestInput);
+    return this.shotPlans.review(projectId, shotPlanId, request);
+  }
+
+  scheduleShotPlanning(
+    projectId: Id,
+    sceneId: Id,
+    requestInput: unknown = {},
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const scene = this.getScene(projectId, sceneId);
+    this.assertSceneSchedulingCurrent(scene);
+    const request = shotPlanningRequestSchema.parse(requestInput);
+    if (
+      request.expectedSceneRevision !== undefined &&
+      request.expectedSceneRevision !== scene.revision
+    )
+      throw new AppError('REVISION_CONFLICT', 'Scene revision is stale', 409);
+    const chapterScenes = this.scenes.listScenes(scene.chapterId, 200, 0, false);
+    const sceneIndex = chapterScenes.findIndex((entry) => entry.id === scene.id);
+    const previous = sceneIndex > 0 ? chapterScenes[sceneIndex - 1] : undefined;
+    const next = sceneIndex >= 0 ? chapterScenes[sceneIndex + 1] : undefined;
+    const previousPlan = previous ? this.shotPlans.getCurrent(projectId, previous.id) : null;
+    const prompt = renderShotPlanningPrompt({
+      scene: this.scenes.getScene(scene.id, true)!,
+      location: scene.locationId ? this.scenes.getLocation(projectId, scene.locationId) : null,
+      previousFinalState: previousPlan?.candidate.shots.at(-1)?.finalState ?? null,
+      nextScene: next
+        ? {
+            stableId: next.stableId,
+            summary: next.summary,
+            purpose: next.purpose,
+            locationId: next.locationId,
+          }
+        : null,
+    });
+    const executionId = this.workflow.createExecution(projectId, 'SHOT_PLANNING');
+    const stepId = this.workflow.createStep(
+      executionId,
+      `shot-planning:${scene.id}:${scene.revision}:${prompt.inputFingerprint}`,
+      'PLAN_SHOTS',
+      scene.id,
+      prompt.inputFingerprint,
+      3,
+      request,
+    );
+    return {
+      executionId,
+      stepId,
+      jobId: this.workflow.createJob('PLAN_SHOTS', scene.id, stepId),
+    };
+  }
+  scheduleVisualReference(
+    projectId: Id,
+    targetKind: 'CHARACTER_PROTOTYPE' | 'CHARACTER_STAGE' | 'LOCATION',
+    targetEntityId: string,
+  ) {
+    if (!this.projects.get(projectId)) throw new AppError('NOT_FOUND', 'Project not found', 404);
+    return this.visualReferences.schedule(projectId, targetKind, targetEntityId);
+  }
+
+  listVisualReferences(
+    projectId: Id,
+    targetKind: 'CHARACTER_PROTOTYPE' | 'CHARACTER_STAGE' | 'LOCATION',
+    targetEntityId: string,
+    limit = 50,
+  ) {
+    return this.visualReferences.list(projectId, targetKind, targetEntityId, limit);
+  }
+
+  reviewVisualReference(projectId: Id, generationId: Id, approval: 'APPROVED' | 'REJECTED') {
+    return this.visualReferences.review(projectId, generationId, approval);
+  }
+
+  saveAppearanceStage(projectId: Id, characterId: string, input: unknown) {
+    const value = appearanceStageCreateSchema.parse(input);
+    return this.visualReferences.stages.saveCurrent({
+      projectId,
+      characterId,
+      stableId: value.stableId,
+      profileId: value.profileId,
+      profileRevision: value.profileRevision,
+      name: value.name,
+      payload: value.payload,
+      provenance: value.provenance,
+      reviewStatus: value.reviewStatus,
+      inputFingerprint: fingerprint(value),
+      expectedRevision: value.expectedRevision,
+    });
+  }
+
+  listAppearanceStages(projectId: Id, characterId: string, limit = 50) {
+    return this.visualReferences.stages.listCharacter(projectId, characterId, limit);
   }
 
   scheduleSceneBatch(
@@ -2241,6 +2371,8 @@ export class WorkerExecutor {
     private readonly videoService?: SceneVideoService,
     private readonly production?: ProductionOrchestrator,
     private readonly publication?: PublicationPackageService,
+    private readonly shotDirector?: ShotDirector,
+    private readonly visualReferenceService?: VisualReferenceService,
   ) {
     this.workflow = new WorkflowRepository(context.database);
     this.timeline = new TimelineWorkflowService(context);
@@ -2280,6 +2412,12 @@ export class WorkerExecutor {
       await this.videoService.executeStep(step, this.workerId, signal, (progress, message) => {
         this.workflow.progress(step, progress, message);
       });
+      return;
+    }
+    if (step.type === 'GENERATE_VISUAL_REFERENCE') {
+      if (!this.visualReferenceService)
+        throw new AppError('CONFIGURATION_ERROR', 'Visual reference worker is not configured', 500);
+      await this.visualReferenceService.executeStep(step, signal);
       return;
     }
     if (
@@ -2380,6 +2518,17 @@ export class WorkerExecutor {
         },
         () => this.stepIsCurrent(step),
       );
+      return;
+    }
+    if (step.type === 'PLAN_SHOTS') {
+      if (!this.shotDirector)
+        throw new AppError('CONFIGURATION_ERROR', 'Shot Director worker is not configured', 500);
+      await this.shotDirector.executeStep(step, signal, (event) => {
+        const progress = { STARTING: 0.05, AUTHENTICATING: 0.1, GENERATING: 0.5, PARSING: 0.9 }[
+          event.stage
+        ];
+        this.workflow.progress(step, progress, event.message);
+      });
       return;
     }
     if (
@@ -2528,10 +2677,22 @@ export class WorkerExecutor {
       signal,
     );
     if (!this.stepIsCurrent(step)) throw new Error('TTS segment input changed during synthesis');
-    const probe = await this.context.media.probe(output);
-    const format = probe['format'] as { duration?: string } | undefined;
-    const durationMs = Math.round(Number(format?.duration ?? 0) * 1000);
-    if (!durationMs) throw new Error('TTS produced no duration');
+    const measured = await this.context.media.measureAudioDuration(output);
+    const silence = await this.context.media.detectAudioSilence(output, measured.durationMs);
+    const durationMs = measured.durationMs;
+    const qualityIssues = ttsQualityIssues({
+      durationMs,
+      activityRatio: silence.activityRatio,
+      textLength: segment.text.trim().length,
+      provider: 'EDGE_TTS',
+    });
+    if (qualityIssues.length)
+      throw new AppError(
+        'TTS_QUALITY_REJECTED',
+        `TTS audio failed quality checks: ${qualityIssues.join(', ')}`,
+        422,
+        true,
+      );
     const digest = await sha256File(output);
     const destination = join(
       this.context.workspace.projects,
@@ -2556,7 +2717,12 @@ export class WorkerExecutor {
         sourceEntityId: chapter.id,
         sourceStepId: step.id,
         inputFingerprint: step.input_fingerprint,
-        metadata: { durationMs },
+        metadata: {
+          durationMs,
+          durationProvenance: measured.provenance,
+          activityRatio: silence.activityRatio,
+          totalSilenceMs: silence.totalSilenceMs,
+        },
       },
       {
         stepId: step.id,
@@ -3473,3 +3639,11 @@ export * from './story-state.js';
 export * from './scene-timing.js';
 export * from './motion-plan.js';
 export * from './timeline-workflow.js';
+export * from './media-critics.js';
+export * from './quality-policy.js';
+export * from './shot-continuity.js';
+export * from './shot-director.js';
+export * from './shot-validation.js';
+export * from './tts-quality.js';
+export * from './video-backends.js';
+export * from './visual-references.js';

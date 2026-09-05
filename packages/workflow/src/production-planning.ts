@@ -383,6 +383,38 @@ export class ProductionPreflightService {
         if (!this.assets.currentRenderableSceneImage(projectId, scene.stableId)) missingImages += 1;
       }
     }
+    if (settings.imageQualityGate === 'REQUIRED') {
+      let qualityPending = 0;
+      for (const chapter of chapters.slice(0, 100)) {
+        const sceneIds = this.context.database.sqlite
+          .prepare(
+            "SELECT stable_id as stableId FROM scene_revisions WHERE project_id=? AND chapter_id=? AND status='CURRENT' AND is_current=1 ORDER BY scene_number LIMIT 100",
+          )
+          .all(projectId, chapter.id) as Array<{ stableId: string }>;
+        for (const scene of sceneIds) {
+          const currentImage = this.assets.currentRenderableSceneImage(projectId, scene.stableId);
+          if (!currentImage) continue;
+          const quality = this.context.database.sqlite
+            .prepare(
+              'SELECT g.automatic_quality_status as status FROM scene_image_generations g JOIN assets a ON a.id=g.asset_id WHERE a.id=? AND a.is_current=1 LIMIT 1',
+            )
+            .get(currentImage.id) as { status: string } | undefined;
+          if (quality?.status !== 'PASSED') qualityPending += 1;
+        }
+      }
+      if (qualityPending > 0)
+        issues.push(
+          issue(
+            'IMAGE_QUALITY_REVIEW_REQUIRED',
+            settings.qualityFallback === 'BLOCK' ? 'BLOCKING' : 'WARNING',
+            'SCENE_IMAGES',
+            `${qualityPending} current Scene image(s) lack a passing automatic critic result`,
+            settings.qualityFallback === 'BLOCK'
+              ? 'Run automatic quality review or choose an explicit permitted fallback'
+              : 'Resolve automatic quality review or human approval before final export',
+          ),
+        );
+    }
     if (missingImages > 0) {
       if (this.probes.image) {
         const readiness = await this.probes.image(projectId);

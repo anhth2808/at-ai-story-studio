@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { qualityFallbackSchema } from './quality.js';
+import { allowedVideoFallbackSchema, videoBackendSchema } from './video.js';
 
 const idSchema = z.string().uuid();
 const nonEmpty = (max: number) => z.string().trim().min(1).max(max);
@@ -20,6 +22,12 @@ export type ProductionPriorityThreshold = z.infer<typeof productionPriorityThres
 
 export const productionSubtitlePolicySchema = z.enum(['REQUIRE_CURRENT', 'WARN_IF_MISSING']);
 export type ProductionSubtitlePolicy = z.infer<typeof productionSubtitlePolicySchema>;
+
+export const imageCandidatePolicySchema = z.enum(['FAST', 'BALANCED', 'QUALITY']);
+export type ImageCandidatePolicy = z.infer<typeof imageCandidatePolicySchema>;
+
+export const productionQualityGateSchema = z.enum(['DISABLED', 'REQUIRED']);
+export type ProductionQualityGate = z.infer<typeof productionQualityGateSchema>;
 
 export const productionScopeSchema = z
   .union([
@@ -138,12 +146,21 @@ const boundedSettingsBaseSchema = z
     requireQualityReview: z.boolean(),
     chapterBatchSize: z.number().int().min(1).max(25),
     imageBatchSize: z.number().int().min(1).max(64),
-    imageCandidateCount: z.number().int().min(1).max(8),
-    imageRegenerationLimit: z.number().int().min(0).max(10),
+    imageCandidateCount: z.number().int().min(1).max(3),
+    imageCandidatePolicy: imageCandidatePolicySchema.default('BALANCED'),
+    imageQualityGate: productionQualityGateSchema.default('REQUIRED'),
+    imageAutoAcceptThreshold: z.number().int().min(1).max(5).default(4),
+    imageRegenerationLimit: z.number().int().min(0).max(3),
     aiMotionPolicy: productionAiPolicySchema,
     aiPriorityThreshold: productionPriorityThresholdSchema,
     maxAiVideoScenes: z.number().int().min(0).max(10_000),
     allowKenBurnsFallback: z.boolean(),
+    videoBackendPreference: videoBackendSchema.default('WAN22_TI2V_5B'),
+    videoQualityGate: productionQualityGateSchema.default('REQUIRED'),
+    temporalRetryLimit: z.number().int().min(0).max(3).default(2),
+    qualityFallback: qualityFallbackSchema.default('MANUAL_REVIEW'),
+    strictReferenceRequirement: z.boolean().default(false),
+    allowedVideoFallback: allowedVideoFallbackSchema.default('WAN22_TI2V_5B'),
     renderQualityPreset: z.enum(['FAST_PREVIEW', 'STANDARD', 'HIGH']),
     subtitlePolicy: productionSubtitlePolicySchema,
     musicEnabled: z.boolean(),
@@ -173,12 +190,21 @@ export const defaultProductionProfileSettings: ProductionProfileSettings = {
   requireQualityReview: true,
   chapterBatchSize: 5,
   imageBatchSize: 8,
-  imageCandidateCount: 1,
+  imageCandidateCount: 2,
+  imageCandidatePolicy: 'BALANCED',
+  imageQualityGate: 'REQUIRED',
+  imageAutoAcceptThreshold: 4,
   imageRegenerationLimit: 2,
   aiMotionPolicy: 'HIGH_PRIORITY_ONLY',
   aiPriorityThreshold: 'HIGH',
   maxAiVideoScenes: 12,
   allowKenBurnsFallback: true,
+  videoBackendPreference: 'WAN22_TI2V_5B',
+  videoQualityGate: 'REQUIRED',
+  temporalRetryLimit: 2,
+  qualityFallback: 'MANUAL_REVIEW',
+  strictReferenceRequirement: false,
+  allowedVideoFallback: 'WAN22_TI2V_5B',
   renderQualityPreset: 'STANDARD',
   subtitlePolicy: 'REQUIRE_CURRENT',
   musicEnabled: true,

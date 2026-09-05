@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { extname, relative, resolve } from 'node:path';
 import {
   createAgentSession,
   discoverAuthStorage,
@@ -99,6 +101,34 @@ function operationLabel(operation: OmpProtocolRequest['operation']): string {
       return 'story result';
   }
 }
+function imageMimeType(path: string): string {
+  const extension = extname(path).toLowerCase();
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg';
+  if (extension === '.webp') return 'image/webp';
+  return 'image/png';
+}
+
+async function promptContent(request: OmpProtocolRequest, workspace: string) {
+  const content: Array<
+    { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+  > = [{ type: 'text', text: request.userPrompt }];
+  for (const relativePath of request.imagePaths ?? []) {
+    const absolutePath = resolve(workspace, relativePath);
+    const boundary = relative(workspace, absolutePath);
+    if (
+      boundary.startsWith('..') ||
+      boundary === '' ||
+      resolve(workspace, boundary) !== absolutePath
+    )
+      throw new Error('Image evidence path is outside the managed workspace');
+    content.push({
+      type: 'image',
+      data: (await readFile(absolutePath)).toString('base64'),
+      mimeType: imageMimeType(absolutePath),
+    });
+  }
+  return content;
+}
 
 async function run(request: OmpProtocolRequest): Promise<void> {
   const startedAt = Date.now();
@@ -144,13 +174,14 @@ async function run(request: OmpProtocolRequest): Promise<void> {
     session?.abort('Story generation deadline exceeded');
   }, request.deadlineMs);
   try {
+    const workspace = process.env.STUDIO_WORKSPACE ?? process.cwd();
     const created = await createAgentSession({
-      cwd: process.env.STUDIO_WORKSPACE ?? process.cwd(),
+      cwd: workspace,
       authStorage,
       modelRegistry,
       model: selected,
       settings: Settings.isolated({}),
-      sessionManager: SessionManager.inMemory(process.env.STUDIO_WORKSPACE ?? process.cwd()),
+      sessionManager: SessionManager.inMemory(workspace),
       systemPrompt: request.systemPrompt,
       disableExtensionDiscovery: true,
       enableMCP: false,
@@ -198,7 +229,7 @@ async function run(request: OmpProtocolRequest): Promise<void> {
       stage: 'GENERATING',
       message: `Generating structured ${operationLabel(request.operation)}`,
     });
-    await session.prompt(request.userPrompt);
+    await session.sendUserMessage(await promptContent(request, workspace));
     if (eventError) throw new Error(eventError);
     if (controller.signal.aborted) {
       write(errorEvent(request, 'TIMEOUT', 'OMP generation timed out', true));

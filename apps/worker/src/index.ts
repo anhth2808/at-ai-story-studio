@@ -17,6 +17,7 @@ import {
   createStoryEngine,
   createVisualConsistencyService,
   SceneEngine,
+  ShotDirector,
 } from '@studio/workflow';
 const root =
   process.env.STUDIO_WORKSPACE ??
@@ -37,10 +38,11 @@ const workflow = new WorkflowRepository(database);
 const agent = createOmpAgent(runner);
 const storyEngine = createStoryEngine({ database, agent });
 const sceneEngine = new SceneEngine({ database, agent });
+const shotDirector = new ShotDirector({ database, agent });
 const batches = new StoryBatchRepository(database);
 const heartbeat = new HeartbeatRepository(database);
 const visualService = createVisualConsistencyService(database, agent);
-const studio = new StudioService(context);
+const studio = new StudioService(context, agent);
 const executor = new WorkerExecutor(
   context,
   workerId,
@@ -52,6 +54,8 @@ const executor = new WorkerExecutor(
   studio.videos,
   studio.production,
   studio.publication,
+  shotDirector,
+  studio.visualReferences,
 );
 let stopping = false;
 let activeController: AbortController | undefined;

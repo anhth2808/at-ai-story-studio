@@ -100,3 +100,11 @@ chapter-local: a Scene image, MotionPlan, or SceneTiming change stales only
 that Scene Clip, its Chapter Video, and dependent Project Videos. Production
 reuses unaffected clips and never asks the timeline to regenerate unrelated
 chapters.
+
+## Shot-level media quality
+
+Scene Clips consume only the current accepted image and exact timing/backend
+fingerprint. Completed AI clips receive managed keyframe evidence and a
+persisted temporal critic result. Rejected, stale, missing-reference, or
+unavailable-quality clips remain blocked and cannot feed Chapter or Project
+Video.

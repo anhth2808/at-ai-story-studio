@@ -4,6 +4,7 @@ import {
   imageGenerationSettingsSchema,
   imageGenerationSettingsUpdateSchema,
   imageQualityReviewSchema,
+  imageCandidateRankingSchema,
   sceneImageCandidateSetDtoSchema,
   sceneImageGenerationDtoSchema,
   sceneImageReviewUpdateSchema,
@@ -994,7 +995,7 @@ export class SceneImageCandidateSetRepository {
           visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
           package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
           requested_count as requestedCount,source_generation_id as sourceGenerationId,
-          generation_instructions as generationInstructions,metadata,created_at as createdAt,updated_at as updatedAt
+          generation_instructions as generationInstructions,metadata,ranking,created_at as createdAt,updated_at as updatedAt
          FROM scene_image_candidate_sets WHERE project_id=? AND id=?`,
       )
       .get(projectId, candidateSetId) as Record<string, unknown> | undefined;
@@ -1008,7 +1009,7 @@ export class SceneImageCandidateSetRepository {
           visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
           package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
           requested_count as requestedCount,source_generation_id as sourceGenerationId,
-          generation_instructions as generationInstructions,metadata,created_at as createdAt,updated_at as updatedAt
+          generation_instructions as generationInstructions,metadata,ranking,created_at as createdAt,updated_at as updatedAt
          FROM scene_image_candidate_sets WHERE project_id=? AND scene_stable_id=?
          ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
@@ -1051,11 +1052,31 @@ export class SceneImageCandidateSetRepository {
       );
     return this.get(input.projectId, id)!;
   }
+
+  saveRanking(projectId: Id, candidateSetId: Id, ranking: unknown): SceneImageCandidateSetDto {
+    const parsed = imageCandidateRankingSchema.parse(ranking);
+    const result = this.database.sqlite
+      .prepare(
+        'UPDATE scene_image_candidate_sets SET ranking=?,updated_at=? WHERE project_id=? AND id=? AND ranking IS NULL',
+      )
+      .run(json(parsed), now(), projectId, candidateSetId);
+    if (result.changes !== 1) {
+      const current = this.get(projectId, candidateSetId);
+      if (!current) throw new AppError('NOT_FOUND', 'Image candidate set not found', 404);
+      if (JSON.stringify(current.ranking) !== JSON.stringify(parsed))
+        throw new AppError('CONFLICT', 'Image candidate ranking is immutable', 409);
+      return current;
+    }
+    return this.get(projectId, candidateSetId)!;
+  }
 }
 
 function parseCandidateSet(row: Record<string, unknown>): SceneImageCandidateSetDto {
   return sceneImageCandidateSetDtoSchema.parse({
     ...row,
     metadata: parseRecord(String(row.metadata ?? '{}')),
+    ranking: row.ranking
+      ? imageCandidateRankingSchema.parse(JSON.parse(String(row.ranking)))
+      : null,
   });
 }

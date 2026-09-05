@@ -15,7 +15,6 @@ import {
   type SceneDto,
   type StoryBlueprint,
   type StoryCharacter,
-  type StoryCharacterState,
   type StoryState,
   type ResolvedLocationVisual,
   type VisualConsistencyIssue,
@@ -23,12 +22,14 @@ import {
   type VisualPromptDependency,
   type VisualPromptPackagePayload,
   type VisualStyleSettingsDto,
+  type ReferenceBinding,
+  type Shot,
 } from '@studio/shared';
 import type { SceneObjectResolutionRepository, VisualProfileRepository } from '@studio/database';
 import { fingerprintValue, stableSerialize } from './story-prompts.js';
 export { fingerprintValue, stableSerialize };
 
-export const VISUAL_PROMPT_TEMPLATE_VERSION = 'visual-prompt-v1';
+export const VISUAL_PROMPT_TEMPLATE_VERSION = 'visual-prompt-v2';
 
 export type VisualPromptBuildInput = {
   projectId: string;
@@ -97,17 +98,10 @@ function characterById(blueprint: StoryBlueprint | null, characterId: string | n
     : null;
 }
 
-function stateByCharacterId(storyState: StoryState | null, characterId: string | null) {
-  return characterId
-    ? (storyState?.characterStates.find((state) => state.characterId === characterId) ?? null)
-    : null;
-}
-
 function renderCharacterFragment(
   character: SceneCharacterDto,
   profile: CharacterVisualProfileDto | null,
   canonical: StoryCharacter | null,
-  state: StoryCharacterState | null,
 ): string {
   const profilePayload = profile?.payload;
   const variant = profilePayload?.variants.find(
@@ -132,14 +126,7 @@ function renderCharacterFragment(
         ...profilePayload.visualKeywords,
         profilePayload.styleNotes,
       ]
-    : [canonical?.appearance ?? '', canonical?.role ?? '', ...(canonical?.traits ?? [])];
-  const stateParts = [
-    state?.location ?? '',
-    state?.currentGoal ?? '',
-    ...(state?.injuries ?? []).map((item) => `story injury: ${item}`),
-    ...(state?.possessions ?? []).map((item) => `story possession: ${item}`),
-    ...(state?.knowledge ?? []).map((item) => `story knowledge: ${item}`),
-  ];
+    : [canonical?.appearance ?? ''];
   const sceneParts = [
     character.roleInScene,
     character.visualState.variantKey
@@ -155,9 +142,7 @@ function renderCharacterFragment(
     character.visualState.appearanceOverride,
   ];
   return bounded(
-    [character.displayName, ...canonicalParts, ...stateParts, ...sceneParts.flat(2)]
-      .filter(Boolean)
-      .join(', '),
+    [character.displayName, ...canonicalParts, ...sceneParts.flat(2)].filter(Boolean).join(', '),
     3_000,
   );
 }
@@ -169,7 +154,6 @@ function resolveCharacter(
   dependencies: ProfileDependencyInput[],
 ) {
   const canonical = characterById(input.blueprint, character.characterId);
-  const state = stateByCharacterId(input.storyState, character.characterId);
   const storedProfile = character.characterId
     ? input.profiles.getCharacter(input.projectId, character.characterId)
     : null;
@@ -239,7 +223,7 @@ function resolveCharacter(
     variantRevision: variant?.revision ?? null,
     canonicalAppearance,
     sceneVisualState: sceneCharacterVisualStateSchema.parse(character.visualState),
-    resolvedPromptFragment: renderCharacterFragment(character, profile, canonical, state),
+    resolvedPromptFragment: renderCharacterFragment(character, profile, canonical),
     resolutionStatus:
       !character.characterId || !canonical ? 'UNRESOLVED' : profile ? 'RESOLVED' : 'MISSING',
   });
@@ -504,6 +488,34 @@ function styleFragment(style: VisualStyleSettingsDto | null): string {
   );
 }
 
+function cameraCompositionLanguage(scene: SceneDto): string {
+  const framing: Record<SceneDto['camera']['framing'], string> = {
+    EXTREME_WIDE: 'extreme wide establishing shot',
+    WIDE: 'wide shot',
+    FULL: 'full-body shot',
+    MEDIUM: 'medium shot',
+    CLOSE_UP: 'close-up',
+    EXTREME_CLOSE_UP: 'extreme close-up',
+    OVER_THE_SHOULDER: 'over-the-shoulder shot',
+    POV: 'point-of-view shot',
+  };
+  const composition = scene.composition;
+  return [
+    framing[scene.camera.framing],
+    scene.camera.angle ? `${scene.camera.angle} angle` : '',
+    scene.camera.movementIntent ? `camera ${scene.camera.movementIntent}` : '',
+    composition.subjectFocus ? `focus on ${composition.subjectFocus}` : '',
+    composition.foreground.length ? `foreground: ${composition.foreground.join(', ')}` : '',
+    composition.midground.length ? `midground: ${composition.midground.join(', ')}` : '',
+    composition.background.length ? `background: ${composition.background.join(', ')}` : '',
+    ...composition.characterPositions.map(
+      (position) => `${position.displayName} positioned ${position.position}`,
+    ),
+  ]
+    .filter(Boolean)
+    .join(', ');
+}
+
 export function visualPromptPackageFingerprint(input: unknown): string {
   return fingerprintValue({ template: VISUAL_PROMPT_TEMPLATE_VERSION, input });
 }
@@ -587,7 +599,7 @@ export function buildVisualPromptPackage(input: VisualPromptBuildInput): VisualP
     .map((item) => item.resolvedPromptFragment)
     .filter(Boolean)
     .join('; ');
-  const subjectAction = bounded(`${input.scene.visualDescription}. ${input.scene.summary}`, 2_000);
+  const subjectAction = bounded(input.scene.visualDescription, 2_000);
   const fullPrompt = [
     `Subject/action: ${subjectAction}`,
     characterText ? `Characters: ${characterText}` : '',
@@ -595,7 +607,7 @@ export function buildVisualPromptPackage(input: VisualPromptBuildInput): VisualP
       ? `Location: ${location.value.resolvedPromptFragment}`
       : '',
     objectText ? `Objects: ${objectText}` : '',
-    `Camera/composition: ${stableSerialize({ camera: input.scene.camera, composition: input.scene.composition })}`,
+    `Camera/composition: ${cameraCompositionLanguage(input.scene)}`,
     `Lighting/mood: ${input.scene.lighting}; ${input.scene.mood}; ${input.scene.colorMood}`,
     styleText ? `Style Bible: ${styleText}` : '',
     input.style?.positivePromptSuffix || input.style?.promptSuffix
@@ -666,6 +678,7 @@ export function buildVisualPromptPackage(input: VisualPromptBuildInput): VisualP
     subjectAction,
     camera: input.scene.camera,
     composition: input.scene.composition,
+
     lighting: input.scene.lighting,
     mood: `${input.scene.mood}; ${input.scene.colorMood}`.trim(),
     fullPrompt: bounded(fullPrompt, 8_000),
@@ -678,4 +691,162 @@ export function buildVisualPromptPackage(input: VisualPromptBuildInput): VisualP
     promptTemplateVersion: VISUAL_PROMPT_TEMPLATE_VERSION,
   });
   return { package: payload, inputFingerprint };
+}
+export type ShotVisualPromptBuildInput = VisualPromptBuildInput & {
+  shot: Shot;
+  referenceBindings: ReferenceBinding[];
+};
+
+const shotFramingToScene: Record<Shot['staticIntent']['framing'], SceneDto['camera']['framing']> = {
+  EXTREME_CLOSE_UP: 'EXTREME_CLOSE_UP',
+  CLOSE_UP: 'CLOSE_UP',
+  MEDIUM: 'MEDIUM',
+  WIDE: 'WIDE',
+  EXTREME_WIDE: 'EXTREME_WIDE',
+};
+
+function replaceOffscreenNames(scene: SceneDto, shot: Shot, value: string): string {
+  const offscreenNames = scene.characters
+    .filter(
+      (character) =>
+        character.characterId && shot.offscreenCharacterIds.includes(character.characterId),
+    )
+    .map((character) => character.displayName)
+    .sort((left, right) => right.length - left.length);
+  return offscreenNames.reduce(
+    (text, name) => text.replaceAll(name, 'off-camera direction'),
+    value,
+  );
+}
+
+export function orderReferenceBindings(
+  framing: Shot['staticIntent']['framing'],
+  bindings: ReferenceBinding[],
+): ReferenceBinding[] {
+  const roleWeight: Record<ReferenceBinding['role'], number> =
+    framing === 'WIDE' || framing === 'EXTREME_WIDE'
+      ? { LOCATION: 0, PRIMARY_CHARACTER: 1, CHARACTER: 2, OBJECT: 3 }
+      : framing === 'CLOSE_UP' || framing === 'EXTREME_CLOSE_UP'
+        ? { PRIMARY_CHARACTER: 0, CHARACTER: 1, LOCATION: 2, OBJECT: 3 }
+        : { PRIMARY_CHARACTER: 0, LOCATION: 1, CHARACTER: 2, OBJECT: 3 };
+  return [...bindings]
+    .sort(
+      (left, right) =>
+        roleWeight[left.role] - roleWeight[right.role] ||
+        left.entityId.localeCompare(right.entityId) ||
+        left.assetId.localeCompare(right.assetId),
+    )
+    .map((binding, index) => ({ ...binding, ordinal: index + 1 }));
+}
+
+export function buildShotVisualPromptPackage(
+  input: ShotVisualPromptBuildInput,
+): VisualPromptBuildResult {
+  const visibleCharacters = input.scene.characters.filter(
+    (character) =>
+      character.characterId !== null &&
+      input.shot.visibleCharacterIds.includes(character.characterId),
+  );
+  const staticDescription = replaceOffscreenNames(
+    input.scene,
+    input.shot,
+    [
+      input.shot.staticIntent.subject,
+      input.shot.staticIntent.action,
+      input.shot.staticIntent.pose,
+      input.shot.staticIntent.expression,
+      input.shot.staticIntent.relationship,
+      input.shot.staticIntent.composition,
+      input.shot.staticIntent.atmosphere,
+    ]
+      .filter(Boolean)
+      .join(', '),
+  );
+  const visibleComposition = {
+    ...input.scene.composition,
+    foreground: input.scene.composition.foreground.map((value) =>
+      replaceOffscreenNames(input.scene, input.shot, value),
+    ),
+    midground: input.scene.composition.midground.map((value) =>
+      replaceOffscreenNames(input.scene, input.shot, value),
+    ),
+    background: input.scene.composition.background.map((value) =>
+      replaceOffscreenNames(input.scene, input.shot, value),
+    ),
+    subjectFocus: replaceOffscreenNames(
+      input.scene,
+      input.shot,
+      input.scene.composition.subjectFocus,
+    ),
+    characterPositions: input.scene.composition.characterPositions.filter(
+      (position) =>
+        position.characterId !== null &&
+        input.shot.visibleCharacterIds.includes(position.characterId),
+    ),
+  };
+  const result = buildVisualPromptPackage({
+    ...input,
+    scene: {
+      ...input.scene,
+      characters: visibleCharacters,
+      visualDescription: staticDescription,
+      summary: '',
+      composition: visibleComposition,
+      camera: {
+        framing: shotFramingToScene[input.shot.staticIntent.framing],
+        angle: input.shot.staticIntent.angle || null,
+        movementIntent: null,
+      },
+      lighting: input.shot.staticIntent.lighting,
+      colorMood: input.shot.staticIntent.colorMood,
+    },
+  });
+  const visibleIds = new Set(input.shot.visibleCharacterIds);
+  const referenceBindings = orderReferenceBindings(
+    input.shot.staticIntent.framing,
+    input.referenceBindings.filter(
+      (binding) =>
+        (binding.role !== 'CHARACTER' && binding.role !== 'PRIMARY_CHARACTER') ||
+        visibleIds.has(binding.entityId),
+    ),
+  );
+  const payload = visualPromptPackagePayloadSchema.parse({
+    ...result.package,
+    shotId: input.shot.id,
+    shotRevision: 1,
+    visibleCharacterIds: input.shot.visibleCharacterIds,
+    offscreenCharacterIds: input.shot.offscreenCharacterIds,
+    staticIntent: input.shot.staticIntent,
+    dynamicIntent: input.shot.dynamicIntent,
+    continuityState: input.shot.initialState,
+    referenceBindings,
+    fullPrompt: [
+      result.package.fullPrompt,
+      ...referenceBindings.map(
+        (binding) =>
+          `[REF_${binding.ordinal}] ${binding.role.toLocaleLowerCase('en-US').replaceAll('_', ' ')} ${binding.entityId}`,
+      ),
+    ].join('\n'),
+  });
+  const inputFingerprint = visualPromptPackageFingerprint({
+    ...payload,
+    inputFingerprint: undefined,
+  });
+  return {
+    package: visualPromptPackagePayloadSchema.parse({ ...payload, inputFingerprint }),
+    inputFingerprint,
+  };
+}
+
+export function validateReferencePlaceholderRewrite(
+  original: string,
+  rewritten: string,
+  bindings: ReferenceBinding[],
+): boolean {
+  const expected = bindings.map((binding) => `[REF_${binding.ordinal}]`).sort();
+  const placeholders = (value: string) => value.match(/\[REF_\d+\]/gu)?.sort() ?? [];
+  return (
+    JSON.stringify(placeholders(original)) === JSON.stringify(expected) &&
+    JSON.stringify(placeholders(rewritten)) === JSON.stringify(expected)
+  );
 }

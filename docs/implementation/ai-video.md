@@ -94,3 +94,29 @@ Unreviewed or rejected motion remains a visible review/fallback condition;
 Ken Burns fallback is recorded rather than silently replacing the source.
 Production does not start a GPU generation while another workload reserves the
 local GPU.
+
+## Temporal quality
+
+Completed clips produce a managed final-frame evidence Asset. `VideoCritic`
+receives that keyframe, the accepted source image, the exact Shot, and clip
+hashes through the OMP boundary. It persists evaluator/version, fingerprints,
+issue tags, confidence, reason, guidance, and explicit `UNAVAILABLE` on
+infrastructure or malformed-output failures. Critic failure never becomes a
+PASS or silently switches the backend.
+
+## Local LTX backend
+
+`LTX2_19B_DISTILLED` is an application-owned adapter for the existing local
+ComfyUI LTX 12-node image-to-video graph. It uses discovered checkpoint,
+text-encoder, and VAE names; Studio never downloads models or modifies global
+ComfyUI workflows. LTX owns FPS and legal frame counts, while the shared
+timeline owns requested duration and records residual conversion metadata.
+
+## LTX smoke evidence
+
+On 2026-09-03, the local ComfyUI `LTX2_19B_DISTILLED` path completed a real
+9-frame image-to-video request at 704x384 and 25 FPS. The selected checkpoint
+was `ltx-2-19b-distilled-fp8.safetensors`; the provider returned H.264 MP4,
+and centralized media probing measured 360 ms. Final-frame extraction also
+completed through the managed FFmpeg helper. The smoke used seed `20260904`
+and did not download models or modify global ComfyUI state.

@@ -8,11 +8,21 @@ import {
   VisualPromptPackageRepository,
 } from '@studio/database';
 import type { DatabaseHandle } from '@studio/database';
-import type { SceneDto, StoryBlueprint, StoryState, VisualStyleSettings } from '@studio/shared';
+import type {
+  ReferenceBinding,
+  SceneDto,
+  Shot,
+  StoryBlueprint,
+  StoryState,
+  VisualStyleSettings,
+} from '@studio/shared';
 import {
   buildVisualPromptPackage,
+  buildShotVisualPromptPackage,
   fingerprintValue,
   mergeNegativePromptFragments,
+  orderReferenceBindings,
+  validateReferencePlaceholderRewrite,
   missingVisualPromptConstraints,
 } from './visual-prompts.js';
 
@@ -410,5 +420,177 @@ describe('visual prompt resolver', () => {
       locationMatches: (projectId, name) => scenes.listLocationMatches(projectId, name),
     });
     expect(mapped.package.objects[0]?.profileId).toBe(mappedProfile.id);
+  });
+
+  it('compiles deterministic Shot prompts with exact bindings and no semantic pollution', () => {
+    const database = setup();
+    const scenes = new SceneRepository(database);
+    const profiles = new VisualProfileRepository(database);
+    const objects = new SceneObjectResolutionRepository(database);
+    const savedStyle = scenes.saveVisualStyle('project', style);
+    profiles.saveCharacter({
+      projectId: 'project',
+      characterId: 'mai',
+      payload: { hairColor: 'black' },
+      inputFingerprint: 'character',
+      status: 'APPROVED',
+    });
+    profiles.saveLocation({
+      projectId: 'project',
+      locationId: 'location',
+      locationName: 'Sân trong',
+      payload: { overallDescription: 'old stone courtyard' },
+      inputFingerprint: 'location',
+      status: 'APPROVED',
+    });
+    const stateFingerprint = 'd'.repeat(64);
+    const shot: Shot = {
+      id: 'shot-1',
+      beatId: 'beat-1',
+      ordinal: 1,
+      sourceRange: { startOffset: 0, endOffset: 10 },
+      primaryBeat: 'ACTION',
+      eventKinds: ['ACTION'],
+      eventCount: 1,
+      importance: 'HIGH',
+      hero: true,
+      identitySensitive: true,
+      dialogueMode: 'OFFSCREEN_SPOKEN',
+      dialogueText: 'Mai gọi từ ngoài khung hình',
+      speakerCharacterId: 'mai',
+      visualCarrier: 'the door reacts by opening',
+      offscreenRationale: 'Mai remains outside the room',
+      visibleCharacterIds: [],
+      offscreenCharacterIds: ['mai'],
+      staticIntent: {
+        subject: 'Old wooden door',
+        action: 'opens toward off-camera direction',
+        pose: '',
+        expression: '',
+        relationship: '',
+        importantObjectIds: [],
+        framing: 'CLOSE_UP',
+        angle: 'eye level',
+        composition: 'door fills frame',
+        lighting: 'soft morning light',
+        colorMood: 'muted blue',
+        atmosphere: 'quiet',
+      },
+      dynamicIntent: {
+        subjectMotion: 'door opens slowly',
+        cameraMotion: 'STATIC',
+        cameraSpeed: 'NONE',
+        environmentMotion: '',
+        emotionalTiming: '',
+        speakingMotion: '',
+        stabilityConstraints: [],
+      },
+      initialState: {
+        characters: [],
+        objects: [],
+        cameraAxis: '',
+        locationId: 'location',
+        sourceShotId: null,
+        fingerprint: stateFingerprint,
+      },
+      finalState: {
+        characters: [],
+        objects: [],
+        cameraAxis: '',
+        locationId: 'location',
+        sourceShotId: null,
+        fingerprint: stateFingerprint,
+      },
+      continuation: {
+        mode: 'NEW_KEYFRAME',
+        eligible: false,
+        reason: 'First shot',
+        version: 'v1',
+      },
+      plannedDurationMs: 2_000,
+      variationIntent: 'NORMAL',
+    };
+    const bindings: ReferenceBinding[] = [
+      {
+        ordinal: 1,
+        role: 'LOCATION',
+        assetId: 'location-asset',
+        entityId: 'location',
+        stageId: null,
+        sha256: 'a'.repeat(64),
+        revision: 1,
+        fingerprint: 'location-ref',
+      },
+      {
+        ordinal: 2,
+        role: 'PRIMARY_CHARACTER',
+        assetId: 'character-asset',
+        entityId: 'mai',
+        stageId: 'winter',
+        sha256: 'b'.repeat(64),
+        revision: 2,
+        fingerprint: 'character-ref',
+      },
+    ];
+    const result = buildShotVisualPromptPackage({
+      projectId: 'project',
+      scene: {
+        ...scene,
+        summary: 'secret knowledge: Mai knows the code',
+        characters: scene.characters.map((character) => ({
+          ...character,
+          roleInScene: 'secret keeper',
+        })),
+      },
+      shot,
+      referenceBindings: bindings,
+      blueprint,
+      storyState: {
+        ...state,
+        characterStates: [
+          {
+            characterId: 'mai',
+            location: 'hidden archive',
+            currentGoal: 'steal the secret',
+            powerLevel: '',
+            injuries: [],
+            possessions: [],
+            relationships: [],
+            lastUpdatedChapter: null,
+            knowledge: ['the hidden code'],
+          },
+        ],
+      },
+      style: savedStyle,
+      profiles,
+      objectResolutions: objects,
+      locationMatches: (projectId, name) => scenes.listLocationMatches(projectId, name),
+    });
+    expect(result.package.characters).toEqual([]);
+    expect(result.package.fullPrompt).not.toContain('secret');
+    expect(result.package.fullPrompt).not.toContain('{"camera"');
+    expect(result.package.fullPrompt).not.toContain('Mai');
+    expect(result.package.fullPrompt).not.toContain('primary character mai');
+    expect(result.package.fullPrompt).toContain('[REF_1] location location');
+    expect(result.package.dynamicIntent?.subjectMotion).toBe('door opens slowly');
+    expect(result.package.fullPrompt).not.toContain('door opens slowly');
+    expect(orderReferenceBindings('WIDE', bindings).map((binding) => binding.role)).toEqual([
+      'LOCATION',
+      'PRIMARY_CHARACTER',
+    ]);
+    expect(
+      validateReferencePlaceholderRewrite(
+        result.package.fullPrompt,
+        result.package.fullPrompt,
+        result.package.referenceBindings,
+      ),
+    ).toBe(true);
+    expect(
+      validateReferencePlaceholderRewrite(
+        result.package.fullPrompt,
+        result.package.fullPrompt.replace('[REF_1]', '[REF_2]'),
+        result.package.referenceBindings,
+      ),
+    ).toBe(false);
   });
 });

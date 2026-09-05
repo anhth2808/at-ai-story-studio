@@ -665,3 +665,27 @@ per-character profile dependency model.
   separate product change defines credentials, consent, retries, and platform
   state handling.
 
+
+# Perceptual quality pipeline rules
+
+- QUALITY mode requires exact approved Character-stage and Location references.
+  Never substitute by display name, similar stage, another Character, or stale
+  Asset.
+- Appearance stages contain durable clothing, accessory, and equipment changes
+  only. Keep emotion, pose, action, weather, lighting, and temporary damage in
+  Shot or Scene state.
+- Diffusion prompts contain visible facts only. Remove goals, knowledge,
+  secrets, abstract roles, raw state objects, and off-screen identity text.
+- Persist ordered reference bindings with stable entity IDs, Asset IDs, hashes,
+  and revisions. Safety rewrites must preserve the exact placeholder multiset.
+- Continue from a prior final frame only when identity, face basis, Location,
+  camera axis, and physical state pass the versioned strict continuation rule.
+- Automatic critics never equal human approval. `UNAVAILABLE`, malformed
+  output, rejection, and exhausted retries must not become quality pass.
+- AUTO production still runs required image and video critics. Human review
+  gates vary by profile; automatic quality gates do not.
+- Video backend differences remain behind backend adapters. Application-owned
+  descriptors contain no raw user graphs, secrets, or machine-specific paths.
+- `references/story-claw` is research-only. Reimplement learned behavior in
+  product-owned code and never modify or depend on the reference path at
+  runtime.

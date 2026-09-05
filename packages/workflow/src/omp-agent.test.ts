@@ -67,6 +67,25 @@ describe('OmpAgent', () => {
     const agent = new OmpAgent(runner as unknown as ProcessRunner);
     await expect(agent.generate(request)).rejects.toMatchObject({ code: 'PROTOCOL_ERROR' });
   });
+  it('forwards bounded image evidence paths in the host protocol request', async () => {
+    let payload: Record<string, unknown> | undefined;
+    const runner = {
+      run: async (options: { input?: string }) => {
+        payload = JSON.parse(options.input!.trim()) as Record<string, unknown>;
+        const correlationId = payload.correlationId;
+        return {
+          stdout: JSON.stringify({ ...result, correlationId }),
+          stderr: '',
+          exitCode: 0,
+          signal: null,
+          durationMs: 1,
+        };
+      },
+    };
+    const agent = new OmpAgent(runner as unknown as ProcessRunner);
+    await agent.generate({ ...request, imagePaths: ['projects/p/candidate.png'] });
+    expect(payload?.imagePaths).toEqual(['projects/p/candidate.png']);
+  });
 
   it('surfaces typed host errors', async () => {
     const runner = {

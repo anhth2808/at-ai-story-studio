@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { shotPlanCandidateSchema } from './shot.js';
 
 export const storyStableIdSchema = z
   .string()
@@ -514,6 +515,9 @@ export const generationOperationSchema = z.enum([
   'LOCATION_VISUAL_PROFILE',
   'OBJECT_VISUAL_PROFILE',
   'VISUAL_PROMPT_REFINEMENT',
+  'PLAN_SHOTS',
+  'IMAGE_CRITIC',
+  'VIDEO_CRITIC',
 ]);
 export type GenerationOperation = z.infer<typeof generationOperationSchema>;
 export const storyGenerationRequestSchema = z
@@ -600,6 +604,7 @@ export function parseStoryOperationOutput(operation: GenerationOperation, text: 
   if (operation === 'SCENE_PLANNING') return scenePlanningEnvelopeSchema.parse(value);
   if (operation === 'SCENE_REGENERATION') return sceneRegenerationEnvelopeSchema.parse(value);
   if (operation === 'SCENE_PROMPT') return scenePromptEnvelopeSchema.parse(value);
+  if (operation === 'PLAN_SHOTS') return shotPlanCandidateSchema.parse(value);
   return z.string().min(1).parse(value);
 }
 export const ompProtocolVersionSchema = z.literal(1);
@@ -615,6 +620,10 @@ export const ompProtocolRequestSchema = z
     inputFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     systemPrompt: z.string().min(1).max(200_000),
     userPrompt: z.string().min(1).max(2_000_000),
+    imagePaths: z
+      .array(z.string().regex(/^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/))
+      .max(20)
+      .optional(),
     deadlineMs: z.number().int().min(1_000).max(600_000),
   })
   .strict();

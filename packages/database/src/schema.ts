@@ -1111,6 +1111,163 @@ export const sceneCharacters = sqliteTable(
     character: index('scene_characters_character_idx').on(table.characterId, table.sceneRevisionId),
   }),
 );
+
+export const shotPlans = sqliteTable(
+  'shot_plans',
+  {
+    id: text('id').primaryKey(),
+    stableId: text('stable_id').notNull(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    sceneStableId: text('scene_stable_id').notNull(),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull(),
+    status: text('status').notNull().default('CURRENT'),
+    templateVersion: text('template_version').notNull(),
+    schemaVersion: text('schema_version').notNull(),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    generationId: text('generation_id').references(() => storyGenerationRecords.id, {
+      onDelete: 'set null',
+    }),
+    issues: text('issues').notNull().default('[]'),
+    metadata: text('metadata').notNull().default('{}'),
+    reviewStatus: text('review_status').notNull().default('PENDING'),
+    reviewNotes: text('review_notes').notNull().default(''),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    rowVersion: integer('row_version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('shot_plans_revision_idx').on(table.sceneRevisionId, table.revision),
+    current: uniqueIndex('shot_plans_current_idx')
+      .on(table.sceneRevisionId)
+      .where(sql`${table.isCurrent} = 1`),
+    projectScene: index('shot_plans_project_scene_idx').on(
+      table.projectId,
+      table.sceneStableId,
+      table.revision,
+    ),
+  }),
+);
+
+export const narrativeBeats = sqliteTable(
+  'narrative_beats',
+  {
+    id: text('id').primaryKey(),
+    stableId: text('stable_id').notNull(),
+    shotPlanId: text('shot_plan_id')
+      .notNull()
+      .references(() => shotPlans.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    sourceStartOffset: integer('source_start_offset').notNull(),
+    sourceEndOffset: integer('source_end_offset').notNull(),
+    kind: text('kind').notNull(),
+    meaning: text('meaning').notNull(),
+    importance: text('importance').notNull(),
+    turningPoint: integer('turning_point', { mode: 'boolean' }).notNull().default(false),
+    timingGroupKey: text('timing_group_key').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => ({
+    ordinal: uniqueIndex('narrative_beats_plan_ordinal_idx').on(table.shotPlanId, table.ordinal),
+    stable: uniqueIndex('narrative_beats_plan_stable_idx').on(table.shotPlanId, table.stableId),
+    plan: index('narrative_beats_plan_idx').on(table.shotPlanId, table.ordinal),
+  }),
+);
+
+export const shots = sqliteTable(
+  'shots',
+  {
+    id: text('id').primaryKey(),
+    stableId: text('stable_id').notNull(),
+    shotPlanId: text('shot_plan_id')
+      .notNull()
+      .references(() => shotPlans.id, { onDelete: 'cascade' }),
+    narrativeBeatId: text('narrative_beat_id')
+      .notNull()
+      .references(() => narrativeBeats.id, { onDelete: 'cascade' }),
+    revision: integer('revision').notNull().default(1),
+    ordinal: integer('ordinal').notNull(),
+    sourceStartOffset: integer('source_start_offset').notNull(),
+    sourceEndOffset: integer('source_end_offset').notNull(),
+    primaryBeat: text('primary_beat').notNull(),
+    eventKinds: text('event_kinds').notNull(),
+    eventCount: integer('event_count').notNull(),
+    importance: text('importance').notNull(),
+    isHero: integer('is_hero', { mode: 'boolean' }).notNull().default(false),
+    identitySensitive: integer('identity_sensitive', { mode: 'boolean' }).notNull().default(false),
+    dialogueMode: text('dialogue_mode').notNull(),
+    dialogueText: text('dialogue_text').notNull().default(''),
+    speakerCharacterId: text('speaker_character_id'),
+    visualCarrier: text('visual_carrier').notNull().default(''),
+    offscreenRationale: text('offscreen_rationale').notNull().default(''),
+    visibleCharacterIds: text('visible_character_ids').notNull().default('[]'),
+    offscreenCharacterIds: text('offscreen_character_ids').notNull().default('[]'),
+    staticIntent: text('static_intent').notNull(),
+    dynamicIntent: text('dynamic_intent').notNull(),
+    initialState: text('initial_state').notNull(),
+    finalState: text('final_state').notNull(),
+    continuation: text('continuation').notNull(),
+    plannedDurationMs: integer('planned_duration_ms').notNull(),
+    variationIntent: text('variation_intent').notNull().default('NORMAL'),
+    validationIssues: text('validation_issues').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    ordinal: uniqueIndex('shots_plan_ordinal_idx').on(table.shotPlanId, table.ordinal),
+    revision: uniqueIndex('shots_plan_stable_revision_idx').on(
+      table.shotPlanId,
+      table.stableId,
+      table.revision,
+    ),
+    plan: index('shots_plan_idx').on(table.shotPlanId, table.ordinal),
+    beat: index('shots_beat_idx').on(table.narrativeBeatId, table.ordinal),
+  }),
+);
+
+export const shotTimingAllocations = sqliteTable(
+  'shot_timing_allocations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    sceneTimingRevisionId: text('scene_timing_revision_id')
+      .notNull()
+      .references(() => sceneTimingRevisions.id, { onDelete: 'cascade' }),
+    shotPlanId: text('shot_plan_id')
+      .notNull()
+      .references(() => shotPlans.id, { onDelete: 'cascade' }),
+    shotId: text('shot_id')
+      .notNull()
+      .references(() => shots.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    targetDurationMs: integer('target_duration_ms').notNull(),
+    actualDurationMs: integer('actual_duration_ms').notNull(),
+    frameCount: integer('frame_count').notNull(),
+    fps: integer('fps').notNull(),
+    residualMs: integer('residual_ms').notNull(),
+    backend: text('backend').notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    shot: uniqueIndex('shot_timing_allocations_shot_idx').on(
+      table.sceneTimingRevisionId,
+      table.shotId,
+    ),
+    scene: index('shot_timing_allocations_scene_idx').on(
+      table.sceneTimingRevisionId,
+      table.ordinal,
+    ),
+  }),
+);
 export const characterVisualProfiles = sqliteTable(
   'character_visual_profiles',
   {
@@ -1229,6 +1386,95 @@ export const visualObjectProfiles = sqliteTable(
   }),
 );
 
+export const characterAppearanceStages = sqliteTable(
+  'character_appearance_stages',
+  {
+    id: text('id').primaryKey(),
+    stableId: text('stable_id').notNull(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    characterId: text('character_id').notNull(),
+    characterProfileId: text('character_profile_id')
+      .notNull()
+      .references(() => characterVisualProfiles.id, { onDelete: 'cascade' }),
+    profileRevision: integer('profile_revision').notNull(),
+    revision: integer('revision').notNull(),
+    name: text('name').notNull(),
+    payload: text('payload').notNull(),
+    provenance: text('provenance').notNull(),
+    reviewStatus: text('review_status').notNull().default('DRAFT'),
+    referenceAssetId: text('reference_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    referenceSha256: text('reference_sha256'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    rowVersion: integer('row_version').notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    revision: uniqueIndex('character_appearance_stages_revision_idx').on(
+      table.projectId,
+      table.stableId,
+      table.revision,
+    ),
+    current: uniqueIndex('character_appearance_stages_current_idx')
+      .on(table.projectId, table.stableId)
+      .where(sql`${table.isCurrent} = 1`),
+    character: index('character_appearance_stages_character_idx').on(
+      table.projectId,
+      table.characterId,
+      table.reviewStatus,
+    ),
+  }),
+);
+
+export const visualReferenceGenerations = sqliteTable(
+  'visual_reference_generations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    targetKind: text('target_kind').notNull(),
+    targetEntityId: text('target_entity_id').notNull(),
+    targetRevision: integer('target_revision').notNull(),
+    sourcePrototypeAssetId: text('source_prototype_asset_id').references(() => assets.id, {
+      onDelete: 'set null',
+    }),
+    sourcePrototypeSha256: text('source_prototype_sha256'),
+    prompt: text('prompt').notNull(),
+    workflowTemplate: text('workflow_template').notNull(),
+    provider: text('provider').notNull(),
+    settings: text('settings').notNull().default('{}'),
+    seed: integer('seed').notNull(),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    status: text('status').notNull().default('PENDING'),
+    approval: text('approval').notNull().default('CANDIDATE'),
+    assetId: text('asset_id').references(() => assets.id, { onDelete: 'set null' }),
+    assetSha256: text('asset_sha256'),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    attempt: integer('attempt').notNull().default(0),
+    error: text('error'),
+    isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    current: uniqueIndex('visual_reference_generations_current_idx')
+      .on(table.projectId, table.targetKind, table.targetEntityId, table.targetRevision)
+      .where(sql`${table.isCurrent} = 1`),
+    target: index('visual_reference_generations_target_idx').on(
+      table.projectId,
+      table.targetKind,
+      table.targetEntityId,
+      table.createdAt,
+    ),
+  }),
+);
+
 export const sceneObjectResolutions = sqliteTable(
   'scene_object_resolutions',
   {
@@ -1276,6 +1522,8 @@ export const visualPromptPackages = sqliteTable(
     sceneRevisionId: text('scene_revision_id')
       .notNull()
       .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    shotPlanId: text('shot_plan_id').references(() => shotPlans.id, { onDelete: 'set null' }),
+    shotStableId: text('shot_stable_id'),
     revision: integer('revision').notNull(),
     status: text('status').notNull().default('CURRENT'),
     payload: text('payload').notNull(),
@@ -1291,13 +1539,18 @@ export const visualPromptPackages = sqliteTable(
     ...timestamps,
   },
   (table) => ({
-    revision: uniqueIndex('visual_prompt_packages_revision_idx').on(
-      table.sceneRevisionId,
-      table.revision,
-    ),
-    current: uniqueIndex('visual_prompt_packages_current_idx')
+    legacyRevision: uniqueIndex('visual_prompt_packages_legacy_revision_idx')
+      .on(table.sceneRevisionId, table.revision)
+      .where(sql`${table.shotStableId} IS NULL`),
+    shotRevision: uniqueIndex('visual_prompt_packages_shot_revision_idx')
+      .on(table.sceneRevisionId, table.shotStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NOT NULL`),
+    legacyCurrent: uniqueIndex('visual_prompt_packages_legacy_current_idx')
       .on(table.sceneRevisionId)
-      .where(sql`${table.isCurrent} = 1`),
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NULL`),
+    shotCurrent: uniqueIndex('visual_prompt_packages_shot_current_idx')
+      .on(table.sceneRevisionId, table.shotStableId)
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NOT NULL`),
     projectStatus: index('visual_prompt_packages_project_status_idx').on(
       table.projectId,
       table.status,
@@ -1379,6 +1632,8 @@ export const sceneImageGenerations = sqliteTable(
       () => visualPromptPackages.id,
       { onDelete: 'set null' },
     ),
+    shotPlanId: text('shot_plan_id').references(() => shotPlans.id, { onDelete: 'set null' }),
+    shotStableId: text('shot_stable_id'),
     revision: integer('revision').notNull(),
     source: text('source').notNull().default('GENERATED'),
     provider: text('provider'),
@@ -1405,6 +1660,8 @@ export const sceneImageGenerations = sqliteTable(
     candidateIndex: integer('candidate_index'),
     reviewScores: text('review_scores').notNull().default('{}'),
     reviewIssues: text('review_issues').notNull().default('[]'),
+    automaticQualityStatus: text('automatic_quality_status').notNull().default('NOT_RUN'),
+    criticEvaluationId: text('critic_evaluation_id'),
     attempt: integer('attempt').notNull().default(0),
     durationMs: integer('duration_ms'),
     errorCode: text('error_code'),
@@ -1418,14 +1675,18 @@ export const sceneImageGenerations = sqliteTable(
     updatedAt: text('updated_at').notNull(),
   },
   (table) => ({
-    revision: uniqueIndex('scene_image_generations_revision_idx').on(
-      table.projectId,
-      table.sceneStableId,
-      table.revision,
-    ),
-    current: uniqueIndex('scene_image_generations_current_idx')
+    legacyRevision: uniqueIndex('scene_image_generations_legacy_revision_idx')
+      .on(table.projectId, table.sceneStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NULL`),
+    shotRevision: uniqueIndex('scene_image_generations_shot_revision_idx')
+      .on(table.projectId, table.shotStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NOT NULL`),
+    legacyCurrent: uniqueIndex('scene_image_generations_legacy_current_idx')
       .on(table.projectId, table.sceneStableId)
-      .where(sql`${table.isCurrent} = 1`),
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NULL`),
+    shotCurrent: uniqueIndex('scene_image_generations_shot_current_idx')
+      .on(table.projectId, table.shotStableId)
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NOT NULL`),
     scene: index('scene_image_generations_scene_idx').on(
       table.projectId,
       table.sceneStableId,
@@ -1455,6 +1716,8 @@ export const sceneImageCandidateSets = sqliteTable(
       () => visualPromptPackages.id,
       { onDelete: 'set null' },
     ),
+    shotPlanId: text('shot_plan_id').references(() => shotPlans.id, { onDelete: 'set null' }),
+    shotStableId: text('shot_stable_id'),
     mode: text('mode').notNull().default('TEXT_ONLY'),
     workflowTemplate: text('workflow_template'),
     packageFingerprint: text('package_fingerprint'),
@@ -1463,6 +1726,7 @@ export const sceneImageCandidateSets = sqliteTable(
     sourceGenerationId: text('source_generation_id'),
     generationInstructions: text('generation_instructions'),
     metadata: text('metadata').notNull().default('{}'),
+    ranking: text('ranking'),
     ...timestamps,
   },
   (table) => ({
@@ -1475,6 +1739,61 @@ export const sceneImageCandidateSets = sqliteTable(
   }),
 );
 
+export const imageCriticEvaluations = sqliteTable(
+  'image_critic_evaluations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    generationId: text('generation_id')
+      .notNull()
+      .references(() => sceneImageGenerations.id, { onDelete: 'cascade' }),
+    candidateSetId: text('candidate_set_id').references(() => sceneImageCandidateSets.id, {
+      onDelete: 'set null',
+    }),
+    shotStableId: text('shot_stable_id'),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    assetId: text('asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    assetSha256: text('asset_sha256').notNull(),
+    packageFingerprint: text('package_fingerprint').notNull(),
+    referenceFingerprint: text('reference_fingerprint').notNull(),
+    criticProvider: text('critic_provider').notNull(),
+    criticModel: text('critic_model').notNull(),
+    criticVersion: text('critic_version').notNull(),
+    status: text('status').notNull(),
+    scores: text('scores').notNull().default('{}'),
+    issues: text('issues').notNull().default('[]'),
+    hardFailure: integer('hard_failure', { mode: 'boolean' }).notNull().default(false),
+    confidence: real('confidence').notNull(),
+    explanation: text('explanation').notNull().default(''),
+    guidance: text('guidance').notNull().default(''),
+    evidence: text('evidence').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    attempt: integer('attempt').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+    completedAt: text('completed_at'),
+  },
+  (table) => ({
+    input: uniqueIndex('image_critic_evaluations_input_idx').on(
+      table.generationId,
+      table.inputFingerprint,
+    ),
+    status: index('image_critic_evaluations_status_idx').on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+    ),
+  }),
+);
+
 export const videoGenerationSettings = sqliteTable(
   'video_generation_settings',
   {
@@ -1484,10 +1803,17 @@ export const videoGenerationSettings = sqliteTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     provider: text('provider').notNull().default('COMFYUI'),
     baseUrl: text('base_url').notNull().default('http://127.0.0.1:8188'),
+    backend: text('backend').notNull().default('WAN22_TI2V_5B'),
     workflowTemplate: text('workflow_template').notNull().default('image-to-video-v1'),
     diffusionModel: text('diffusion_model').notNull().default(''),
     textEncoder: text('text_encoder').notNull().default(''),
     vaeName: text('vae_name').notNull().default(''),
+    ltxCheckpoint: text('ltx_checkpoint').notNull().default('ltx-2-19b-distilled-fp8.safetensors'),
+    ltxTextEncoder: text('ltx_text_encoder')
+      .notNull()
+      .default('gemma_3_12B_it_fp4_mixed.safetensors'),
+    ltxVaeName: text('ltx_vae_name').notNull().default(''),
+    ltxFps: integer('ltx_fps').notNull().default(25),
     sampler: text('sampler').notNull().default('uni_pc'),
     scheduler: text('scheduler').notNull().default('simple'),
     steps: integer('steps').notNull().default(20),
@@ -1542,6 +1868,8 @@ export const aiMotionPlanRevisions = sqliteTable(
     sceneRevisionId: text('scene_revision_id')
       .notNull()
       .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    shotPlanId: text('shot_plan_id').references(() => shotPlans.id, { onDelete: 'set null' }),
+    shotStableId: text('shot_stable_id'),
     revision: integer('revision').notNull(),
     characterAction: text('character_action').notNull().default(''),
     environmentMotion: text('environment_motion').notNull().default(''),
@@ -1557,13 +1885,18 @@ export const aiMotionPlanRevisions = sqliteTable(
     updatedAt: text('updated_at').notNull(),
   },
   (table) => ({
-    revision: uniqueIndex('ai_motion_plan_revisions_revision_idx').on(
-      table.sceneRevisionId,
-      table.revision,
-    ),
-    current: uniqueIndex('ai_motion_plan_revisions_current_idx')
+    legacyRevision: uniqueIndex('ai_motion_plan_revisions_legacy_revision_idx')
+      .on(table.sceneRevisionId, table.revision)
+      .where(sql`${table.shotStableId} IS NULL`),
+    shotRevision: uniqueIndex('ai_motion_plan_revisions_shot_revision_idx')
+      .on(table.sceneRevisionId, table.shotStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NOT NULL`),
+    legacyCurrent: uniqueIndex('ai_motion_plan_revisions_legacy_current_idx')
       .on(table.sceneRevisionId)
-      .where(sql`${table.isCurrent} = 1`),
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NULL`),
+    shotCurrent: uniqueIndex('ai_motion_plan_revisions_shot_current_idx')
+      .on(table.sceneRevisionId, table.shotStableId)
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NOT NULL`),
     scene: index('ai_motion_plan_revisions_scene_idx').on(
       table.projectId,
       table.sceneStableId,
@@ -1590,10 +1923,16 @@ export const sceneVideoGenerations = sqliteTable(
       () => aiMotionPlanRevisions.id,
       { onDelete: 'set null' },
     ),
+    shotPlanId: text('shot_plan_id').references(() => shotPlans.id, { onDelete: 'set null' }),
+    shotStableId: text('shot_stable_id'),
     revision: integer('revision').notNull(),
     provider: text('provider'),
     status: text('status').notNull().default('PENDING'),
     reviewStatus: text('review_status').notNull().default('UNREVIEWED'),
+    backend: text('backend').notNull().default('WAN22_TI2V_5B'),
+    automaticQualityStatus: text('automatic_quality_status').notNull().default('NOT_RUN'),
+    criticEvaluationId: text('critic_evaluation_id'),
+    continuationSource: text('continuation_source'),
     isCurrent: integer('is_current', { mode: 'boolean' }).notNull().default(false),
     requestedSeed: integer('requested_seed'),
     actualSeed: integer('actual_seed'),
@@ -1633,14 +1972,18 @@ export const sceneVideoGenerations = sqliteTable(
     updatedAt: text('updated_at').notNull(),
   },
   (table) => ({
-    revision: uniqueIndex('scene_video_generations_revision_idx').on(
-      table.projectId,
-      table.sceneStableId,
-      table.revision,
-    ),
-    current: uniqueIndex('scene_video_generations_current_idx')
+    legacyRevision: uniqueIndex('scene_video_generations_legacy_revision_idx')
+      .on(table.projectId, table.sceneStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NULL`),
+    shotRevision: uniqueIndex('scene_video_generations_shot_revision_idx')
+      .on(table.projectId, table.shotStableId, table.revision)
+      .where(sql`${table.shotStableId} IS NOT NULL`),
+    legacyCurrent: uniqueIndex('scene_video_generations_legacy_current_idx')
       .on(table.projectId, table.sceneStableId)
-      .where(sql`${table.isCurrent} = 1`),
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NULL`),
+    shotCurrent: uniqueIndex('scene_video_generations_shot_current_idx')
+      .on(table.projectId, table.shotStableId)
+      .where(sql`${table.isCurrent} = 1 AND ${table.shotStableId} IS NOT NULL`),
     scene: index('scene_video_generations_scene_idx').on(
       table.projectId,
       table.sceneStableId,
@@ -1654,6 +1997,59 @@ export const sceneVideoGenerations = sqliteTable(
     ),
   }),
 );
+export const videoCriticEvaluations = sqliteTable(
+  'video_critic_evaluations',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    generationId: text('generation_id')
+      .notNull()
+      .references(() => sceneVideoGenerations.id, { onDelete: 'cascade' }),
+    shotStableId: text('shot_stable_id'),
+    sceneRevisionId: text('scene_revision_id')
+      .notNull()
+      .references(() => sceneRevisions.id, { onDelete: 'cascade' }),
+    clipAssetId: text('clip_asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    clipSha256: text('clip_sha256').notNull(),
+    keyframeAssetId: text('keyframe_asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    keyframeSha256: text('keyframe_sha256').notNull(),
+    shotFingerprint: text('shot_fingerprint').notNull(),
+    criticProvider: text('critic_provider').notNull(),
+    criticModel: text('critic_model').notNull(),
+    criticVersion: text('critic_version').notNull(),
+    status: text('status').notNull(),
+    issues: text('issues').notNull().default('[]'),
+    confidence: real('confidence').notNull(),
+    explanation: text('explanation').notNull().default(''),
+    guidance: text('guidance').notNull().default(''),
+    evidence: text('evidence').notNull().default('[]'),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    workflowStepId: text('workflow_step_id').references(() => workflowSteps.id, {
+      onDelete: 'set null',
+    }),
+    attempt: integer('attempt').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+    completedAt: text('completed_at'),
+  },
+  (table) => ({
+    input: uniqueIndex('video_critic_evaluations_input_idx').on(
+      table.generationId,
+      table.inputFingerprint,
+    ),
+    status: index('video_critic_evaluations_status_idx').on(
+      table.projectId,
+      table.status,
+      table.createdAt,
+    ),
+  }),
+);
+
 export const productionProfiles = sqliteTable(
   'production_profiles',
   {

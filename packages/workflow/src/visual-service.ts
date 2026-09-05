@@ -41,6 +41,7 @@ import {
   missingVisualPromptConstraints,
   normalizeVisualKey,
   stableSerialize,
+  validateReferencePlaceholderRewrite,
 } from './visual-prompts.js';
 import {
   renderVisualProfilePrompt,
@@ -765,6 +766,19 @@ export class VisualConsistencyService {
         throw new AppError(
           'STRUCTURED_OUTPUT_ERROR',
           `Refined prompt omits canonical constraints: ${missingConstraints.slice(0, 8).join(', ')}`,
+          422,
+        );
+      if (
+        current.payload.referenceBindings?.length &&
+        !validateReferencePlaceholderRewrite(
+          current.payload.fullPrompt,
+          output.fullPrompt,
+          current.payload.referenceBindings,
+        )
+      )
+        throw new AppError(
+          'STRUCTURED_OUTPUT_ERROR',
+          'Refined prompt changed immutable reference placeholders',
           422,
         );
       const refined = this.packages.saveRefinement({

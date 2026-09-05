@@ -72,3 +72,11 @@ usage metadata. The Node boundary validates every candidate before persistence.
 No SDK types, credentials, arbitrary tools, or filesystem paths cross into the
 workflow layer. Future image providers consume persisted packages; this layer
 never calls one.
+
+## Reference-first quality
+
+Character prototypes and appearance stages are revisioned candidates, while
+Location references use hard geometry only. Generation is blocked on missing
+exact approved references; no display-name or similar-stage substitution is
+allowed. Automatic critic results remain separate from human approval and do
+not mutate canonical profiles or packages.

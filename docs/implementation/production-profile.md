@@ -55,3 +55,10 @@ cap. Technical retry is bounded and never retries configuration, resource, or
 review gates as a hot loop. GPU-heavy providers remain behind their existing
 worker/provider boundary and can be disabled or deferred without changing the
 run contract.
+
+## Quality modes
+
+Candidate count is bounded by profile policy and Shot importance. All profiles
+run automatic quality checks; `MANUAL_REVIEW` pauses for human approval,
+`BALANCED` escalates uncertainty, and `AUTO` does not disable critics.
+Unavailable or malformed critic output never becomes a quality pass.

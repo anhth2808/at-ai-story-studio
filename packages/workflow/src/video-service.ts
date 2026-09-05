@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import {
   AppError,
@@ -24,9 +25,11 @@ import { z } from 'zod';
 import {
   AiMotionPlanRepository,
   AssetRepository,
+  MediaCriticEvaluationRepository,
   SceneMotionSourceRepository,
   SceneRepository,
   SceneVideoGenerationRepository,
+  ShotPlanRepository,
   VideoGenerationSettingsRepository,
   WorkflowRepository,
   videoSettingsFingerprint,
@@ -46,11 +49,14 @@ import {
   VideoProviderError,
   type VideoGenerationProvider,
 } from './comfyui-video.js';
+import { resolveVideoBackend } from './video-backends.js';
 import {
   aiMotionPlanFingerprint,
   compileMotionPrompt,
   createDefaultAiMotionPlan,
 } from './ai-motion-plan.js';
+import { VideoCritic } from './media-critics.js';
+import type { AiAgent } from './omp-agent.js';
 import type { StudioContext } from './index.js';
 
 const scheduledVideoRequestSchema = z
@@ -151,7 +157,7 @@ export function aiVideoGenerationFingerprint(input: {
   return createHash('sha256')
     .update(
       JSON.stringify({
-        version: 'image-to-video-v1-mapping-1',
+        version: resolveVideoBackend(input.request.providerSettings.backend).mappingVersion,
         operation: 'GENERATE_AI_SCENE_VIDEO',
         projectId: input.projectId,
         sceneRevisionId: input.sceneRevisionId,
@@ -168,7 +174,11 @@ export function aiVideoGenerationFingerprint(input: {
           frameCount: input.request.frameCount,
           fps: input.request.fps,
           seed: input.request.seed,
-          model: input.request.providerSettings.diffusionModel,
+          backend: input.request.providerSettings.backend,
+          model:
+            input.request.providerSettings.backend === 'LTX2_19B_DISTILLED'
+              ? input.request.providerSettings.ltxCheckpoint
+              : input.request.providerSettings.diffusionModel,
           provider: input.request.providerSettings.provider,
           workflowTemplate: input.request.providerSettings.workflowTemplate,
         },
@@ -197,7 +207,6 @@ function videoFailure(
     retryable: false,
   };
 }
-
 export class SceneVideoService {
   readonly settings: VideoGenerationSettingsRepository;
   readonly generations: SceneVideoGenerationRepository;
@@ -205,12 +214,15 @@ export class SceneVideoService {
   readonly motionSources: SceneMotionSourceRepository;
   private readonly workflow: WorkflowRepository;
   private readonly scenes: SceneRepository;
-
+  private readonly assets: AssetRepository;
+  private readonly shotPlans: ShotPlanRepository;
+  private readonly critic: VideoCritic | null;
   constructor(
     private readonly context: StudioContext,
     private readonly provider: VideoGenerationProvider = new ComfyUiVideoProvider(
       context.workspace.staging,
     ),
+    criticAgent?: AiAgent,
   ) {
     this.settings = new VideoGenerationSettingsRepository(context.database);
     this.generations = new SceneVideoGenerationRepository(context.database);
@@ -218,6 +230,11 @@ export class SceneVideoService {
     this.motionSources = new SceneMotionSourceRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
     this.scenes = new SceneRepository(context.database);
+    this.assets = new AssetRepository(context.database);
+    this.shotPlans = new ShotPlanRepository(context.database);
+    this.critic = criticAgent
+      ? new VideoCritic(criticAgent, new MediaCriticEvaluationRepository(context.database))
+      : null;
   }
 
   getSettings(projectId: Id): VideoGenerationSettingsDto {
@@ -498,6 +515,9 @@ export class SceneVideoService {
         409,
       );
     const preset = VIDEO_PRESETS[settings.preset];
+    const backend = resolveVideoBackend(settings.backend);
+    const fps = settings.backend === 'LTX2_19B_DISTILLED' ? settings.ltxFps : VIDEO_OUTPUT_FPS;
+    const frames = backend.framePlan((preset.frames * 1_000) / VIDEO_OUTPUT_FPS, fps);
     const seed = seedOverride ?? resolveVideoSeed(settings.seedMode, settings.fixedSeed);
     const motionPrompt = instructions
       ? `${plan.motionPrompt} Additional direction: ${instructions.trim()}`
@@ -515,16 +535,24 @@ export class SceneVideoService {
       negativePrompt: plan.negativePrompt,
       width: preset.width,
       height: preset.height,
-      frameCount: preset.frames,
-      fps: VIDEO_OUTPUT_FPS,
+      frameCount: frames.frameCount,
+      fps,
       seed,
       providerSettings: {
         provider: settings.provider,
         baseUrl: settings.baseUrl,
-        workflowTemplate: settings.workflowTemplate,
+        backend: settings.backend,
+        workflowTemplate:
+          settings.backend === 'LTX2_19B_DISTILLED'
+            ? 'ltx2-image-to-video-v1'
+            : 'image-to-video-v1',
         diffusionModel: settings.diffusionModel,
         textEncoder: settings.textEncoder,
         vaeName: settings.vaeName,
+        ltxCheckpoint: settings.ltxCheckpoint,
+        ltxTextEncoder: settings.ltxTextEncoder,
+        ltxVaeName: settings.ltxVaeName,
+        ltxFps: settings.ltxFps,
         sampler: settings.sampler,
         scheduler: settings.scheduler,
         steps: settings.steps,
@@ -545,8 +573,6 @@ export class SceneVideoService {
     });
     const execution =
       executionId ?? this.workflow.createExecution(projectId, 'GENERATE_AI_SCENE_VIDEO');
-    // Identical deterministic inputs must reuse the existing raw clip instead
-    // of spending GPU time again.
     const existing = this.generations.findCompletedByFingerprint(
       projectId,
       scene.stableId,
@@ -573,7 +599,7 @@ export class SceneVideoService {
       frameCount: request.frameCount,
       fps: request.fps,
       providerJobId,
-      workflowTemplate: settings.workflowTemplate,
+      workflowTemplate: request.providerSettings.workflowTemplate,
       modelSettings: request.providerSettings,
       requestSnapshot: {
         request,
@@ -586,7 +612,17 @@ export class SceneVideoService {
       sourceImageAssetId: image.id,
       sourceImageSha256: image.sha256,
       generationInstructions: instructions || null,
-      metadata: { request, motionPlanFingerprint: plan.inputFingerprint, settingsFingerprint },
+      metadata: {
+        request,
+        motionPlanFingerprint: plan.inputFingerprint,
+        settingsFingerprint,
+        backend: settings.backend,
+        mappingVersion: backend.mappingVersion,
+        requestedDurationMs: frames.requestedDurationMs,
+        actualDurationMs: frames.actualDurationMs,
+        residualMs: frames.residualMs,
+        fallbackUsed: false,
+      },
     });
     const stepId = this.workflow.createStep(
       execution,
@@ -706,6 +742,7 @@ export class SceneVideoService {
       } finally {
         await rm(output.stagingPath, { force: true });
       }
+      await this.critiqueVideo(payload.projectId, scene, generation, request, destination, signal);
       progress(1, 'Scene AI video generation completed');
     } catch (error) {
       const failure = videoFailure(error, signal);
@@ -764,6 +801,117 @@ export class SceneVideoService {
       throw new AppError('DATA_CORRUPTION', 'Scene video step payload is invalid', 500);
     }
   }
+  private async critiqueVideo(
+    projectId: Id,
+    scene: SceneDto,
+    generation: SceneVideoGenerationDto,
+    request: VideoGenerationRequest,
+    clipPath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.critic || !generation.assetId) return;
+    const plan = this.shotPlans.getCurrent(projectId, scene.id);
+    const shot =
+      plan?.candidate.shots.find((candidate) => candidate.hero) ?? plan?.candidate.shots[0];
+    const source = this.assets.get(request.sourceImageAssetId);
+    if (!shot || !source || source.status !== 'READY') return;
+    const resolvedShot = shot;
+    const resolvedSource = source;
+    const clipDurationMs =
+      generation.clipDurationMs ??
+      Math.round(((generation.frameCount ?? 1) / (generation.fps ?? 25)) * 1_000);
+    const sampleSpecs = [
+      { name: 'first', position: 0, role: 'SAMPLE' as const },
+      { name: 'middle', position: 0.5, role: 'SAMPLE' as const },
+      { name: 'last', position: 1, role: 'KEYFRAME' as const },
+    ];
+    const samplePaths = sampleSpecs.map((sample) =>
+      join(this.context.workspace.staging, `video-critic-${generation.id}-${sample.name}.png`),
+    );
+    const sampleDestinations = sampleSpecs.map((sample) =>
+      safeWorkspacePath(
+        this.context.workspace.root,
+        `projects/${projectId}/images/critics/video/${generation.id}-${sample.name}.png`,
+      ),
+    );
+    try {
+      await Promise.all(
+        sampleSpecs.map((sample, index) =>
+          sample.position === 1
+            ? this.context.media.extractFinalVideoFrame(clipPath, samplePaths[index]!, signal)
+            : this.context.media.extractVideoFrame(
+                clipPath,
+                samplePaths[index]!,
+                clipDurationMs * sample.position,
+                signal,
+              ),
+        ),
+      );
+      await Promise.all(
+        samplePaths.map((path, index) => promoteFile(path, sampleDestinations[index]!)),
+      );
+      const samples = await Promise.all(sampleDestinations.map((path) => sha256File(path)));
+      const sampleAssetIds = samples.map(() => randomUUID());
+      for (const [index, sample] of samples.entries()) {
+        this.assets.registerReference({
+          id: sampleAssetIds[index]!,
+          projectId,
+          type: 'CRITIC_SAMPLE_IMAGE',
+          role: `video-critic:${generation.id}:${sampleSpecs[index]!.name}`,
+          path: relativeAssetPath(this.context.workspace.root, sampleDestinations[index]!),
+          mediaType: 'image/png',
+          bytes: sample.bytes,
+          sha256: sample.hash,
+          sourceEntityId: generation.id,
+          inputFingerprint: generation.inputFingerprint,
+          metadata: { generationId: generation.id, samplePosition: sampleSpecs[index]!.position },
+        });
+      }
+      const clip = this.assets.get(generation.assetId);
+      if (!clip || clip.status !== 'READY') return;
+      const evaluation = await this.critic.evaluate(
+        {
+          projectId,
+          generationId: generation.id,
+          shot: resolvedShot,
+          sceneRevisionId: scene.id,
+          clipAssetId: clip.id,
+          clipSha256: clip.sha256,
+          keyframeAssetId: sampleAssetIds[2]!,
+          keyframeSha256: samples[2]!.hash,
+          evidence: [
+            { assetId: clip.id, sha256: clip.sha256, role: 'CANDIDATE', samplePosition: null },
+            {
+              assetId: resolvedSource.id,
+              sha256: resolvedSource.sha256,
+              role: 'REFERENCE',
+              samplePosition: null,
+            },
+            ...sampleAssetIds.map((assetId, index) => ({
+              assetId,
+              sha256: samples[index]!.hash,
+              role: sampleSpecs[index]!.role,
+              samplePosition: sampleSpecs[index]!.position,
+            })),
+          ],
+          imagePaths: [
+            resolvedSource.path,
+            ...sampleDestinations.map((path) =>
+              relativeAssetPath(this.context.workspace.root, path),
+            ),
+          ],
+        },
+        signal,
+      );
+      this.context.database.sqlite
+        .prepare(
+          'UPDATE scene_video_generations SET automatic_quality_status=?,critic_evaluation_id=?,updated_at=? WHERE id=?',
+        )
+        .run(evaluation.status, evaluation.id, new Date().toISOString(), generation.id);
+    } finally {
+      await Promise.all(samplePaths.map((path) => rm(path, { force: true })));
+    }
+  }
 
   private assertStagingPath(filename: string): void {
     const relativePath = relativeAssetPath(this.context.workspace.root, filename);
@@ -797,6 +945,7 @@ export class SceneVideoService {
 export function createSceneVideoService(
   context: StudioContext,
   provider?: VideoGenerationProvider,
+  criticAgent?: AiAgent,
 ): SceneVideoService {
-  return new SceneVideoService(context, provider);
+  return new SceneVideoService(context, provider, criticAgent);
 }

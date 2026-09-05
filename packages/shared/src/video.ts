@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import {
+  automaticQualityStatusSchema,
+  criticEvidenceSchema,
+  criticIdentitySchema,
+} from './quality.js';
 
 const idSchema = z.string().uuid();
 const boundedString = (max: number) => z.string().max(max);
@@ -7,8 +12,14 @@ const safeSeed = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const videoProviderSchema = z.enum(['COMFYUI']);
 export type VideoProvider = z.infer<typeof videoProviderSchema>;
 
-export const videoWorkflowTemplateSchema = z.enum(['image-to-video-v1']);
+export const videoWorkflowTemplateSchema = z.enum(['image-to-video-v1', 'ltx2-image-to-video-v1']);
 export type VideoWorkflowTemplate = z.infer<typeof videoWorkflowTemplateSchema>;
+
+export const videoBackendSchema = z.enum(['WAN22_TI2V_5B', 'LTX2_19B_DISTILLED']);
+export type VideoBackend = z.infer<typeof videoBackendSchema>;
+
+export const allowedVideoFallbackSchema = z.enum(['NONE', 'WAN22_TI2V_5B']);
+export type AllowedVideoFallback = z.infer<typeof allowedVideoFallbackSchema>;
 
 export const videoPresetSchema = z.enum(['LOW_VRAM', 'BALANCED', 'QUALITY']);
 export type VideoPreset = z.infer<typeof videoPresetSchema>;
@@ -46,6 +57,9 @@ export const videoReadinessStatusSchema = z.enum([
   'WORKFLOW_MISSING',
   'VIDEO_MODEL_MISSING',
   'DEPENDENCY_MISSING',
+  'BACKEND_UNAVAILABLE',
+  'LTX_WORKFLOW_INVALID',
+  'LTX_MODEL_MISSING',
   'INSUFFICIENT_CONFIGURATION',
   'READY',
   'ERROR',
@@ -79,6 +93,13 @@ export const videoGenerationErrorCodeSchema = z.enum([
   'OUTCOME_UNKNOWN',
   'CONFIGURATION_ERROR',
   'SOURCE_UPLOAD_FAILED',
+  'BACKEND_UNAVAILABLE',
+  'LTX_WORKFLOW_INVALID',
+  'LTX_MODEL_MISSING',
+  'FRAME_GEOMETRY_INVALID',
+  'CONTINUATION_SOURCE_MISSING',
+  'QUALITY_REJECTED',
+  'CRITIC_UNAVAILABLE',
   'OUT_OF_MEMORY',
 ]);
 export type VideoGenerationErrorCode = z.infer<typeof videoGenerationErrorCodeSchema>;
@@ -86,9 +107,13 @@ export type VideoGenerationErrorCode = z.infer<typeof videoGenerationErrorCodeSc
 export const videoGenerationIssueSchema = z.enum([
   'IDENTITY_DRIFT',
   'FACE_DISTORTION',
+  'MISSING_PRIMARY_PERSON',
+  'EXTRA_PRIMARY_PERSON',
+  'FABRICATED_FACE',
   'BODY_DISTORTION',
   'EXTRA_LIMBS',
   'MOTION_TOO_STRONG',
+  'CLOTHING_DRIFT',
   'MOTION_TOO_WEAK',
   'CAMERA_WRONG',
   'OBJECT_MORPHING',
@@ -96,6 +121,7 @@ export const videoGenerationIssueSchema = z.enum([
   'FLICKER',
   'LOOP_BAD',
   'OTHER',
+  'TEMPORAL_INSTABILITY',
 ]);
 export type VideoGenerationIssue = z.infer<typeof videoGenerationIssueSchema>;
 
@@ -117,14 +143,26 @@ export const wan22Ti2v5bDefaults = {
   vaeName: 'wan2.2_vae.safetensors',
 } as const;
 
+export const ltx2_19bDistilledDefaults = {
+  checkpoint: 'ltx-2-19b-distilled-fp8.safetensors',
+  textEncoder: 'gemma_3_12B_it_fp4_mixed.safetensors',
+  vaeName: '',
+  fps: 25,
+} as const;
+
 export const videoProviderSettingsBaseSchema = z
   .object({
     provider: videoProviderSchema.default('COMFYUI'),
     baseUrl: videoBaseUrlSchema.default('http://127.0.0.1:8188'),
-    workflowTemplate: z.literal('image-to-video-v1').default('image-to-video-v1'),
+    backend: videoBackendSchema.default('WAN22_TI2V_5B'),
+    workflowTemplate: videoWorkflowTemplateSchema.default('image-to-video-v1'),
     diffusionModel: z.string().trim().max(300).default(wan22Ti2v5bDefaults.diffusionModel),
     textEncoder: z.string().trim().max(300).default(wan22Ti2v5bDefaults.textEncoder),
     vaeName: z.string().trim().max(300).default(wan22Ti2v5bDefaults.vaeName),
+    ltxCheckpoint: z.string().trim().max(300).default(ltx2_19bDistilledDefaults.checkpoint),
+    ltxTextEncoder: z.string().trim().max(300).default(ltx2_19bDistilledDefaults.textEncoder),
+    ltxVaeName: z.string().trim().max(300).default(ltx2_19bDistilledDefaults.vaeName),
+    ltxFps: z.number().int().min(8).max(60).default(ltx2_19bDistilledDefaults.fps),
     sampler: z.string().trim().min(1).max(120).default('uni_pc'),
     scheduler: z.string().trim().min(1).max(120).default('simple'),
     steps: z.number().int().min(1).max(100).default(20),
@@ -194,6 +232,15 @@ export const videoFrameCountSchema = z
   .max(241)
   .refine((value) => (value - 1) % 4 === 0, {
     message: 'Frame count must satisfy 4k+1 for the Wan latent geometry',
+  });
+
+export const ltxVideoFrameCountSchema = z
+  .number()
+  .int()
+  .min(9)
+  .max(1_001)
+  .refine((value) => (value - 1) % 8 === 0, {
+    message: 'Frame count must satisfy 8k+1 for the LTX latent geometry',
   });
 export const videoDimensionSchema = z
   .number()
@@ -295,11 +342,27 @@ export const aiMotionPlanDtoSchema = z
 export type AiMotionPlanDto = z.infer<typeof aiMotionPlanDtoSchema>;
 
 export type VideoGenerationRequest = z.infer<typeof videoGenerationRequestSchema>;
+export const continuationSourceSchema = z
+  .object({
+    sourceShotId: z.string().trim().min(1).max(120),
+    sourceVideoAssetId: idSchema,
+    sourceVideoSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    frameAssetId: idSchema,
+    frameSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    framePosition: z.number().min(0).max(1),
+    extractorVersion: z.string().trim().min(1).max(80),
+  })
+  .strict();
+export type ContinuationSource = z.infer<typeof continuationSourceSchema>;
+
 export const videoGenerationRequestSchema = z
   .object({
     projectId: idSchema,
     sceneId: z.string().trim().min(1).max(120),
     sceneRevisionId: idSchema,
+    shotId: z.string().trim().min(1).max(120).nullable().optional(),
+    backend: videoBackendSchema.optional(),
+    continuationSource: continuationSourceSchema.nullable().optional(),
     providerJobId: idSchema,
     sourceImageAssetId: idSchema,
     sourceImageSha256: z.string().regex(/^[0-9a-f]{64}$/u),
@@ -326,6 +389,7 @@ export type VideoGenerationResult = z.infer<typeof videoGenerationResultSchema>;
 export const videoGenerationResultSchema = z
   .object({
     provider: videoProviderSchema,
+    backend: videoBackendSchema.optional(),
     providerJobId: idSchema,
     seed: safeSeed,
     width: videoDimensionSchema,
@@ -353,6 +417,7 @@ export const videoGenerationResultSchema = z
 export const videoReadinessSchema = z
   .object({
     provider: videoProviderSchema,
+    backend: videoBackendSchema.optional(),
     status: videoReadinessStatusSchema,
     message: boundedString(1_000),
     checkedAt: z.string(),
@@ -398,6 +463,8 @@ export const sceneVideoGenerationDtoSchema = z
     status: sceneVideoGenerationStatusSchema,
     reviewStatus: sceneVideoReviewStatusSchema,
     reviewIssues: z.array(videoGenerationIssueSchema).default([]),
+    automaticQualityStatus: automaticQualityStatusSchema.optional(),
+    criticEvaluationId: idSchema.nullable().optional(),
     reviewNotes: boundedString(1_000).default(''),
     freshness: z.enum(['CURRENT', 'STALE']),
     isCurrent: z.boolean(),
@@ -413,6 +480,8 @@ export const sceneVideoGenerationDtoSchema = z
     fps: videoOutputFpsSchema.nullable(),
     providerJobId: idSchema.nullable(),
     workflowTemplate: videoWorkflowTemplateSchema.nullable(),
+    backend: videoBackendSchema.optional(),
+    continuationSource: continuationSourceSchema.nullable().optional(),
     inputFingerprint: z.string().min(1).max(128),
     sourceImageAssetId: idSchema.nullable(),
     sourceImageSha256: z
@@ -435,6 +504,44 @@ export const sceneVideoGenerationDtoSchema = z
   })
   .strict();
 export type SceneVideoGenerationDto = z.infer<typeof sceneVideoGenerationDtoSchema>;
+
+export const videoCriticResultSchema = z
+  .object({
+    status: automaticQualityStatusSchema,
+    issues: z.array(videoGenerationIssueSchema).max(20),
+    confidence: z.number().min(0).max(1),
+    explanation: boundedString(2_000),
+    guidance: boundedString(2_000),
+  })
+  .strict();
+export type VideoCriticResult = z.infer<typeof videoCriticResultSchema>;
+
+export const videoCriticEvaluationSchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    generationId: idSchema,
+    shotId: z.string().trim().min(1).max(120).nullable(),
+    sceneRevisionId: idSchema,
+    clipAssetId: idSchema,
+    clipSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    keyframeAssetId: idSchema,
+    keyframeSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    shotFingerprint: z.string().trim().min(1).max(128),
+    inputFingerprint: z.string().trim().min(1).max(128),
+    status: automaticQualityStatusSchema,
+    critic: criticIdentitySchema,
+    evidence: z.array(criticEvidenceSchema).min(3).max(5),
+    issues: z.array(videoGenerationIssueSchema).max(20),
+    confidence: z.number().min(0).max(1),
+    explanation: boundedString(2_000),
+    guidance: boundedString(2_000),
+    attempt: z.number().int().nonnegative(),
+    createdAt: z.string().datetime(),
+    completedAt: z.string().datetime().nullable(),
+  })
+  .strict();
+export type VideoCriticEvaluation = z.infer<typeof videoCriticEvaluationSchema>;
 
 export const aiVideoBatchSchema = z
   .object({

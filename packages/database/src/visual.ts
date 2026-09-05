@@ -757,6 +757,8 @@ export type VisualPromptPackageSaveInput = {
   projectId: Id;
   sceneRevisionId: Id;
   payload: VisualPromptPackagePayload;
+  shotPlanId?: Id | null;
+  shotStableId?: string | null;
   generationId?: Id | null;
   forceRevision?: boolean;
 };
@@ -773,14 +775,20 @@ export type VisualPromptPackageRefinementSaveInput = {
 export class VisualPromptPackageRepository {
   constructor(private readonly database: DatabaseHandle) {}
 
-  getCurrent(projectId: Id, sceneRevisionId: Id): VisualPromptPackageDto | null {
+  getCurrent(
+    projectId: Id,
+    sceneRevisionId: Id,
+    shotStableId: string | null = null,
+  ): VisualPromptPackageDto | null {
     const row = this.database.sqlite
       .prepare(
         `SELECT id,project_id as projectId,scene_revision_id as sceneRevisionId,revision,status,payload,
           generation_id as generationId,created_at as createdAt,updated_at as updatedAt
-         FROM visual_prompt_packages WHERE project_id=? AND scene_revision_id=? AND is_current=1`,
+         FROM visual_prompt_packages
+         WHERE project_id=? AND scene_revision_id=? AND is_current=1
+           AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
       )
-      .get(projectId, sceneRevisionId) as PackageRow | undefined;
+      .get(projectId, sceneRevisionId, shotStableId, shotStableId) as PackageRow | undefined;
     return row ? parsePackage(row) : null;
   }
 
@@ -824,7 +832,8 @@ export class VisualPromptPackageRepository {
 
   saveCurrent(input: VisualPromptPackageSaveInput): VisualPromptPackageDto {
     const payload = visualPromptPackagePayloadSchema.parse(input.payload);
-    const current = this.getCurrent(input.projectId, input.sceneRevisionId);
+    const shotStableId = input.shotStableId ?? payload.shotId;
+    const current = this.getCurrent(input.projectId, input.sceneRevisionId, shotStableId);
     if (!input.forceRevision && current?.payload.inputFingerprint === payload.inputFingerprint)
       return current;
     const scene = this.database.sqlite
@@ -833,29 +842,37 @@ export class VisualPromptPackageRepository {
     if (!scene) throw new AppError('NOT_FOUND', 'Scene revision not found', 404);
     const latest = this.database.sqlite
       .prepare(
-        'SELECT COALESCE(MAX(revision),0) as revision FROM visual_prompt_packages WHERE project_id=? AND scene_revision_id=?',
+        `SELECT COALESCE(MAX(revision),0) as revision FROM visual_prompt_packages
+         WHERE project_id=? AND scene_revision_id=?
+           AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
       )
-      .get(input.projectId, input.sceneRevisionId) as { revision: number };
+      .get(input.projectId, input.sceneRevisionId, shotStableId, shotStableId) as {
+      revision: number;
+    };
     const revision = latest.revision + 1;
     const id = randomUUID();
     const stamp = now();
     this.database.sqlite.transaction(() => {
       this.database.sqlite
         .prepare(
-          "UPDATE visual_prompt_packages SET is_current=0,status='STALE',updated_at=? WHERE project_id=? AND scene_revision_id=?",
+          `UPDATE visual_prompt_packages SET is_current=0,status='STALE',updated_at=?
+           WHERE project_id=? AND scene_revision_id=? AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .run(stamp, input.projectId, input.sceneRevisionId);
+        .run(stamp, input.projectId, input.sceneRevisionId, shotStableId, shotStableId);
       this.database.sqlite
         .prepare(
           `INSERT INTO visual_prompt_packages(
-            id,project_id,scene_revision_id,revision,status,payload,consistency_status,consistency_issues,
+            id,project_id,scene_revision_id,shot_plan_id,shot_stable_id,revision,status,payload,consistency_status,consistency_issues,
             input_fingerprint,prompt_template_version,generation_id,row_version,is_current,created_at,updated_at
-          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
           input.projectId,
           input.sceneRevisionId,
+          input.shotPlanId ?? null,
+          shotStableId,
           revision,
           'CURRENT',
           json(payload),
@@ -882,7 +899,6 @@ export class VisualPromptPackageRepository {
         dependency.run(
           id,
           dependencyValue.kind,
-
           dependencyValue.key,
           dependencyValue.revisionId,
           dependencyValue.revision,
@@ -890,7 +906,7 @@ export class VisualPromptPackageRepository {
         );
       }
     })();
-    return this.getCurrent(input.projectId, input.sceneRevisionId)!;
+    return this.getCurrent(input.projectId, input.sceneRevisionId, shotStableId)!;
   }
   saveRefinement(input: VisualPromptPackageRefinementSaveInput): VisualPromptPackageDto {
     const current = this.getCurrent(input.projectId, input.sceneRevisionId);

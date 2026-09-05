@@ -47,6 +47,11 @@ export const workflowStepTypeSchema = z.enum([
   'BUILD_VISUAL_PROMPT',
   'GENERATE_SCENE_IMAGE',
   'GENERATE_AI_SCENE_VIDEO',
+  'PLAN_SHOTS',
+  'GENERATE_VISUAL_REFERENCE',
+  'CRITIQUE_SCENE_IMAGE',
+  'CRITIQUE_SCENE_VIDEO',
+  'EXTRACT_SHOT_CONTINUATION_FRAME',
   'ADVANCE_PRODUCTION_RUN',
   'GENERATE_PUBLICATION_METADATA',
   'BUILD_PUBLICATION_PACKAGE',
@@ -71,6 +76,12 @@ export const assetTypeSchema = z.enum([
   'CHARACTER_REFERENCE_IMAGE',
   'STYLE_REFERENCE_IMAGE',
   'AI_SCENE_VIDEO',
+  'CHARACTER_PROTOTYPE_REFERENCE',
+  'CHARACTER_STAGE_REFERENCE',
+  'LOCATION_REFERENCE',
+  'SHOT_CONTINUATION_FRAME',
+  'CRITIC_SAMPLE_IMAGE',
+  'AI_SHOT_VIDEO',
   'PUBLICATION_THUMBNAIL',
 ]);
 export type AssetType = z.infer<typeof assetTypeSchema>;
@@ -242,3 +253,5 @@ export * from './timeline.js';
 export * from './video.js';
 export * from './production.js';
 export * from './publication.js';
+export * from './shot.js';
+export * from './quality.js';

@@ -12,6 +12,11 @@ import {
   type VisualStyleSettings,
   type VisualStyleSettingsDto,
 } from './story.js';
+import {
+  shotDynamicIntentSchema,
+  shotPhysicalStateSchema,
+  shotStaticIntentSchema,
+} from './shot.js';
 
 const idSchema = z.string().trim().min(1).max(120);
 export const visualObjectKeySchema = z.string().trim().min(1).max(120);
@@ -50,6 +55,203 @@ export const visualConsistencyIssueSchema = z
 export type VisualConsistencyIssue = z.infer<typeof visualConsistencyIssueSchema>;
 
 export const visualReferenceAssetIdsSchema = z.array(idSchema).max(12).default([]);
+
+export const visualReferenceRoleSchema = z.enum([
+  'PRIMARY_CHARACTER',
+  'CHARACTER',
+  'LOCATION',
+  'OBJECT',
+]);
+export type VisualReferenceRole = z.infer<typeof visualReferenceRoleSchema>;
+
+export const referenceBindingSchema = z
+  .object({
+    ordinal: z.number().int().positive().max(12),
+    role: visualReferenceRoleSchema,
+    assetId: idSchema,
+    entityId: idSchema,
+    stageId: idSchema.nullable().default(null),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    revision: z.number().int().positive(),
+    fingerprint: z.string().trim().min(1).max(128),
+  })
+  .strict();
+export type ReferenceBinding = z.infer<typeof referenceBindingSchema>;
+
+export const referenceBindingsSchema = z
+  .array(referenceBindingSchema)
+  .max(12)
+  .superRefine((bindings, context) => {
+    const ordinals = bindings.map((binding) => binding.ordinal);
+    if (new Set(ordinals).size !== ordinals.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Reference binding ordinals must be unique',
+      });
+    }
+  });
+
+export const characterAppearanceStagePayloadSchema = z
+  .object({
+    clothing: boundedStringArray(20, 500).default([]),
+    accessories: boundedStringArray(20, 300).default([]),
+    equipment: boundedStringArray(20, 300).default([]),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.clothing.length > 0 || value.accessories.length > 0 || value.equipment.length > 0,
+    'An appearance stage must change clothing, accessories, or equipment',
+  );
+export type CharacterAppearanceStagePayload = z.infer<typeof characterAppearanceStagePayloadSchema>;
+
+export const appearanceStageProvenanceSchema = z
+  .object({
+    mode: z.enum(['EXPLICIT', 'INFERRED']),
+    chapterId: idSchema.nullable().default(null),
+    sceneId: idSchema.nullable().default(null),
+    evidence: boundedString(2_000),
+    confidence: z.number().min(0).max(1),
+    reason: boundedString(1_000),
+  })
+  .strict();
+export type AppearanceStageProvenance = z.infer<typeof appearanceStageProvenanceSchema>;
+
+export const characterAppearanceStageSchema = z
+  .object({
+    id: idSchema,
+    stableId: idSchema,
+    projectId: idSchema,
+    characterId: idSchema,
+    profileId: idSchema,
+    profileRevision: z.number().int().positive(),
+    revision: z.number().int().positive(),
+    name: z.string().trim().min(1).max(200),
+    payload: characterAppearanceStagePayloadSchema,
+    provenance: appearanceStageProvenanceSchema,
+    reviewStatus: z.enum(['DRAFT', 'APPROVED', 'REJECTED']),
+    referenceAssetId: idSchema.nullable(),
+    referenceSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
+    inputFingerprint: z.string().trim().min(1).max(128),
+    isCurrent: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type CharacterAppearanceStage = z.infer<typeof characterAppearanceStageSchema>;
+export const appearanceStageCreateSchema = z
+  .object({
+    stableId: z.string().trim().min(1).max(120),
+    profileId: idSchema,
+    profileRevision: z.number().int().positive(),
+    name: z.string().trim().min(1).max(240),
+    payload: characterAppearanceStagePayloadSchema,
+    provenance: appearanceStageProvenanceSchema,
+    reviewStatus: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).default('DRAFT'),
+    expectedRevision: z.number().int().positive().optional(),
+  })
+  .strict();
+
+export const locationHardGeometrySchema = z
+  .object({
+    environmentType: boundedString(240).default(''),
+    architecture: boundedString(2_000).default(''),
+    spatialLayout: boundedString(2_000).default(''),
+    walls: boundedString(1_000).default(''),
+    windows: boundedString(1_000).default(''),
+    doors: boundedString(1_000).default(''),
+    fixedFurniture: boundedStringArray(30, 300).default([]),
+    terrain: boundedString(1_000).default(''),
+    permanentLandmarks: boundedStringArray(30, 500).default([]),
+  })
+  .strict();
+export type LocationHardGeometry = z.infer<typeof locationHardGeometrySchema>;
+
+export const sceneTransientEnvironmentSchema = z
+  .object({
+    timeOfDay: boundedString(120).default(''),
+    weather: boundedString(120).default(''),
+    lighting: boundedString(1_000).default(''),
+    atmosphere: boundedString(1_000).default(''),
+    temporaryObjects: boundedStringArray(30, 300).default([]),
+    temporaryDamage: boundedStringArray(20, 500).default([]),
+  })
+  .strict();
+export type SceneTransientEnvironment = z.infer<typeof sceneTransientEnvironmentSchema>;
+
+export const visualReferenceTargetKindSchema = z.enum([
+  'CHARACTER_PROTOTYPE',
+  'CHARACTER_STAGE',
+  'LOCATION',
+]);
+export type VisualReferenceTargetKind = z.infer<typeof visualReferenceTargetKindSchema>;
+
+export const visualReferenceGenerationStatusSchema = z.enum([
+  'PENDING',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+]);
+export type VisualReferenceGenerationStatus = z.infer<typeof visualReferenceGenerationStatusSchema>;
+
+export const visualReferenceGenerationSchema = z
+  .object({
+    id: idSchema,
+    projectId: idSchema,
+    targetKind: visualReferenceTargetKindSchema,
+    targetEntityId: z.string().trim().min(1).max(120),
+    targetRevision: z.number().int().positive(),
+    sourcePrototypeAssetId: idSchema.nullable().default(null),
+    sourcePrototypeSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable()
+      .default(null),
+    prompt: boundedString(8_000),
+    workflowTemplate: z.string().trim().min(1).max(120),
+    provider: z.string().trim().min(1).max(120),
+    settings: z.record(z.unknown()),
+    seed: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    inputFingerprint: z.string().trim().min(1).max(128),
+    status: visualReferenceGenerationStatusSchema,
+    approval: z.enum(['CANDIDATE', 'APPROVED', 'REJECTED']),
+    assetId: idSchema.nullable(),
+    assetSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable(),
+    attempt: z.number().int().nonnegative(),
+    error: boundedString(2_000).nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.targetKind === 'CHARACTER_STAGE' &&
+      (value.sourcePrototypeAssetId === null || value.sourcePrototypeSha256 === null)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sourcePrototypeAssetId'],
+        message: 'Character stage references require exact prototype lineage',
+      });
+    }
+  });
+export type VisualReferenceGeneration = z.infer<typeof visualReferenceGenerationSchema>;
+export const visualReferenceScheduleSchema = z
+  .object({
+    targetKind: visualReferenceTargetKindSchema,
+    targetEntityId: z.string().trim().min(1).max(120),
+  })
+  .strict();
+export const visualReferenceReviewSchema = z
+  .object({ approval: z.enum(['APPROVED', 'REJECTED']) })
+  .strict();
 
 export const characterVisualVariantSchema = z
   .object({
@@ -368,6 +570,14 @@ export const visualPromptPackagePayloadSchema = z
     sceneId: idSchema,
     sceneStableId: z.string().trim().min(1).max(120),
     sceneRevision: z.number().int().positive(),
+    shotId: idSchema.nullable().default(null),
+    shotRevision: z.number().int().positive().nullable().default(null),
+    visibleCharacterIds: z.array(storyStableIdSchema).max(20).default([]),
+    offscreenCharacterIds: z.array(storyStableIdSchema).max(20).default([]),
+    staticIntent: shotStaticIntentSchema.nullable().default(null),
+    dynamicIntent: shotDynamicIntentSchema.nullable().default(null),
+    continuityState: shotPhysicalStateSchema.nullable().default(null),
+    referenceBindings: referenceBindingsSchema.default([]),
     styleRevision: z.number().int().positive().nullable(),
     style: visualStyleSettingsSchema.nullable(),
     characters: z.array(resolvedCharacterVisualSchema).max(100),

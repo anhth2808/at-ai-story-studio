@@ -53,6 +53,12 @@ const schemaContracts: Record<StoryPrompt['operation'], string> = {
     'Top-level key exactly: profile object using only the bounded recurring-object visual profile fields. Do not include image-provider settings or scene-specific state.',
   VISUAL_PROMPT_REFINEMENT:
     'Top-level keys exactly: packageFingerprint string, fullPrompt string, and negativePrompt string or null. Preserve canonical identity constraints and do not add provider settings.',
+  PLAN_SHOTS:
+    'Top-level keys exactly: beats array and shots array. Beats and Shots must use the bounded Shot plan contract. Return visual direction only; never generate pixels, provider graphs, or full-novel summaries.',
+  IMAGE_CRITIC:
+    'Return exactly one bounded automatic image critic evaluation JSON object for the supplied candidate and references.',
+  VIDEO_CRITIC:
+    'Return exactly one bounded automatic temporal video critic evaluation JSON object for the supplied frame samples and references.',
 };
 export function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;

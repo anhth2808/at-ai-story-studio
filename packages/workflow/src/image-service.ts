@@ -14,10 +14,12 @@ import { z } from 'zod';
 import {
   AssetRepository,
   SceneImageCandidateSetRepository,
+  MediaCriticEvaluationRepository,
   ImageGenerationSettingsRepository,
   SceneImageGenerationRepository,
   SceneRepository,
   VisualPromptPackageRepository,
+  ShotPlanRepository,
   WorkflowRepository,
   type ClaimedStep,
 } from '@studio/database';
@@ -53,6 +55,9 @@ import {
   REFERENCE_CHARACTER_V1_MAX_REFERENCES,
   type ImageProvider,
 } from './comfyui.js';
+import type { AiAgent } from './omp-agent.js';
+import { ImageCritic, rankImageCandidates } from './media-critics.js';
+import { fingerprintValue } from './story-prompts.js';
 import {
   imageGenerationFingerprint,
   imageSettingsFingerprint,
@@ -108,9 +113,14 @@ export class ImageGenerationService {
   private readonly packages: VisualPromptPackageRepository;
   private readonly candidateSets: SceneImageCandidateSetRepository;
 
+  private readonly criticEvaluations: MediaCriticEvaluationRepository;
+  private readonly shotPlans: ShotPlanRepository;
+  private readonly critic: ImageCritic | null;
+  private readonly assets: AssetRepository;
   constructor(
     private readonly context: StudioContext,
     private readonly provider: ImageProvider = new ComfyUiImageProvider(context.workspace.staging),
+    criticAgent?: AiAgent,
   ) {
     this.settings = new ImageGenerationSettingsRepository(context.database);
     this.generations = new SceneImageGenerationRepository(context.database);
@@ -119,8 +129,10 @@ export class ImageGenerationService {
     this.packages = new VisualPromptPackageRepository(context.database);
     this.candidateSets = new SceneImageCandidateSetRepository(context.database);
     this.assets = new AssetRepository(context.database);
+    this.criticEvaluations = new MediaCriticEvaluationRepository(context.database);
+    this.shotPlans = new ShotPlanRepository(context.database);
+    this.critic = criticAgent ? new ImageCritic(criticAgent, this.criticEvaluations) : null;
   }
-  private readonly assets: AssetRepository;
 
   // Deterministic issue -> guidance translation. Reads only current Scene
   // and package data; never mutates canonical Story/profile/Scene records.
@@ -468,6 +480,109 @@ export class ImageGenerationService {
       await rm(stagingPath, { force: true });
     }
   }
+  private async critiqueAndSettle(
+    projectId: Id,
+    scene: SceneDto,
+    generationId: Id,
+    packageDto: VisualPromptPackageDto,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.critic) return;
+    const generation = this.generations.get(projectId, generationId);
+    const candidateAsset = generation?.assetId ? this.assets.get(generation.assetId) : null;
+    if (!generation?.assetId || !candidateAsset || candidateAsset.status !== 'READY') return;
+    const plan = this.shotPlans.getCurrent(projectId, scene.id);
+    const shot =
+      plan?.candidate.shots.find((candidate) => candidate.id === packageDto.payload.shotId) ??
+      plan?.candidate.shots.find((candidate) => candidate.hero) ??
+      plan?.candidate.shots[0];
+    if (!shot) {
+      this.context.database.sqlite
+        .prepare(
+          "UPDATE scene_image_generations SET automatic_quality_status='MANUAL_REVIEW_REQUIRED',updated_at=? WHERE id=?",
+        )
+        .run(new Date().toISOString(), generation.id);
+      return;
+    }
+    const referenceAssets = (packageDto.payload.referenceBindings ?? []).flatMap((binding) => {
+      const asset = this.assets.get(binding.assetId);
+      return asset && asset.status === 'READY' && asset.sha256 === binding.sha256 ? [asset] : [];
+    });
+    const referenceEvidence = referenceAssets.map((asset) => ({
+      assetId: asset.id,
+      sha256: asset.sha256,
+      role: 'REFERENCE' as const,
+      samplePosition: null,
+    }));
+    const evaluation = await this.critic.evaluate(
+      {
+        projectId,
+        generationId: generation.id,
+        candidateSetId: generation.candidateSetId,
+        shot,
+        sceneRevisionId: scene.id,
+        assetId: generation.assetId,
+        assetSha256: candidateAsset.sha256,
+        packageFingerprint: packageDto.payload.inputFingerprint,
+        referenceFingerprint: fingerprintValue(packageDto.payload.referenceBindings ?? []),
+        evidence: [
+          {
+            assetId: generation.assetId,
+            sha256: candidateAsset.sha256,
+            role: 'CANDIDATE',
+            samplePosition: null,
+          },
+          ...referenceEvidence,
+        ],
+        imagePaths: [candidateAsset.path, ...referenceAssets.map((asset) => asset.path)],
+      },
+      signal,
+    );
+    this.context.database.sqlite
+      .prepare(
+        'UPDATE scene_image_generations SET automatic_quality_status=?,critic_evaluation_id=?,updated_at=? WHERE id=?',
+      )
+      .run(evaluation.status, evaluation.id, new Date().toISOString(), generation.id);
+    if (!generation.candidateSetId) return;
+    const candidateSet = this.candidateSets.get(projectId, generation.candidateSetId);
+    const siblings = this.generations
+      .list(projectId, scene.stableId, 100, 0)
+      .filter((candidate) => candidate.candidateSetId === generation.candidateSetId);
+    if (
+      !candidateSet ||
+      siblings.length !== candidateSet.requestedCount ||
+      siblings.some((candidate) => candidate.status !== 'COMPLETED')
+    )
+      return;
+    const evaluated = siblings.flatMap((candidate) => {
+      const result = this.criticEvaluations.latestImage(candidate.id);
+      return result && candidate.candidateIndex
+        ? [
+            {
+              generationId: candidate.id,
+              candidateIndex: candidate.candidateIndex,
+              evaluation: result,
+            },
+          ]
+        : [];
+    });
+    if (evaluated.length !== siblings.length) return;
+    const ranking = rankImageCandidates(evaluated);
+    this.candidateSets.saveRanking(projectId, candidateSet.id, ranking);
+    if (ranking.winnerGenerationId)
+      this.generations.setCurrent(
+        projectId,
+        scene.stableId,
+        ranking.winnerGenerationId,
+        scene.revision,
+      );
+    else
+      this.context.database.sqlite
+        .prepare(
+          "UPDATE scene_image_generations SET automatic_quality_status='MANUAL_REVIEW_REQUIRED',updated_at=? WHERE candidate_set_id=?",
+        )
+        .run(new Date().toISOString(), candidateSet.id);
+  }
 
   async executeStep(
     step: ClaimedStep,
@@ -566,6 +681,24 @@ export class ImageGenerationService {
         }
       } finally {
         await rm(output.stagingPath, { force: true });
+      }
+      const currentPackage = this.packages.get(payload.projectId, request.visualPromptPackageId);
+      if (currentPackage) {
+        try {
+          await this.critiqueAndSettle(
+            payload.projectId,
+            scene,
+            generation.id,
+            currentPackage,
+            signal,
+          );
+        } catch {
+          this.context.database.sqlite
+            .prepare(
+              "UPDATE scene_image_generations SET automatic_quality_status='UNAVAILABLE',updated_at=? WHERE id=?",
+            )
+            .run(new Date().toISOString(), generation.id);
+        }
       }
       progress(1, 'Scene image generation completed');
     } catch (error) {
@@ -683,6 +816,7 @@ export class ImageGenerationService {
           connectionTimeoutMs: settings.connectionTimeoutMs,
           generationTimeoutMs: settings.generationTimeoutMs,
         },
+        referenceBindings: packageDto.payload.referenceBindings,
         conditioning,
         generationInstructions: instructions,
         reviewFeedback: feedback ?? null,
@@ -908,8 +1042,9 @@ export class ImageGenerationService {
 export function createImageGenerationService(
   context: StudioContext,
   provider?: ImageProvider,
+  criticAgent?: AiAgent,
 ): ImageGenerationService {
-  return new ImageGenerationService(context, provider);
+  return new ImageGenerationService(context, provider, criticAgent);
 }
 
 function collectReferenceAssetIds(payload: {
