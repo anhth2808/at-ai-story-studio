@@ -115,8 +115,8 @@ await reconcileWorkspace(workspace);
 const runner = new ProcessRunner();
 const media = new FfmpegTools(runner);
 const context = { database, workspace, media, runner };
-const service = new StudioService(context);
 const ompAgent = createOmpAgent(runner);
+const service = new StudioService(context, ompAgent);
 const storyEngine = createStoryEngine({ database, agent: ompAgent });
 let ompReadinessCache: { value: OmpReadiness; cachedAt: number } | null = null;
 let ompReadinessRequest: Promise<OmpReadiness> | null = null;
@@ -215,7 +215,7 @@ function parseRenderScope(query: RenderScopeQuery): RenderScope {
   throw new AppError('INVALID_INPUT', 'Render scope is invalid', 400);
 }
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
 await app.register(cors, {
   origin: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -1056,6 +1056,34 @@ app.get('/api/projects/:projectId/scenes/:sceneId/visual-prompt-package', async 
   if (!packageDto) throw new AppError('NOT_FOUND', 'Visual prompt package not found', 404);
   return packageDto;
 });
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/visual-prompt-package',
+  async (request) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    const packageDto = service.visual.getCurrentPromptPackage(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      storyStableIdSchema.parse(params.shotId),
+    );
+    if (!packageDto) throw new AppError('NOT_FOUND', 'Shot visual prompt package not found', 404);
+    return packageDto;
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/visual-prompt-package/rebuild',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    return reply
+      .code(202)
+      .send(
+        service.scheduleShotVisualPromptBuild(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          storyStableIdSchema.parse(params.shotId),
+        ),
+      );
+  },
+);
 app.post(
   '/api/projects/:projectId/scenes/:sceneId/visual-prompt-package/rebuild',
   async (request, reply) => {
@@ -1198,6 +1226,188 @@ app.post('/api/projects/:projectId/scenes/:sceneId/images/generate', async (requ
       ),
     );
 });
+app.get('/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string; shotId: string };
+  const query = request.query as { limit?: string; offset?: string };
+  return service.images.listGenerations(
+    idSchema.parse(params.projectId),
+    idSchema.parse(params.sceneId),
+    parsePageValue(query.limit, 50, 100),
+    parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+    storyStableIdSchema.parse(params.shotId),
+  );
+});
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/current',
+  async (request) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    const image = service.images.getCurrentGeneration(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      storyStableIdSchema.parse(params.shotId),
+    );
+    if (!image) throw new AppError('NOT_FOUND', 'Current Shot image not found', 404);
+    return image;
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/generate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    const projectId = idSchema.parse(params.projectId);
+    const sceneId = idSchema.parse(params.sceneId);
+    const shotId = storyStableIdSchema.parse(params.shotId);
+    service.visual.buildShotPromptPackage({ projectId, sceneId, shotId });
+    return reply
+      .code(202)
+      .send(service.images.scheduleShot(projectId, sceneId, shotId, request.body ?? {}));
+  },
+);
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/:generationId',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.images.getGeneration(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      storyStableIdSchema.parse(params.shotId),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/:generationId/regenerate',
+  async (request, reply) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return reply
+      .code(202)
+      .send(
+        service.images.regenerateShot(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          storyStableIdSchema.parse(params.shotId),
+          idSchema.parse(params.generationId),
+          sceneImageRegenerationSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/:generationId/review',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.images.updateReview(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneImageReviewUpdateSchema.parse(request.body),
+      storyStableIdSchema.parse(params.shotId),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/:generationId/accept',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.images.acceptCandidate(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneImageReviewUpdateSchema.parse(request.body ?? {}),
+      storyStableIdSchema.parse(params.shotId),
+    );
+  },
+);
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/candidate-sets',
+  async (request) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    const query = request.query as { limit?: string; offset?: string };
+    return service.images.listCandidateSets(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      parsePageValue(query.limit, 50, 100),
+      parsePageValue(query.offset, 0, Number.MAX_SAFE_INTEGER),
+      storyStableIdSchema.parse(params.shotId),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/:generationId/current',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.images.setCurrent(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+      sceneImageCurrentSelectionSchema.parse(request.body ?? {}),
+      storyStableIdSchema.parse(params.shotId),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/images/manual',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    const query = request.query as { notes?: string };
+    const projectId = idSchema.parse(params.projectId);
+    const sceneId = idSchema.parse(params.sceneId);
+    const shotId = storyStableIdSchema.parse(params.shotId);
+    const input = sceneImageManualUploadSchema.parse({ notes: query.notes ?? '' });
+    const part = await request.file();
+    if (!part) throw new AppError('INVALID_UPLOAD', 'Image file is required', 400);
+    const extensionByMime: Record<string, string> = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/webp': '.webp',
+    };
+    const extension = extensionByMime[part.mimetype];
+    if (!extension)
+      throw new AppError('INVALID_UPLOAD', 'Only PNG, JPEG, and WEBP images are supported', 400);
+    const stagingPath = join(workspace.staging, `manual-shot-image-${randomUUID()}${extension}`);
+    try {
+      await pipeline(part.file, createWriteStream(stagingPath));
+      if (part.file.truncated || statSync(stagingPath).size > 50_000_000)
+        throw new AppError('INVALID_UPLOAD', 'Shot image exceeds the 50 MB limit', 413);
+      const image = await service.images.registerManualShot(
+        projectId,
+        sceneId,
+        shotId,
+        stagingPath,
+        input.notes,
+      );
+      return reply.code(201).send(image);
+    } catch (error) {
+      await rm(stagingPath, { force: true });
+      throw error;
+    }
+  },
+);
 app.post(
   '/api/projects/:projectId/scenes/:sceneId/images/:generationId/regenerate',
   async (request, reply) => {
@@ -1446,6 +1656,123 @@ app.put(
     return service.videos.setCurrent(
       idSchema.parse(params.projectId),
       idSchema.parse(params.sceneId),
+      idSchema.parse(params.generationId),
+    );
+  },
+);
+app.get('/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video', async (request) => {
+  const params = request.params as { projectId: string; sceneId: string; shotId: string };
+  const projectId = idSchema.parse(params.projectId);
+  const sceneId = idSchema.parse(params.sceneId);
+  return {
+    current: service.videos.getCurrentShotGeneration(projectId, sceneId, params.shotId),
+    generations: service.videos.listShotGenerations(projectId, sceneId, params.shotId),
+  };
+});
+app.get(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/:generationId',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.videos.getShotGeneration(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      params.shotId,
+      idSchema.parse(params.generationId),
+    );
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/generate',
+  async (request, reply) => {
+    const params = request.params as { projectId: string; sceneId: string; shotId: string };
+    return reply
+      .code(202)
+      .send(
+        service.videos.scheduleShot(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          params.shotId,
+          request.body ?? {},
+        ),
+      );
+  },
+);
+app.post(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/:generationId/regenerate',
+  async (request, reply) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return reply
+      .code(202)
+      .send(
+        service.videos.regenerateShot(
+          idSchema.parse(params.projectId),
+          idSchema.parse(params.sceneId),
+          params.shotId,
+          idSchema.parse(params.generationId),
+          sceneVideoRegenerationSchema.parse(request.body ?? {}),
+        ),
+      );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/:generationId/review',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.videos.updateShotReview(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      params.shotId,
+      idSchema.parse(params.generationId),
+      sceneVideoReviewUpdateSchema.parse(request.body),
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/:generationId/accept',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.videos.acceptShot(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      params.shotId,
+      idSchema.parse(params.generationId),
+      request.body ?? {},
+    );
+  },
+);
+app.put(
+  '/api/projects/:projectId/scenes/:sceneId/shots/:shotId/ai-video/:generationId/current',
+  async (request) => {
+    const params = request.params as {
+      projectId: string;
+      sceneId: string;
+      shotId: string;
+      generationId: string;
+    };
+    return service.videos.setShotCurrent(
+      idSchema.parse(params.projectId),
+      idSchema.parse(params.sceneId),
+      params.shotId,
       idSchema.parse(params.generationId),
     );
   },
@@ -2501,5 +2828,8 @@ app.post(
   },
 );
 
-await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
-console.log(`API listening on http://127.0.0.1:${port}`);
+export { app, database };
+if (process.env.NODE_ENV !== 'test') {
+  await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
+  console.log(`API listening on http://127.0.0.1:${port}`);
+}

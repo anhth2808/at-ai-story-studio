@@ -20,6 +20,8 @@ import {
   type ProductionScope,
   type RenderPlan,
   type RenderRequest,
+  type Shot,
+  type VideoBackend,
 } from '@studio/shared';
 import {
   AssetRepository,
@@ -28,8 +30,14 @@ import {
   ProductionRunRepository,
   PublicationPackageRepository,
   SceneRepository,
+  SceneImageGenerationRepository,
+  SceneVideoGenerationRepository,
+  ShotPlanRepository,
   StoryRepository,
   VisualProfileRepository,
+  VisualPromptPackageRepository,
+  VisualReferenceGenerationRepository,
+  type CurrentAsset,
   type DatabaseHandle,
   type ProductionProfileRecord,
 } from '@studio/database';
@@ -46,6 +54,7 @@ export type ProductionPreflightProbes = {
   omp?: () => Promise<ProductionReadiness>;
   image?: (projectId: Id) => Promise<ProductionReadiness>;
   aiVideo?: (projectId: Id) => Promise<ProductionReadiness>;
+  aiVideoBackend?: (projectId: Id, backend: VideoBackend) => Promise<ProductionReadiness>;
 };
 
 export type ProductionPlanningContext = {
@@ -123,7 +132,17 @@ function currentAsset(
       { id: Id; sha256: string; inputFingerprint: string | null; type: string } | undefined) ?? null
   );
 }
-
+function shotNeedsExactReferences(settings: ProductionProfileSettings, shot: Shot): boolean {
+  return (
+    settings.strictReferenceRequirement ||
+    (settings.imageCandidatePolicy === 'QUALITY' &&
+      (shot.hero ||
+        shot.importance === 'HIGH' ||
+        shot.identitySensitive ||
+        shot.dialogueMode === 'SPOKEN' ||
+        shot.dialogueMode === 'OFFSCREEN_SPOKEN'))
+  );
+}
 function profileSettings(profile: ProductionProfileRecord | null): ProductionProfileSettings {
   return profile?.settings ?? defaultProductionProfileSettings;
 }
@@ -131,23 +150,136 @@ function profileSettings(profile: ProductionProfileRecord | null): ProductionPro
 export class ProductionPreflightService {
   readonly profiles: ProductionProfileRepository;
   readonly runs: ProductionRunRepository;
+  readonly assets: AssetRepository;
   readonly story: StoryRepository;
   readonly chapters: ChapterRepository;
   readonly scenes: SceneRepository;
-  readonly assets: AssetRepository;
+  readonly videos: SceneVideoGenerationRepository;
+  readonly images: SceneImageGenerationRepository;
   readonly visualProfiles: VisualProfileRepository;
+  readonly shotPlans: ShotPlanRepository;
+  readonly visualPackages: VisualPromptPackageRepository;
+  readonly references: VisualReferenceGenerationRepository;
 
   constructor(
     private readonly context: ProductionPlanningContext,
     private readonly probes: ProductionPreflightProbes = {},
   ) {
+    this.assets = new AssetRepository(context.database);
     this.profiles = new ProductionProfileRepository(context.database);
     this.runs = new ProductionRunRepository(context.database, this.profiles);
     this.story = new StoryRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.scenes = new SceneRepository(context.database);
-    this.assets = new AssetRepository(context.database);
+    this.images = new SceneImageGenerationRepository(context.database);
+    this.videos = new SceneVideoGenerationRepository(context.database);
     this.visualProfiles = new VisualProfileRepository(context.database);
+    this.shotPlans = new ShotPlanRepository(context.database);
+    this.visualPackages = new VisualPromptPackageRepository(context.database);
+    this.references = new VisualReferenceGenerationRepository(context.database);
+  }
+  private shotReferencesReady(
+    projectId: Id,
+    scene: { id: Id; locationId: string | null },
+    shot: Shot,
+    settings: ProductionProfileSettings,
+  ): boolean {
+    if (!shotNeedsExactReferences(settings, shot)) return true;
+    const plan = this.shotPlans.getCurrent(projectId, scene.id);
+    const promptPackage = this.visualPackages.getCurrent(projectId, scene.id, shot.id);
+    if (
+      !plan ||
+      plan.reviewStatus !== 'APPROVED' ||
+      !promptPackage ||
+      promptPackage.status !== 'CURRENT' ||
+      promptPackage.payload.shotPlanId !== plan.id ||
+      promptPackage.payload.shotPlanRevision !== plan.revision ||
+      promptPackage.payload.shotId !== shot.id
+    )
+      return false;
+    const bindings = promptPackage.payload.referenceBindings;
+    const approvedAsset = (binding: (typeof bindings)[number], expectedType: string): boolean => {
+      const asset = this.assets.get(binding.assetId);
+      if (
+        !asset ||
+        asset.projectId !== projectId ||
+        asset.status !== 'READY' ||
+        !(
+          asset.type === expectedType ||
+          (expectedType === 'LOCATION_REFERENCE' && asset.type === 'LOCATION_REFERENCE_IMAGE')
+        ) ||
+        asset.sha256 !== binding.sha256
+      )
+        return false;
+      try {
+        const metadata = JSON.parse(String(asset.metadata ?? '{}')) as Record<string, unknown>;
+        if (binding.stageId) {
+          const approved = this.references.resolveApproved(
+            projectId,
+            'CHARACTER_STAGE',
+            binding.stageId,
+            binding.revision,
+          );
+          return approved?.assetId === asset.id && approved?.assetSha256 === asset.sha256;
+        }
+        const profile =
+          binding.role === 'LOCATION'
+            ? this.visualProfiles.getLocation(projectId, binding.entityId)
+            : this.visualProfiles.getCharacter(projectId, binding.entityId);
+        if (
+          !profile ||
+          profile.revision !== binding.revision ||
+          !profile.payload.referenceAssetIds?.includes(asset.id)
+        )
+          return false;
+        if (binding.role === 'LOCATION') {
+          const approved = this.references.resolveApproved(
+            projectId,
+            'LOCATION',
+            binding.entityId,
+            binding.revision,
+          );
+          return (
+            (approved?.assetId === asset.id && approved?.assetSha256 === asset.sha256) ||
+            (metadata.approval === 'APPROVED' &&
+              (metadata.locationId === binding.entityId ||
+                metadata.sourceEntityId === binding.entityId))
+          );
+        }
+        return (
+          metadata.approval === 'APPROVED' &&
+          metadata.characterId === binding.entityId &&
+          (metadata.appearanceStageId === null || metadata.appearanceStageId === undefined)
+        );
+      } catch {
+        return false;
+      }
+    };
+    for (const characterId of shot.visibleCharacterIds) {
+      const binding = bindings.find(
+        (candidate) =>
+          candidate.entityId === characterId &&
+          (candidate.role === 'CHARACTER' || candidate.role === 'PRIMARY_CHARACTER') &&
+          !candidate.stageId,
+      );
+      if (!binding || !approvedAsset(binding, 'CHARACTER_REFERENCE_IMAGE')) {
+        const stageBinding = bindings.find(
+          (candidate) =>
+            candidate.entityId === characterId &&
+            candidate.stageId !== null &&
+            candidate.role !== 'LOCATION',
+        );
+        if (!stageBinding || !approvedAsset(stageBinding, 'CHARACTER_STAGE_REFERENCE'))
+          return false;
+      }
+    }
+    if (scene.locationId) {
+      const binding = bindings.find(
+        (candidate) => candidate.role === 'LOCATION' && candidate.entityId === scene.locationId,
+      );
+      if (!binding || !approvedAsset(binding, 'LOCATION_REFERENCE')) return false;
+    }
+    return true;
   }
 
   async check(
@@ -373,48 +505,83 @@ export class ProductionPreflightService {
       );
 
     let missingImages = 0;
+    let qualityPending = 0;
+    let referencePending = 0;
+    const missingReferenceTargets: string[] = [];
+    const qualityTargets: string[] = [];
     for (const chapter of chapters.slice(0, 100)) {
-      const sceneIds = this.context.database.sqlite
+      const sceneRows = this.context.database.sqlite
         .prepare(
           "SELECT id,stable_id as stableId FROM scene_revisions WHERE project_id=? AND chapter_id=? AND status='CURRENT' AND is_current=1 ORDER BY scene_number LIMIT 100",
         )
         .all(projectId, chapter.id) as Array<{ id: Id; stableId: string }>;
-      for (const scene of sceneIds) {
-        if (!this.assets.currentRenderableSceneImage(projectId, scene.stableId)) missingImages += 1;
-      }
-    }
-    if (settings.imageQualityGate === 'REQUIRED') {
-      let qualityPending = 0;
-      for (const chapter of chapters.slice(0, 100)) {
-        const sceneIds = this.context.database.sqlite
-          .prepare(
-            "SELECT stable_id as stableId FROM scene_revisions WHERE project_id=? AND chapter_id=? AND status='CURRENT' AND is_current=1 ORDER BY scene_number LIMIT 100",
-          )
-          .all(projectId, chapter.id) as Array<{ stableId: string }>;
-        for (const scene of sceneIds) {
-          const currentImage = this.assets.currentRenderableSceneImage(projectId, scene.stableId);
-          if (!currentImage) continue;
-          const quality = this.context.database.sqlite
-            .prepare(
-              'SELECT g.automatic_quality_status as status FROM scene_image_generations g JOIN assets a ON a.id=g.asset_id WHERE a.id=? AND a.is_current=1 LIMIT 1',
-            )
-            .get(currentImage.id) as { status: string } | undefined;
-          if (quality?.status !== 'PASSED') qualityPending += 1;
+      for (const sceneRow of sceneRows) {
+        const scene = this.scenes.getScene(sceneRow.id);
+        const plan = scene ? this.shotPlans.getCurrent(projectId, scene.id) : null;
+        const shots = plan?.reviewStatus === 'APPROVED' ? plan.candidate.shots : [];
+        const targets = shots.length
+          ? shots.map((shot) => ({
+              key: `${sceneRow.stableId}:shot:${shot.id}`,
+              image: this.assets.currentRenderableShotImage(projectId, sceneRow.stableId, shot.id, {
+                requireApproval: settings.requireImageApproval,
+              }),
+              generation: this.images.list(projectId, sceneRow.stableId, 1, 0, shot.id)[0] ?? null,
+              referenceReady: scene
+                ? this.shotReferencesReady(projectId, scene, shot, settings)
+                : false,
+            }))
+          : [
+              {
+                key: `${sceneRow.stableId}:scene`,
+                image: this.assets.currentRenderableSceneImage(projectId, sceneRow.stableId, {
+                  requireApproval: settings.requireImageApproval,
+                }),
+                generation: this.images.list(projectId, sceneRow.stableId, 1, 0, null)[0] ?? null,
+                referenceReady: true,
+              },
+            ];
+        for (const target of targets) {
+          if (!target.image) missingImages += 1;
+          if (!target.referenceReady) {
+            referencePending += 1;
+            missingReferenceTargets.push(target.key);
+          }
+          if (
+            settings.imageQualityGate === 'REQUIRED' &&
+            target.generation &&
+            target.generation.status === 'COMPLETED' &&
+            target.generation.freshness === 'CURRENT' &&
+            target.generation.reviewStatus !== 'ACCEPTED' &&
+            target.generation.automaticQualityStatus !== 'PASSED'
+          ) {
+            qualityPending += 1;
+            qualityTargets.push(target.key);
+          }
         }
       }
-      if (qualityPending > 0)
-        issues.push(
-          issue(
-            'IMAGE_QUALITY_REVIEW_REQUIRED',
-            settings.qualityFallback === 'BLOCK' ? 'BLOCKING' : 'WARNING',
-            'SCENE_IMAGES',
-            `${qualityPending} current Scene image(s) lack a passing automatic critic result`,
-            settings.qualityFallback === 'BLOCK'
-              ? 'Run automatic quality review or choose an explicit permitted fallback'
-              : 'Resolve automatic quality review or human approval before final export',
-          ),
-        );
     }
+    if (referencePending > 0)
+      issues.push(
+        issue(
+          'SHOT_REFERENCE_REQUIRED',
+          'BLOCKING',
+          'SCENE_IMAGES',
+          `${referencePending} Shot image target(s) lack exact approved Character-stage or Location references: ${missingReferenceTargets.slice(0, 20).join(', ')}`,
+          'Build current Shot prompt packages and approve the exact references before production',
+        ),
+      );
+    if (settings.imageQualityGate === 'REQUIRED' && qualityPending > 0)
+      issues.push(
+        issue(
+          'IMAGE_QUALITY_REVIEW_REQUIRED',
+          settings.qualityFallback === 'BLOCK' ? 'BLOCKING' : 'WARNING',
+          'SCENE_IMAGES',
+          `${qualityPending} current Scene or Shot image(s) lack a passing automatic critic result: ${qualityTargets.slice(0, 20).join(', ')}`,
+          settings.qualityFallback === 'BLOCK'
+            ? 'Run automatic quality review or choose an explicit permitted fallback'
+            : 'Resolve automatic quality review or human approval before final export',
+        ),
+      );
     if (missingImages > 0) {
       if (this.probes.image) {
         const readiness = await this.probes.image(projectId);
@@ -442,31 +609,153 @@ export class ProductionPreflightService {
     }
 
     const aiNeeded = settings.aiMotionPolicy !== 'OFF';
-    if (aiNeeded && this.probes.aiVideo) {
-      const readiness = await this.probes.aiVideo(projectId);
-      if (!readiness.ready) {
-        if (settings.allowKenBurnsFallback)
+    let aiReadiness: ProductionReadiness | null = null;
+    if (aiNeeded && this.probes.aiVideoBackend) {
+      aiReadiness = await this.probes.aiVideoBackend(projectId, settings.videoBackendPreference);
+      const fallbackBackend = settings.allowedVideoFallback;
+      if (
+        !aiReadiness.ready &&
+        fallbackBackend !== 'NONE' &&
+        fallbackBackend !== settings.videoBackendPreference
+      ) {
+        const fallbackReadiness = await this.probes.aiVideoBackend(projectId, fallbackBackend);
+        if (fallbackReadiness.ready) {
           issues.push(
             issue(
-              'AI_VIDEO_FALLBACK',
+              'AI_VIDEO_BACKEND_FALLBACK',
               'WARNING',
               'AI_MOTION',
-              readiness.message ?? 'AI video is unavailable; Ken Burns fallback will be used',
-              'Configure AI video later or keep the fallback enabled',
+              `${settings.videoBackendPreference} is unavailable; ${fallbackBackend} is ready as the explicit fallback`,
+              'Use the configured fallback backend or restore the preferred backend',
             ),
           );
-        else
-          issues.push(
-            issue(
-              'AI_VIDEO_REQUIRED',
-              'BLOCKING',
-              'AI_MOTION',
-              readiness.message ?? 'AI video is required by this profile',
-              'Configure AI video or enable Ken Burns fallback',
-            ),
-          );
+          aiReadiness = fallbackReadiness;
+        } else {
+          aiReadiness = {
+            ready: false,
+            status: aiReadiness.status,
+            message: `${aiReadiness.message ?? 'Preferred video backend is unavailable'}; fallback ${fallbackBackend} is also unavailable`,
+          };
+        }
       }
-    } else if (aiNeeded && !settings.allowKenBurnsFallback) {
+    } else if (aiNeeded && this.probes.aiVideo) {
+      aiReadiness = await this.probes.aiVideo(projectId);
+    }
+    let motionMissing = 0;
+    let motionQualityPending = 0;
+    const motionMissingTargets: string[] = [];
+    const motionQualityTargets: string[] = [];
+    if (aiNeeded) {
+      for (const chapter of chapters.slice(0, 100)) {
+        const sceneRows = this.context.database.sqlite
+          .prepare(
+            "SELECT id,stable_id as stableId FROM scene_revisions WHERE project_id=? AND chapter_id=? AND status='CURRENT' AND is_current=1 ORDER BY scene_number LIMIT 100",
+          )
+          .all(projectId, chapter.id) as Array<{ id: Id; stableId: string }>;
+        for (const sceneRow of sceneRows) {
+          const scene = this.scenes.getScene(sceneRow.id);
+          const plan = scene ? this.shotPlans.getCurrent(projectId, scene.id) : null;
+          const shots = plan?.reviewStatus === 'APPROVED' ? plan.candidate.shots : [];
+          const targets = shots.length ? shots.map((shot) => ({ id: shot.id })) : [{ id: null }];
+          const source = this.context.database.sqlite
+            .prepare(
+              'SELECT motion_source as motionSource FROM scene_motion_sources WHERE project_id=? AND scene_stable_id=?',
+            )
+            .get(projectId, sceneRow.stableId) as { motionSource: string } | undefined;
+          for (const target of targets) {
+            const motionPlan = this.context.database.sqlite
+              .prepare(
+                `SELECT priority FROM ai_motion_plan_revisions
+                 WHERE project_id=? AND scene_stable_id=? AND is_current=1
+                   AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?) LIMIT 1`,
+              )
+              .get(projectId, sceneRow.stableId, target.id, target.id) as
+              { priority: AiMotionPriority } | undefined;
+            if (
+              !aiMotionEligible(
+                settings.aiMotionPolicy,
+                settings.aiPriorityThreshold,
+                source?.motionSource ?? 'KEN_BURNS',
+                motionPlan?.priority ?? 'NONE',
+              )
+            )
+              continue;
+            const generation = target.id
+              ? (this.videos.list(projectId, sceneRow.stableId, 1, 0, target.id)[0] ?? null)
+              : (this.videos.list(projectId, sceneRow.stableId, 1, 0, null)[0] ?? null);
+            const renderable = target.id
+              ? this.videos.currentRenderableShotVideo(projectId, sceneRow.stableId, target.id, {
+                  requireApproval: settings.requireQualityReview,
+                  requireQualityPass: settings.videoQualityGate !== 'DISABLED',
+                })
+              : this.videos.currentRenderableSceneVideo(projectId, sceneRow.stableId, {
+                  requireApproval: settings.requireQualityReview,
+                  requireQualityPass: settings.videoQualityGate !== 'DISABLED',
+                });
+            if (renderable) continue;
+            const key = `${sceneRow.stableId}${target.id ? `:shot:${target.id}` : ''}`;
+            const qualityPending =
+              generation?.status === 'COMPLETED' &&
+              generation.freshness === 'CURRENT' &&
+              generation.reviewStatus !== 'ACCEPTED' &&
+              (settings.requireQualityReview ||
+                (settings.videoQualityGate === 'REQUIRED' &&
+                  generation.automaticQualityStatus !== 'PASSED'));
+            if (qualityPending) {
+              motionQualityPending += 1;
+              motionQualityTargets.push(key);
+            } else {
+              motionMissing += 1;
+              motionMissingTargets.push(key);
+            }
+          }
+        }
+      }
+    }
+    if (motionQualityPending > 0)
+      issues.push(
+        issue(
+          'VIDEO_QUALITY_REVIEW_REQUIRED',
+          settings.qualityFallback === 'BLOCK' ? 'BLOCKING' : 'WARNING',
+          'AI_MOTION',
+          `${motionQualityPending} current Scene or Shot clip(s) lack an eligible temporal quality state: ${motionQualityTargets.slice(0, 20).join(', ')}`,
+          settings.qualityFallback === 'BLOCK'
+            ? 'Run temporal quality review or choose an explicit permitted fallback'
+            : 'Resolve temporal quality review or human approval before final export',
+        ),
+      );
+    if (motionMissing > 0)
+      issues.push(
+        issue(
+          'AI_MOTION_WORK_PENDING',
+          'WARNING',
+          'AI_MOTION',
+          `${motionMissing} eligible Scene or Shot clip(s) need generation: ${motionMissingTargets.slice(0, 20).join(', ')}`,
+          'Generate accepted AI motion for the listed targets or use the configured fallback',
+        ),
+      );
+    if (aiNeeded && aiReadiness && !aiReadiness.ready) {
+      if (settings.allowKenBurnsFallback)
+        issues.push(
+          issue(
+            'AI_VIDEO_FALLBACK',
+            'WARNING',
+            'AI_MOTION',
+            aiReadiness.message ?? 'AI video is unavailable; Ken Burns fallback will be used',
+            'Configure AI video later or keep the fallback enabled',
+          ),
+        );
+      else
+        issues.push(
+          issue(
+            'AI_VIDEO_REQUIRED',
+            'BLOCKING',
+            'AI_MOTION',
+            aiReadiness.message ?? 'AI video is required by this profile',
+            'Configure AI video or enable Ken Burns fallback',
+          ),
+        );
+    } else if (aiNeeded && !aiReadiness && !settings.allowKenBurnsFallback) {
       issues.push(
         issue(
           'AI_VIDEO_READINESS_UNCHECKED',
@@ -612,6 +901,8 @@ export class ProductionPlanner {
   readonly chapters: ChapterRepository;
   readonly scenes: SceneRepository;
   readonly assets: AssetRepository;
+  readonly videos: SceneVideoGenerationRepository;
+  readonly shotPlans: ShotPlanRepository;
   readonly visualProfiles: VisualProfileRepository;
   readonly packages: PublicationPackageRepository;
 
@@ -625,6 +916,8 @@ export class ProductionPlanner {
     this.chapters = options.preflight.chapters;
     this.scenes = options.preflight.scenes;
     this.assets = options.preflight.assets;
+    this.videos = options.preflight.videos;
+    this.shotPlans = options.preflight.shotPlans;
     this.visualProfiles = options.preflight.visualProfiles;
     this.packages = new PublicationPackageRepository(context.database);
   }
@@ -798,55 +1091,137 @@ export class ProductionPlanner {
           )
           .all(projectId, ...chapterIds) as Array<{ id: Id; chapterId: Id; stableId: string }>)
       : [];
-    const promptUnits = sceneRows.map((scene) => {
-      const prompt = this.context.database.sqlite
-        .prepare(
-          'SELECT status FROM visual_prompt_packages WHERE scene_revision_id=? AND is_current=1 LIMIT 1',
-        )
-        .get(scene.id) as { status: string } | undefined;
-      return unit(
-        `prompt:${scene.stableId}`,
-        'VISUAL_PROMPTS',
-        prompt?.status === 'CURRENT' ? 'REUSE' : 'BUILD',
-        prompt?.status === 'CURRENT'
-          ? 'Visual Prompt Package is current'
-          : 'Visual Prompt Package needs to be built',
-        scene.id,
-        ['SCENES', 'VISUAL_PROFILES'],
-      );
-    });
+    const shotTargets = sceneRows
+      .flatMap((scene) => {
+        const plan = this.shotPlans.getCurrent(projectId, scene.id);
+        return plan?.reviewStatus === 'APPROVED'
+          ? plan.candidate.shots.map((shot) => ({ scene, shot }))
+          : [];
+      })
+      .slice(0, 500);
+    const scenesWithShots = new Set(shotTargets.map((target) => target.scene.id));
+    const promptUnits = [
+      ...sceneRows
+        .filter((scene) => !scenesWithShots.has(scene.id))
+        .map((scene) => {
+          const prompt = this.context.database.sqlite
+            .prepare(
+              'SELECT status FROM visual_prompt_packages WHERE scene_revision_id=? AND shot_stable_id IS NULL AND is_current=1 LIMIT 1',
+            )
+            .get(scene.id) as { status: string } | undefined;
+          return unit(
+            `prompt:${scene.stableId}`,
+            'VISUAL_PROMPTS',
+            prompt?.status === 'CURRENT' ? 'REUSE' : 'BUILD',
+            prompt?.status === 'CURRENT'
+              ? 'Visual Prompt Package is current'
+              : 'Visual Prompt Package needs to be built',
+            scene.id,
+            ['SCENES', 'VISUAL_PROFILES'],
+          );
+        }),
+      ...shotTargets.map(({ scene, shot }) => {
+        const prompt = this.context.database.sqlite
+          .prepare(
+            'SELECT status FROM visual_prompt_packages WHERE scene_revision_id=? AND shot_stable_id=? AND is_current=1 LIMIT 1',
+          )
+          .get(scene.id, shot.id) as { status: string } | undefined;
+        return unit(
+          `prompt:${scene.stableId}:shot:${shot.id}`,
+          'VISUAL_PROMPTS',
+          prompt?.status === 'CURRENT' ? 'REUSE' : 'BUILD',
+          prompt?.status === 'CURRENT'
+            ? 'Shot Visual Prompt Package is current'
+            : 'Shot Visual Prompt Package needs to be built',
+          scene.id,
+          ['SCENES', 'VISUAL_PROFILES'],
+        );
+      }),
+    ];
     stages.push(stage('VISUAL_PROMPTS', 5, promptUnits));
 
-    const imageUnits = sceneRows.map((scene) => {
-      const image = this.assets.currentRenderableSceneImage(projectId, scene.stableId);
-      const generation = this.context.database.sqlite
-        .prepare(
-          'SELECT status,review_status as reviewStatus FROM scene_image_generations WHERE project_id=? AND scene_stable_id=? AND is_current=1 LIMIT 1',
-        )
-        .get(projectId, scene.stableId) as { status: string; reviewStatus: string } | undefined;
-      const waitingForReview =
-        !image &&
+    const imageClassification = (
+      image: CurrentAsset | null,
+      generation:
+        | {
+            status: string;
+            reviewStatus: string;
+            automaticQualityStatus: string;
+            freshness: string;
+          }
+        | null
+        | undefined,
+    ): ProductionPlanClassification => {
+      if (image) return 'REUSE';
+      const qualityReview =
+        settings.imageQualityGate === 'REQUIRED' &&
         generation?.status === 'COMPLETED' &&
+        generation.freshness === 'CURRENT' &&
         generation.reviewStatus !== 'ACCEPTED' &&
-        generation.reviewStatus !== 'REJECTED' &&
-        settings.requireImageApproval;
-      const classification = image ? 'REUSE' : waitingForReview ? 'REVIEW' : 'BUILD';
-      return unit(
-        `image:${scene.stableId}`,
-        'SCENE_IMAGES',
-        classification,
-        image
-          ? 'Current approved Scene image is reusable'
-          : waitingForReview
-            ? 'Current Scene image requires review'
-            : 'Scene image needs generation or manual upload',
-        scene.id,
-        ['VISUAL_PROMPTS'],
-      );
-    });
+        generation.automaticQualityStatus !== 'PASSED';
+      const review =
+        qualityReview ||
+        (generation?.status === 'COMPLETED' &&
+          generation.freshness === 'CURRENT' &&
+          generation.reviewStatus !== 'ACCEPTED' &&
+          generation.reviewStatus !== 'REJECTED' &&
+          settings.requireImageApproval);
+      return review ? (settings.qualityFallback === 'BLOCK' ? 'BLOCKED' : 'REVIEW') : 'BUILD';
+    };
+    const imageUnits = [
+      ...sceneRows
+        .filter((scene) => !scenesWithShots.has(scene.id))
+        .map((scene) => {
+          const image = this.assets.currentRenderableSceneImage(projectId, scene.stableId, {
+            requireApproval: settings.requireImageApproval,
+          });
+          const generation =
+            this.options.preflight.images.list(projectId, scene.stableId, 1, 0, null)[0] ?? null;
+          const classification = imageClassification(image, generation);
+          return unit(
+            `image:${scene.stableId}`,
+            'SCENE_IMAGES',
+            classification,
+            image
+              ? 'Current approved Scene image is reusable'
+              : classification === 'REVIEW'
+                ? 'Current Scene image requires review'
+                : classification === 'BLOCKED'
+                  ? 'Scene image is blocked by quality policy'
+                  : 'Scene image needs generation or manual upload',
+            scene.id,
+            ['VISUAL_PROMPTS'],
+          );
+        }),
+      ...shotTargets.map(({ scene, shot }) => {
+        const image = this.assets.currentRenderableShotImage(projectId, scene.stableId, shot.id, {
+          requireApproval: settings.requireImageApproval,
+        });
+        const generation =
+          this.options.preflight.images.list(projectId, scene.stableId, 1, 0, shot.id)[0] ?? null;
+        const classification = imageClassification(image, generation);
+        return unit(
+          `image:${scene.stableId}:shot:${shot.id}`,
+          'SCENE_IMAGES',
+          classification,
+          image
+            ? 'Current approved Shot image is reusable'
+            : classification === 'REVIEW'
+              ? 'Current Shot image requires review'
+              : classification === 'BLOCKED'
+                ? 'Shot image is blocked by quality policy'
+                : 'Shot image needs generation or manual upload',
+          scene.id,
+          ['VISUAL_PROMPTS'],
+        );
+      }),
+    ];
     stages.push(stage('SCENE_IMAGES', 6, imageUnits));
 
-    const aiUnits = sceneRows.map((scene) => {
+    const aiTargets = shotTargets.length
+      ? shotTargets.map(({ scene, shot }) => ({ scene, shot }))
+      : sceneRows.map((scene) => ({ scene, shot: null }));
+    const aiUnits = aiTargets.map(({ scene, shot }) => {
       const source = this.context.database.sqlite
         .prepare(
           'SELECT motion_source as motionSource FROM scene_motion_sources WHERE project_id=? AND scene_stable_id=?',
@@ -855,9 +1230,11 @@ export class ProductionPlanner {
       const plan = this.context.database.sqlite
         .prepare(
           `SELECT priority FROM ai_motion_plan_revisions
-           WHERE project_id=? AND scene_stable_id=? AND is_current=1 LIMIT 1`,
+           WHERE project_id=? AND scene_stable_id=? AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?) LIMIT 1`,
         )
-        .get(projectId, scene.stableId) as { priority: AiMotionPriority } | undefined;
+        .get(projectId, scene.stableId, shot?.id ?? null, shot?.id ?? null) as
+        { priority: AiMotionPriority } | undefined;
       const motionSource = source?.motionSource ?? 'KEN_BURNS';
       const eligible = aiMotionEligible(
         settings.aiMotionPolicy,
@@ -866,31 +1243,62 @@ export class ProductionPlanner {
         plan?.priority ?? 'NONE',
       );
       const generation = eligible
-        ? (this.context.database.sqlite
-            .prepare(
-              `SELECT status,review_status as reviewStatus FROM scene_video_generations
-               WHERE project_id=? AND scene_stable_id=? AND is_current=1 LIMIT 1`,
-            )
-            .get(projectId, scene.stableId) as { status: string; reviewStatus: string } | undefined)
-        : undefined;
+        ? shot
+          ? (this.videos.getCurrent(projectId, scene.stableId, shot.id) ??
+            this.videos.list(projectId, scene.stableId, 1, 0, shot.id)[0] ??
+            null)
+          : (this.videos.getCurrent(projectId, scene.stableId) ??
+            this.videos.list(projectId, scene.stableId, 1, 0, null)[0] ??
+            null)
+        : null;
+      const renderable = eligible
+        ? shot
+          ? this.videos.currentRenderableShotVideo(projectId, scene.stableId, shot.id, {
+              requireApproval: settings.requireQualityReview,
+              requireQualityPass: settings.videoQualityGate !== 'DISABLED',
+            })
+          : this.videos.currentRenderableSceneVideo(projectId, scene.stableId, {
+              requireApproval: settings.requireQualityReview,
+              requireQualityPass: settings.videoQualityGate !== 'DISABLED',
+            })
+        : null;
+      const retryCount =
+        typeof generation?.metadata.retryCount === 'number' &&
+        Number.isInteger(generation.metadata.retryCount)
+          ? generation.metadata.retryCount
+          : 0;
+      const reviewRequired =
+        generation?.status === 'COMPLETED' &&
+        generation.freshness === 'CURRENT' &&
+        generation.reviewStatus !== 'ACCEPTED' &&
+        (settings.requireQualityReview ||
+          generation.automaticQualityStatus === 'UNAVAILABLE' ||
+          generation.automaticQualityStatus === 'MANUAL_REVIEW_REQUIRED' ||
+          generation.automaticQualityStatus === 'NOT_RUN' ||
+          (generation.automaticQualityStatus === 'REJECTED' &&
+            retryCount >= settings.temporalRetryLimit));
       const classification = !eligible
         ? 'REUSE'
-        : generation?.status === 'COMPLETED' && generation.reviewStatus === 'ACCEPTED'
+        : renderable
           ? 'REUSE'
-          : generation?.status === 'COMPLETED' && generation.reviewStatus !== 'REJECTED'
-            ? 'REVIEW'
+          : reviewRequired
+            ? settings.qualityFallback === 'BLOCK'
+              ? 'BLOCKED'
+              : 'REVIEW'
             : 'BUILD';
       return unit(
-        `motion:${scene.stableId}`,
+        `motion:${scene.stableId}${shot ? `:shot:${shot.id}` : ''}`,
         'AI_MOTION',
         classification,
         !eligible
-          ? 'Motion policy selects Ken Burns for this Scene'
+          ? 'Motion policy selects Ken Burns for this target'
           : classification === 'REUSE'
-            ? 'Accepted AI motion is reusable'
+            ? 'Current quality-approved AI motion is reusable'
             : classification === 'REVIEW'
               ? 'AI motion requires review'
-              : 'AI motion is eligible for generation',
+              : classification === 'BLOCKED'
+                ? 'AI motion is blocked by quality policy'
+                : 'AI motion is eligible for generation',
         scene.id,
         ['SCENE_IMAGES'],
       );

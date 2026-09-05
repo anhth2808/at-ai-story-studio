@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
+  automaticQualityStatusSchema,
   imageGenerationSettingsSchema,
   imageGenerationSettingsUpdateSchema,
   imageQualityReviewSchema,
@@ -291,6 +292,8 @@ export type CreateSceneImageGenerationInput = {
   sceneStableId: string;
   sceneRevisionId: Id;
   visualPromptPackageId: Id | null;
+  shotPlanId?: Id | null;
+  shotStableId?: string | null;
   revision?: number;
   source: SceneImageSource;
   provider: ImageProvider | null;
@@ -329,6 +332,11 @@ export type ManualImageCommitInput = Omit<
   'generationId' | 'seed' | 'durationMs'
 > & {
   generationId?: Id;
+  shotPlanId?: Id | null;
+  shotStableId?: string | null;
+  visualPromptPackageId?: Id | null;
+  packageFingerprint?: string | null;
+  settingsFingerprint?: string | null;
   notes?: string;
 };
 
@@ -352,13 +360,18 @@ export class SceneImageGenerationRepository {
       .get(projectId, generationId) as GenerationRow | undefined;
     return row ? parseGeneration(this.database, row) : null;
   }
-
-  getCurrent(projectId: Id, sceneStableId: string): SceneImageGenerationDto | null {
+  getCurrent(
+    projectId: Id,
+    sceneStableId: string,
+    shotStableId: string | null = null,
+  ): SceneImageGenerationDto | null {
     const row = this.database.sqlite
       .prepare(
-        `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1`,
+        `${generationSelect}
+         WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1
+           AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)`,
       )
-      .get(projectId, sceneStableId) as GenerationRow | undefined;
+      .get(projectId, sceneStableId, shotStableId, shotStableId) as GenerationRow | undefined;
     return row ? parseGeneration(this.database, row) : null;
   }
 
@@ -369,14 +382,25 @@ export class SceneImageGenerationRepository {
     return row ? parseGeneration(this.database, row) : null;
   }
 
-  list(projectId: Id, sceneStableId: string, limit = 50, offset = 0): SceneImageGenerationDto[] {
+  list(
+    projectId: Id,
+    sceneStableId: string,
+    limit = 50,
+    offset = 0,
+    shotStableId: string | null = null,
+  ): SceneImageGenerationDto[] {
     const rows = this.database.sqlite
       .prepare(
-        `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
+        `${generationSelect}
+         WHERE g.project_id=? AND g.scene_stable_id=?
+           AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)
+         ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
       )
       .all(
         projectId,
         sceneStableId,
+        shotStableId,
+        shotStableId,
         Math.max(1, Math.min(100, limit)),
         Math.max(0, offset),
       ) as GenerationRow[];
@@ -392,9 +416,17 @@ export class SceneImageGenerationRepository {
         throw new AppError('INVALID_INPUT', 'Generated image fields are incomplete', 400);
       const packageRow = this.database.sqlite
         .prepare(
-          `SELECT id FROM visual_prompt_packages WHERE id=? AND project_id=? AND scene_revision_id=? AND status='CURRENT' AND is_current=1`,
+          `SELECT id FROM visual_prompt_packages
+           WHERE id=? AND project_id=? AND scene_revision_id=? AND status='CURRENT' AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .get(input.visualPromptPackageId, input.projectId, input.sceneRevisionId);
+        .get(
+          input.visualPromptPackageId,
+          input.projectId,
+          input.sceneRevisionId,
+          input.shotStableId ?? null,
+          input.shotStableId ?? null,
+        );
       if (!packageRow)
         throw new AppError('STALE_INPUT', 'Visual prompt package is not current', 409);
     }
@@ -402,7 +434,9 @@ export class SceneImageGenerationRepository {
       throw new AppError('INVALID_INPUT', 'Manual images cannot have a provider job', 400);
     const latest = this.database.sqlite
       .prepare(
-        'SELECT COALESCE(MAX(revision),0) as revision FROM scene_image_generations WHERE project_id=? AND scene_stable_id=?',
+        `SELECT COALESCE(MAX(revision),0) as revision
+         FROM scene_image_generations
+         WHERE project_id=? AND scene_stable_id=?`,
       )
       .get(input.projectId, input.sceneStableId) as { revision: number };
     const revision = input.revision ?? latest.revision + 1;
@@ -411,11 +445,11 @@ export class SceneImageGenerationRepository {
     this.database.sqlite
       .prepare(
         `INSERT INTO scene_image_generations(
-          id,project_id,scene_stable_id,scene_revision_id,visual_prompt_package_id,revision,source,provider,status,
-          review_status,is_current,requested_seed,requested_width,requested_height,provider_job_id,workflow_template,
-          model_settings,package_fingerprint,settings_fingerprint,input_fingerprint,attempt,notes,generation_instructions,
-          metadata,created_at,started_at,completed_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          id,project_id,scene_stable_id,scene_revision_id,visual_prompt_package_id,shot_plan_id,shot_stable_id,
+          revision,source,provider,status,review_status,is_current,requested_seed,requested_width,requested_height,
+          provider_job_id,workflow_template,model_settings,package_fingerprint,settings_fingerprint,input_fingerprint,
+          attempt,notes,generation_instructions,metadata,created_at,started_at,completed_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -423,6 +457,8 @@ export class SceneImageGenerationRepository {
         input.sceneStableId,
         input.sceneRevisionId,
         input.visualPromptPackageId,
+        input.shotPlanId ?? null,
+        input.shotStableId ?? null,
         revision,
         input.source,
         input.provider,
@@ -495,7 +531,6 @@ export class SceneImageGenerationRepository {
       )
       .run(safeError(message), now(), projectId, generationId);
   }
-
   commitGenerated(input: GeneratedImageCommitInput, guard: StepLeaseGuard): boolean {
     assertSafePath(input.assetPath);
     return this.database.sqlite.transaction(() => {
@@ -508,18 +543,22 @@ export class SceneImageGenerationRepository {
       const generation = this.database.sqlite
         .prepare(
           `SELECT visual_prompt_package_id as packageId,package_fingerprint as packageFingerprint,
-            settings_fingerprint as settingsFingerprint,status,metadata FROM scene_image_generations
+            settings_fingerprint as settingsFingerprint,shot_stable_id as shotId,status,metadata
+           FROM scene_image_generations
            WHERE id=? AND project_id=? AND scene_stable_id=? AND scene_revision_id=?`,
         )
         .get(input.generationId, input.projectId, input.sceneStableId, input.sceneRevisionId) as
-        GenerationCommitRow | undefined;
+        (GenerationCommitRow & { shotId: string | null }) | undefined;
       if (!generation || generation.status !== 'RUNNING') return false;
       const currentPackage = this.database.sqlite
         .prepare(
-          `SELECT id,input_fingerprint as inputFingerprint FROM visual_prompt_packages
-           WHERE project_id=? AND scene_revision_id=? AND status='CURRENT' AND is_current=1`,
+          `SELECT id,input_fingerprint as inputFingerprint
+           FROM visual_prompt_packages
+           WHERE project_id=? AND scene_revision_id=? AND status='CURRENT' AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .get(input.projectId, input.sceneRevisionId) as CurrentPackageRow | undefined;
+        .get(input.projectId, input.sceneRevisionId, generation.shotId, generation.shotId) as
+        CurrentPackageRow | undefined;
       const currentSettings = this.database.sqlite
         .prepare(
           'SELECT input_fingerprint as inputFingerprint FROM image_generation_settings WHERE project_id=?',
@@ -537,9 +576,11 @@ export class SceneImageGenerationRepository {
       );
       const existingCurrent = this.database.sqlite
         .prepare(
-          'SELECT 1 FROM scene_image_generations WHERE project_id=? AND scene_stable_id=? AND is_current=1',
+          `SELECT 1 FROM scene_image_generations
+           WHERE project_id=? AND scene_stable_id=? AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .get(input.projectId, input.sceneStableId);
+        .get(input.projectId, input.sceneStableId, generation.shotId, generation.shotId);
       const approval = this.database.sqlite
         .prepare(
           'SELECT require_image_approval as requireImageApproval FROM image_generation_settings WHERE project_id=?',
@@ -547,10 +588,14 @@ export class SceneImageGenerationRepository {
         .get(input.projectId) as { requireImageApproval: number } | undefined;
       const candidateCount = parseCandidateCount(generation.metadata);
       const autoSelect =
-        fresh && !existingCurrent && candidateCount <= 1 && !approval?.requireImageApproval;
+        !generation.shotId &&
+        fresh &&
+        !existingCurrent &&
+        candidateCount <= 1 &&
+        !approval?.requireImageApproval;
       const stamp = now();
       const assetId = randomUUID();
-      const role = sceneImageRole(input.sceneStableId);
+      const role = sceneImageRole(input.sceneStableId, generation.shotId);
       const mergedMetadata = json({
         ...parseRecord(generation.metadata),
         ...(input.metadata ?? {}),
@@ -564,7 +609,7 @@ export class SceneImageGenerationRepository {
         .run(
           assetId,
           input.projectId,
-          'SCENE_IMAGE',
+          generation.shotId ? 'SHOT_IMAGE' : 'SCENE_IMAGE',
           role,
           'READY',
           input.assetPath,
@@ -576,6 +621,8 @@ export class SceneImageGenerationRepository {
           generation.packageFingerprint,
           json({
             ...(input.metadata ?? {}),
+            shotPlanId: parseRecord(generation.metadata).shotPlanId ?? null,
+            shotId: generation.shotId,
             width: input.width,
             height: input.height,
             seed: input.seed,
@@ -612,21 +659,41 @@ export class SceneImageGenerationRepository {
     const scene = this.scene(input.projectId, input.sceneRevisionId);
     if (!scene || scene.stableId !== input.sceneStableId)
       throw new AppError('NOT_FOUND', 'Scene revision not found', 404);
+    const shotStableId = input.shotStableId ?? null;
+    const shotPlanId = input.shotPlanId ?? null;
+    const visualPromptPackageId = input.visualPromptPackageId ?? null;
+    if (
+      (shotStableId === null) !== (shotPlanId === null) ||
+      (shotStableId === null) !== (visualPromptPackageId === null) ||
+      (shotStableId !== null && (!input.packageFingerprint || !input.settingsFingerprint))
+    )
+      throw new AppError('INVALID_INPUT', 'Shot images require exact package lineage', 400);
+    const generationFingerprint =
+      input.packageFingerprint ?? fingerprint({ source: 'MANUAL', sha256: input.sha256 });
+    const settingsFingerprint = input.settingsFingerprint ?? null;
+    const reviewStatus = shotStableId ? 'ACCEPTED' : 'UNREVIEWED';
+    const automaticQualityStatus = shotStableId ? 'DEGRADED_ACCEPTED' : 'NOT_RUN';
     return this.database.sqlite.transaction(() => {
       const latest = this.database.sqlite
         .prepare(
-          'SELECT COALESCE(MAX(revision),0) as revision FROM scene_image_generations WHERE project_id=? AND scene_stable_id=?',
+          `SELECT COALESCE(MAX(revision),0) as revision
+           FROM scene_image_generations
+           WHERE project_id=? AND scene_stable_id=?`,
         )
-        .get(input.projectId, input.sceneStableId) as { revision: number };
+        .get(input.projectId, input.sceneStableId) as {
+        revision: number;
+      };
       const id = input.generationId ?? randomUUID();
       const assetId = randomUUID();
       const stamp = now();
-      const role = sceneImageRole(input.sceneStableId);
+      const role = sceneImageRole(input.sceneStableId, shotStableId);
       this.database.sqlite
         .prepare(
-          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+          `UPDATE scene_image_generations SET is_current=0,updated_at=?
+           WHERE project_id=? AND scene_stable_id=?
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .run(stamp, input.projectId, input.sceneStableId);
+        .run(stamp, input.projectId, input.sceneStableId, shotStableId, shotStableId);
       this.retireCurrentAsset(input.projectId, role, stamp);
       this.database.sqlite
         .prepare(
@@ -636,7 +703,7 @@ export class SceneImageGenerationRepository {
         .run(
           assetId,
           input.projectId,
-          'SCENE_IMAGE',
+          shotStableId ? 'SHOT_IMAGE' : 'SCENE_IMAGE',
           role,
           'READY',
           input.assetPath,
@@ -644,8 +711,14 @@ export class SceneImageGenerationRepository {
           input.bytes,
           input.sha256,
           input.sceneRevisionId,
-          fingerprint({ source: 'MANUAL', sha256: input.sha256 }),
-          json({ width: input.width, height: input.height }),
+          generationFingerprint,
+          json({
+            width: input.width,
+            height: input.height,
+            shotPlanId,
+            shotId: shotStableId,
+            source: 'MANUAL',
+          }),
           1,
           stamp,
           stamp,
@@ -653,27 +726,39 @@ export class SceneImageGenerationRepository {
       this.database.sqlite
         .prepare(
           `INSERT INTO scene_image_generations(
-            id,project_id,scene_stable_id,scene_revision_id,revision,source,status,review_status,is_current,
-            actual_width,actual_height,asset_id,input_fingerprint,attempt,notes,metadata,created_at,completed_at,updated_at
-          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            id,project_id,scene_stable_id,scene_revision_id,visual_prompt_package_id,shot_plan_id,shot_stable_id,
+            revision,source,status,review_status,is_current,automatic_quality_status,actual_width,actual_height,
+            asset_id,package_fingerprint,settings_fingerprint,input_fingerprint,attempt,notes,metadata,
+            created_at,completed_at,updated_at
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
           input.projectId,
           input.sceneStableId,
           input.sceneRevisionId,
+          visualPromptPackageId,
+          shotPlanId,
+          shotStableId,
           latest.revision + 1,
           'MANUAL',
           'COMPLETED',
-          'UNREVIEWED',
+          reviewStatus,
           1,
+          automaticQualityStatus,
           input.width,
           input.height,
           assetId,
-          fingerprint({ source: 'MANUAL', sha256: input.sha256 }),
+          input.packageFingerprint ?? null,
+          settingsFingerprint,
+          generationFingerprint,
           0,
           input.notes ?? '',
-          json({}),
+          json({
+            shotPlanId,
+            shotId: shotStableId,
+            source: 'MANUAL',
+          }),
           stamp,
           stamp,
           stamp,
@@ -712,15 +797,20 @@ export class SceneImageGenerationRepository {
     sceneStableId: string,
     generationId: Id,
     value: ImageQualityReviewUpdate,
+    shotStableId: string | null = null,
   ): SceneImageGenerationDto {
     return this.database.sqlite.transaction(() => {
       const target = this.database.sqlite
         .prepare(
-          `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,a.status as assetStatus
+          `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,
+             g.automatic_quality_status as automaticQualityStatus,g.review_status as reviewStatus,
+             a.status as assetStatus
            FROM scene_image_generations g LEFT JOIN assets a ON a.id=g.asset_id
-           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?`,
+           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?
+             AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)`,
         )
-        .get(projectId, sceneStableId, generationId) as CurrentSelectionRow | undefined;
+        .get(projectId, sceneStableId, generationId, shotStableId, shotStableId) as
+        CurrentSelectionRow | undefined;
       if (
         !target ||
         target.status !== 'COMPLETED' ||
@@ -743,12 +833,14 @@ export class SceneImageGenerationRepository {
           generationId,
         );
       const stamp = now();
-      const role = sceneImageRole(sceneStableId);
+      const role = sceneImageRole(sceneStableId, shotStableId);
       this.database.sqlite
         .prepare(
-          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+          `UPDATE scene_image_generations SET is_current=0,updated_at=?
+           WHERE project_id=? AND scene_stable_id=?
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .run(stamp, projectId, sceneStableId);
+        .run(stamp, projectId, sceneStableId, shotStableId, shotStableId);
       this.retireCurrentAsset(projectId, role, stamp);
       this.database.sqlite
         .prepare(
@@ -761,28 +853,39 @@ export class SceneImageGenerationRepository {
       return this.get(projectId, generationId)!;
     })();
   }
-
   setCurrent(
     projectId: Id,
     sceneStableId: string,
     generationId: Id,
     expectedSceneRevision?: number,
+    shotStableId: string | null = null,
   ): SceneImageGenerationDto {
     return this.database.sqlite.transaction(() => {
       const target = this.database.sqlite
         .prepare(
-          `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,a.status as assetStatus
+          `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,
+             g.automatic_quality_status as automaticQualityStatus,g.review_status as reviewStatus,
+             a.status as assetStatus
            FROM scene_image_generations g LEFT JOIN assets a ON a.id=g.asset_id
-           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?`,
+           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?
+             AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)`,
         )
-        .get(projectId, sceneStableId, generationId) as CurrentSelectionRow | undefined;
+        .get(projectId, sceneStableId, generationId, shotStableId, shotStableId) as
+        CurrentSelectionRow | undefined;
       if (
         !target ||
         target.status !== 'COMPLETED' ||
         !target.assetId ||
-        target.assetStatus !== 'READY'
+        target.assetStatus !== 'READY' ||
+        (shotStableId !== null &&
+          target.automaticQualityStatus !== 'PASSED' &&
+          target.reviewStatus !== 'ACCEPTED')
       )
-        throw new AppError('INVALID_INPUT', 'Only a completed valid image can be selected', 409);
+        throw new AppError(
+          'INVALID_INPUT',
+          'Only an automatically passed or manually accepted image can be selected',
+          409,
+        );
       if (expectedSceneRevision !== undefined) {
         const scene = this.database.sqlite
           .prepare('SELECT revision FROM scene_revisions WHERE id=? AND project_id=?')
@@ -791,12 +894,14 @@ export class SceneImageGenerationRepository {
           throw new AppError('CONFLICT', 'Scene revision changed; reload and retry', 409);
       }
       const stamp = now();
-      const role = sceneImageRole(sceneStableId);
+      const role = sceneImageRole(sceneStableId, shotStableId);
       this.database.sqlite
         .prepare(
-          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+          `UPDATE scene_image_generations SET is_current=0,updated_at=?
+           WHERE project_id=? AND scene_stable_id=?
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .run(stamp, projectId, sceneStableId);
+        .run(stamp, projectId, sceneStableId, shotStableId, shotStableId);
       this.retireCurrentAsset(projectId, role, stamp);
       this.database.sqlite
         .prepare(
@@ -820,7 +925,9 @@ export class SceneImageGenerationRepository {
 }
 
 const generationSelect = `SELECT g.id,g.project_id as projectId,g.scene_stable_id as sceneId,g.scene_revision_id as sceneRevisionId,
-  g.visual_prompt_package_id as visualPromptPackageId,g.revision,g.source,g.provider,g.status,g.review_status as reviewStatus,
+  g.visual_prompt_package_id as visualPromptPackageId,g.shot_plan_id as shotPlanId,g.shot_stable_id as shotId,
+  g.automatic_quality_status as automaticQualityStatus,g.critic_evaluation_id as criticEvaluationId,
+  g.revision,g.source,g.provider,g.status,g.review_status as reviewStatus,
   g.is_current as isCurrent,g.requested_seed as requestedSeed,g.actual_seed as actualSeed,
   g.requested_width as requestedWidth,g.requested_height as requestedHeight,g.actual_width as actualWidth,
   g.actual_height as actualHeight,g.provider_job_id as providerJobId,g.workflow_template as workflowTemplate,
@@ -830,13 +937,15 @@ const generationSelect = `SELECT g.id,g.project_id as projectId,g.scene_stable_i
   g.review_scores as reviewScores,g.review_issues as reviewIssues,
   g.created_at as createdAt,g.started_at as startedAt,g.completed_at as completedAt,g.updated_at as updatedAt
   FROM scene_image_generations g`;
-
 type GenerationRow = {
   id: Id;
   projectId: Id;
   sceneId: string;
-  sceneRevisionId: Id;
   visualPromptPackageId: Id | null;
+  shotPlanId: Id | null;
+  shotId: string | null;
+  automaticQualityStatus: string;
+  criticEvaluationId: Id | null;
   source: string;
   provider: ImageProvider | null;
   status: string;
@@ -875,7 +984,8 @@ function parseGeneration(database: DatabaseHandle, row: GenerationRow): SceneIma
   else if (row.status === 'COMPLETED') {
     const current = database.sqlite
       .prepare(
-        `SELECT p.id,p.input_fingerprint as packageFingerprint,s.input_fingerprint as settingsFingerprint
+        `SELECT p.id,p.shot_stable_id as shotId,p.input_fingerprint as packageFingerprint,
+          s.input_fingerprint as settingsFingerprint
          FROM visual_prompt_packages p LEFT JOIN image_generation_settings s ON s.project_id=p.project_id
          WHERE p.id=? AND p.status='CURRENT' AND p.is_current=1`,
       )
@@ -889,21 +999,31 @@ function parseGeneration(database: DatabaseHandle, row: GenerationRow): SceneIma
       current &&
       stored &&
       current.id === row.visualPromptPackageId &&
+      current.shotId === row.shotId &&
       current.packageFingerprint === stored.packageFingerprint &&
       current.settingsFingerprint === stored.settingsFingerprint
     )
       freshness = 'CURRENT';
   }
   const blockers = productionBlockers(database, row, freshness);
+  const metadata = parseRecord(row.metadata);
+  const positiveMetadata = (key: string): number | null => {
+    const value = metadata[key];
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+  };
   const rest: Record<string, unknown> = { ...row };
   delete rest.reviewScores;
   delete rest.reviewIssues;
   return sceneImageGenerationDtoSchema.parse({
     ...rest,
+    shotRevision: positiveMetadata('shotRevision'),
+    shotOrdinal: positiveMetadata('shotOrdinal'),
+    automaticQualityStatus: automaticQualityStatusSchema.parse(row.automaticQualityStatus),
+    criticEvaluationId: row.criticEvaluationId,
     isCurrent: Boolean(row.isCurrent),
     freshness,
     review: parseReview(row),
-    metadata: parseRecord(row.metadata),
+    metadata,
     assetUrl: row.assetId ? `/api/assets/${row.assetId}` : null,
     productionReady: blockers.length === 0,
     productionBlockers: blockers,
@@ -919,6 +1039,8 @@ function productionBlockers(
   if (row.status !== 'COMPLETED') blockers.push('GENERATION_NOT_COMPLETED');
   if (row.source === 'GENERATED' && freshness === 'STALE') blockers.push('VISUALLY_STALE');
   if (!row.isCurrent) blockers.push('NOT_CURRENT');
+  if (row.shotId && row.automaticQualityStatus !== 'PASSED' && row.reviewStatus !== 'ACCEPTED')
+    blockers.push('AUTOMATIC_QUALITY_NOT_PASSED');
   const settings = database.sqlite
     .prepare(
       'SELECT require_image_approval as requireImageApproval FROM image_generation_settings WHERE project_id=?',
@@ -941,8 +1063,8 @@ function parseReview(row: GenerationRow): ImageQualityReview | null {
   });
 }
 
-function sceneImageRole(sceneStableId: string): string {
-  return `scene:${sceneStableId}:image`;
+function sceneImageRole(sceneStableId: string, shotStableId: string | null = null): string {
+  return shotStableId ? `shot:${shotStableId}:image` : `scene:${sceneStableId}:image`;
 }
 type SceneIdentity = { stableId: string; revision: number };
 type GenerationCommitRow = {
@@ -956,6 +1078,7 @@ type CurrentPackageRow = { id: Id; inputFingerprint: string };
 type CurrentSettingsRow = { inputFingerprint: string };
 type FreshnessRow = {
   id?: Id;
+  shotId?: string | null;
   packageFingerprint: string | null;
   settingsFingerprint: string | null;
 };
@@ -963,12 +1086,16 @@ type CurrentSelectionRow = {
   sceneRevisionId: Id;
   assetId: Id | null;
   status: string;
+  automaticQualityStatus: string;
+  reviewStatus: string;
   assetStatus: string | null;
 };
 export type CreateCandidateSetInput = {
   projectId: Id;
   sceneStableId: string;
   sceneRevisionId: Id;
+  shotPlanId?: Id | null;
+  shotStableId?: string | null;
   visualPromptPackageId: Id | null;
   mode: ImageConditioningMode;
   workflowTemplate: ImageWorkflowTemplate | null;
@@ -992,7 +1119,8 @@ export class SceneImageCandidateSetRepository {
     const row = this.database.sqlite
       .prepare(
         `SELECT id,project_id as projectId,scene_stable_id as sceneId,scene_revision_id as sceneRevisionId,
-          visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
+          shot_plan_id as shotPlanId,shot_stable_id as shotId,visual_prompt_package_id as visualPromptPackageId,
+          mode,workflow_template as workflowTemplate,
           package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
           requested_count as requestedCount,source_generation_id as sourceGenerationId,
           generation_instructions as generationInstructions,metadata,ranking,created_at as createdAt,updated_at as updatedAt
@@ -1001,21 +1129,30 @@ export class SceneImageCandidateSetRepository {
       .get(projectId, candidateSetId) as Record<string, unknown> | undefined;
     return row ? parseCandidateSet(row) : null;
   }
-
-  list(projectId: Id, sceneStableId: string, limit = 50, offset = 0): SceneImageCandidateSetDto[] {
+  list(
+    projectId: Id,
+    sceneStableId: string,
+    limit = 50,
+    offset = 0,
+    shotStableId: string | null = null,
+  ): SceneImageCandidateSetDto[] {
     const rows = this.database.sqlite
       .prepare(
         `SELECT id,project_id as projectId,scene_stable_id as sceneId,scene_revision_id as sceneRevisionId,
-          visual_prompt_package_id as visualPromptPackageId,mode,workflow_template as workflowTemplate,
+          shot_plan_id as shotPlanId,shot_stable_id as shotId,visual_prompt_package_id as visualPromptPackageId,
+          mode,workflow_template as workflowTemplate,
           package_fingerprint as packageFingerprint,settings_fingerprint as settingsFingerprint,
           requested_count as requestedCount,source_generation_id as sourceGenerationId,
           generation_instructions as generationInstructions,metadata,ranking,created_at as createdAt,updated_at as updatedAt
          FROM scene_image_candidate_sets WHERE project_id=? AND scene_stable_id=?
+           AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)
          ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
       .all(
         projectId,
         sceneStableId,
+        shotStableId,
+        shotStableId,
         Math.max(1, Math.min(100, limit)),
         Math.max(0, offset),
       ) as Record<string, unknown>[];
@@ -1028,16 +1165,18 @@ export class SceneImageCandidateSetRepository {
     this.database.sqlite
       .prepare(
         `INSERT INTO scene_image_candidate_sets(
-          id,project_id,scene_stable_id,scene_revision_id,visual_prompt_package_id,mode,workflow_template,
-          package_fingerprint,settings_fingerprint,requested_count,source_generation_id,generation_instructions,
-          metadata,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          id,project_id,scene_stable_id,scene_revision_id,shot_plan_id,shot_stable_id,visual_prompt_package_id,
+          mode,workflow_template,package_fingerprint,settings_fingerprint,requested_count,source_generation_id,
+          generation_instructions,metadata,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
         input.projectId,
         input.sceneStableId,
         input.sceneRevisionId,
+        input.shotPlanId ?? null,
+        input.shotStableId ?? null,
         input.visualPromptPackageId,
         input.mode,
         input.workflowTemplate,

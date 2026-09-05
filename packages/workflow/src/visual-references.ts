@@ -26,7 +26,7 @@ const wardrobeRules: Array<{
     reason: 'Explicit sleep clothing context',
   },
   {
-    cue: /\b(winter coat|snow gear|heavy coat|freezing|blizzard)\b/iu,
+    cue: /\b(winter coat|snow gear|heavy coat|blizzard)\b/iu,
     name: 'Cold weather',
     clothing: 'weather-appropriate winter clothing',
     reason: 'Strong cold-weather clothing context',
@@ -44,7 +44,7 @@ const wardrobeRules: Array<{
     reason: 'Explicit patient clothing context',
   },
   {
-    cue: /\b(changes into|dresses in|puts on|wearing)\b/iu,
+    cue: /\b(?:changes into|dresses in|puts on|wearing)\s+(?:(?:an?|the|her|his|their|some)\s+)?(?:[A-Za-z-]+\s+){0,3}(?:coat|dress|gown|tuxedo|suit|shirt|trousers|pants|skirt|jeans|uniform|pajamas?|sleepwear|robe|jacket|boots|shoes|gloves|scarf|hat|helmet|armor|attire|clothing)\b/iu,
     name: 'Changed attire',
     clothing: 'explicitly described changed clothing',
     reason: 'Explicit clothing-change action',

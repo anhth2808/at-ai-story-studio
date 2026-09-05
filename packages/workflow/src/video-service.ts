@@ -5,6 +5,7 @@ import {
   AppError,
   aiMotionPlanUpdateSchema,
   aiVideoBatchSchema,
+  continuationSourceSchema,
   sceneMotionSourceUpdateSchema,
   sceneVideoRegenerationSchema,
   sceneVideoReviewUpdateSchema,
@@ -13,12 +14,16 @@ import {
   VIDEO_OUTPUT_FPS,
   VIDEO_PRESETS,
   type AiMotionPlanDto,
+  type ContinuationSource,
   type Id,
   type MotionSource,
   type SceneDto,
   type SceneVideoGenerationDto,
+  type ShotPlanCandidate,
+  type ShotPlanDto,
   type VideoGenerationRequest,
   type VideoGenerationSettingsDto,
+  type VideoBackend,
   type VideoReadiness,
 } from '@studio/shared';
 import { z } from 'zod';
@@ -26,22 +31,28 @@ import {
   AiMotionPlanRepository,
   AssetRepository,
   MediaCriticEvaluationRepository,
+  ProductionProfileRepository,
   SceneMotionSourceRepository,
   SceneRepository,
   SceneVideoGenerationRepository,
   ShotPlanRepository,
+  ShotTimingAllocationRepository,
+  TimelineRepository,
   VideoGenerationSettingsRepository,
   WorkflowRepository,
   videoSettingsFingerprint,
   type ClaimedStep,
+  type CurrentAsset,
 } from '@studio/database';
 import {
   managedMotionRelativePath,
+  managedShotMotionRelativePath,
   prepareProjectDirectories,
   promoteFile,
   relativeAssetPath,
   safeWorkspacePath,
   sha256File,
+  validateImageFile,
   validateRawAiVideo,
 } from '@studio/media';
 import {
@@ -49,13 +60,15 @@ import {
   VideoProviderError,
   type VideoGenerationProvider,
 } from './comfyui-video.js';
-import { resolveVideoBackend } from './video-backends.js';
+import { allocateFramePlans, resolveVideoBackend, type FramePlan } from './video-backends.js';
 import {
   aiMotionPlanFingerprint,
   compileMotionPrompt,
   createDefaultAiMotionPlan,
 } from './ai-motion-plan.js';
-import { VideoCritic } from './media-critics.js';
+import { continuationEligibility } from './shot-continuity.js';
+import { temporalRetryGuidance, VideoCritic } from './media-critics.js';
+import { automaticQualityAction } from './quality-policy.js';
 import type { AiAgent } from './omp-agent.js';
 import type { StudioContext } from './index.js';
 
@@ -63,12 +76,34 @@ const scheduledVideoRequestSchema = z
   .object({
     request: videoGenerationRequestSchema,
     motionPlanFingerprint: z.string().min(1).max(128),
+    shotPlanFingerprint: z.string().min(1).max(128).nullable().optional(),
     settingsFingerprint: z.string().min(1).max(128),
+    requireImageApproval: z.boolean().optional(),
+    requireHumanApproval: z.boolean().optional(),
+    qualityFallback: z.enum(['BLOCK', 'MANUAL_REVIEW', 'ALLOW_DEGRADED_WITH_REVIEW']).optional(),
+    temporalRetryLimit: z.number().int().min(0).max(3).optional(),
   })
   .passthrough();
 
 const videoStepPayloadSchema = z
   .object({ projectId: z.string().uuid(), generationId: z.string().uuid() })
+  .strict();
+const continuationStepPayloadSchema = z
+  .object({
+    projectId: z.string().uuid(),
+    generationId: z.string().uuid(),
+    sceneRevisionId: z.string().uuid(),
+    sceneStableId: z.string().min(1).max(120),
+    shotPlanId: z.string().uuid(),
+    shotId: z.string().min(1).max(120),
+    sourceShotId: z.string().min(1).max(120),
+    sourceVideoAssetId: z.string().uuid(),
+    sourceVideoSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    frameAssetId: z.string().uuid(),
+    framePath: z.string().min(1).max(1_000),
+    framePosition: z.number().min(0).max(1),
+    extractorVersion: z.string().min(1).max(80),
+  })
   .strict();
 
 export type SceneVideoScheduleResult = {
@@ -112,6 +147,32 @@ const ISSUE_GUIDANCE: Record<string, string> = {
   LOOP_BAD: 'Do not loop or oscillate the motion.',
   OTHER: 'Follow the reviewer notes strictly.',
 };
+type QualityRetryContext = {
+  sourceGenerationId: Id;
+  criticEvaluationId: Id;
+  issues: string[];
+  guidance: string;
+};
+type VideoQualityPolicy = {
+  requireImageApproval: boolean;
+  requireHumanApproval: boolean;
+  qualityFallback?: 'BLOCK' | 'MANUAL_REVIEW' | 'ALLOW_DEGRADED_WITH_REVIEW';
+  temporalRetryLimit?: number;
+};
+
+type ShotVideoScheduling = {
+  planId: Id;
+  planFingerprint: string;
+  shotId: string;
+  shot: ShotPlanCandidate['shots'][number];
+  framePlan: FramePlan;
+  sourceImage: CurrentAsset;
+  sourceImagePath: string;
+  continuationSource: ContinuationSource | null;
+  retryCount?: number;
+  qualityRetry?: QualityRetryContext;
+  qualityPolicy?: VideoQualityPolicy;
+};
 
 function buildFeedbackGuidance(issues: string[], notes: string): string {
   const mapped = issues.map((issue) => ISSUE_GUIDANCE[issue] ?? '').filter(Boolean);
@@ -142,6 +203,12 @@ function resolveVideoSeed(seedMode: 'RANDOM' | 'FIXED', fixedSeed: number | null
   }
   return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 }
+function deterministicRetrySeed(inputFingerprint: string, retryCount: number): number {
+  return Number.parseInt(
+    createHash('sha256').update(`${inputFingerprint}:${retryCount}`).digest('hex').slice(0, 12),
+    16,
+  );
+}
 
 // Raw generation fingerprint: identical inputs must reuse the identical raw
 // asset; any change to image, plan, settings, workflow, model, or seed
@@ -154,19 +221,32 @@ export function aiVideoGenerationFingerprint(input: {
   motionPlanFingerprint: string;
   settingsFingerprint: string;
 }): string {
+  const continuation = input.request.continuationSource;
   return createHash('sha256')
     .update(
       JSON.stringify({
         version: resolveVideoBackend(input.request.providerSettings.backend).mappingVersion,
-        operation: 'GENERATE_AI_SCENE_VIDEO',
+        operation: input.request.shotId ? 'GENERATE_AI_SHOT_VIDEO' : 'GENERATE_AI_SCENE_VIDEO',
         projectId: input.projectId,
         sceneRevisionId: input.sceneRevisionId,
         sceneStableId: input.sceneStableId,
+        shotPlanId: input.request.shotPlanId ?? null,
+        shotId: input.request.shotId ?? null,
         motionPlanFingerprint: input.motionPlanFingerprint,
         settingsFingerprint: input.settingsFingerprint,
         request: {
           sourceImageAssetId: input.request.sourceImageAssetId,
           sourceImageSha256: input.request.sourceImageSha256,
+          sourceImagePath: continuation ? null : input.request.sourceImagePath,
+          continuationSource: continuation
+            ? {
+                sourceShotId: continuation.sourceShotId,
+                sourceVideoAssetId: continuation.sourceVideoAssetId,
+                sourceVideoSha256: continuation.sourceVideoSha256,
+                framePosition: continuation.framePosition,
+                extractorVersion: continuation.extractorVersion,
+              }
+            : null,
           motionPrompt: input.request.motionPrompt,
           negativePrompt: input.request.negativePrompt,
           width: input.request.width,
@@ -195,12 +275,18 @@ function videoFailure(
     return { code: 'CANCELLED', message: 'Video generation cancelled', retryable: false };
   if (error instanceof VideoProviderError)
     return { code: error.code, message: error.message, retryable: error.retryable };
-  if (error instanceof AppError)
-    return {
-      code: error.code === 'STALE_INPUT' ? 'STALE_INPUT' : 'GENERATION_FAILED',
-      message: error.message,
-      retryable: false,
-    };
+  if (error instanceof AppError) {
+    const code = [
+      'STALE_INPUT',
+      'CONTINUATION_SOURCE_MISSING',
+      'FRAME_GEOMETRY_INVALID',
+      'CRITIC_UNAVAILABLE',
+      'QUALITY_REJECTED',
+    ].includes(error.code)
+      ? error.code
+      : 'GENERATION_FAILED';
+    return { code, message: error.message, retryable: false };
+  }
   return {
     code: 'GENERATION_FAILED',
     message: error instanceof Error ? error.message.slice(0, 2_000) : 'Video generation failed',
@@ -216,6 +302,9 @@ export class SceneVideoService {
   private readonly scenes: SceneRepository;
   private readonly assets: AssetRepository;
   private readonly shotPlans: ShotPlanRepository;
+  private readonly timings: TimelineRepository;
+  private readonly shotTiming: ShotTimingAllocationRepository;
+  private readonly profiles: ProductionProfileRepository;
   private readonly critic: VideoCritic | null;
   constructor(
     private readonly context: StudioContext,
@@ -232,6 +321,9 @@ export class SceneVideoService {
     this.scenes = new SceneRepository(context.database);
     this.assets = new AssetRepository(context.database);
     this.shotPlans = new ShotPlanRepository(context.database);
+    this.timings = new TimelineRepository(context.database);
+    this.shotTiming = new ShotTimingAllocationRepository(context.database);
+    this.profiles = new ProductionProfileRepository(context.database);
     this.critic = criticAgent
       ? new VideoCritic(criticAgent, new MediaCriticEvaluationRepository(context.database))
       : null;
@@ -249,6 +341,22 @@ export class SceneVideoService {
 
   async readiness(projectId: Id, signal?: AbortSignal): Promise<VideoReadiness> {
     return await this.provider.readiness(this.getSettings(projectId), signal);
+  }
+  async readinessForBackend(
+    projectId: Id,
+    backend: VideoBackend,
+    signal?: AbortSignal,
+  ): Promise<VideoReadiness> {
+    const settings = this.getSettings(projectId);
+    return await this.provider.readiness(
+      {
+        ...settings,
+        backend,
+        workflowTemplate:
+          backend === 'LTX2_19B_DISTILLED' ? 'ltx2-image-to-video-v1' : 'image-to-video-v1',
+      },
+      signal,
+    );
   }
 
   getMotionSource(projectId: Id, sceneId: Id): MotionSource {
@@ -347,6 +455,14 @@ export class SceneVideoService {
     const scene = this.scene(projectId, sceneId);
     return this.generations.getCurrent(projectId, scene.stableId);
   }
+  getCurrentRenderableGeneration(
+    projectId: Id,
+    sceneId: Id,
+    options: { requireApproval?: boolean; requireQualityPass?: boolean } = {},
+  ) {
+    const scene = this.scene(projectId, sceneId);
+    return this.generations.currentRenderableSceneVideo(projectId, scene.stableId, options);
+  }
 
   updateReview(
     projectId: Id,
@@ -410,7 +526,309 @@ export class SceneVideoService {
     const scene = this.scene(projectId, sceneId);
     return this.scheduleScene(projectId, scene, input.instructions);
   }
+  getShotGeneration(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    generationId: Id,
+  ): SceneVideoGenerationDto {
+    const scene = this.scene(projectId, sceneId);
+    const generation = this.generations.get(projectId, generationId);
+    if (!generation || generation.sceneId !== scene.stableId || generation.shotId !== shotId)
+      throw new AppError('NOT_FOUND', 'Shot video generation not found', 404);
+    return generation;
+  }
 
+  listShotGenerations(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    limit = 50,
+    offset = 0,
+  ): SceneVideoGenerationDto[] {
+    const scene = this.scene(projectId, sceneId);
+    return this.generations.list(projectId, scene.stableId, limit, offset, shotId);
+  }
+
+  getCurrentShotGeneration(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+  ): SceneVideoGenerationDto | null {
+    const scene = this.scene(projectId, sceneId);
+    return this.generations.getCurrent(projectId, scene.stableId, shotId);
+  }
+  getCurrentRenderableShotVideo(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    options: { requireApproval?: boolean; requireQualityPass?: boolean } = {},
+  ) {
+    const scene = this.scene(projectId, sceneId);
+    return this.generations.currentRenderableShotVideo(projectId, scene.stableId, shotId, options);
+  }
+
+  updateShotReview(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    generationId: Id,
+    value: unknown,
+  ): SceneVideoGenerationDto {
+    this.getShotGeneration(projectId, sceneId, shotId, generationId);
+    return this.generations.updateReview(
+      projectId,
+      generationId,
+      sceneVideoReviewUpdateSchema.parse(value),
+    );
+  }
+
+  setShotCurrent(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    generationId: Id,
+  ): SceneVideoGenerationDto {
+    const scene = this.scene(projectId, sceneId);
+    this.getShotGeneration(projectId, sceneId, shotId, generationId);
+    return this.generations.setCurrent(projectId, scene.stableId, generationId, shotId);
+  }
+
+  acceptShot(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    generationId: Id,
+    value: unknown,
+  ): SceneVideoGenerationDto {
+    const scene = this.scene(projectId, sceneId);
+    this.getShotGeneration(projectId, sceneId, shotId, generationId);
+    const review = z
+      .object({
+        issues: z.array(z.string().max(60)).max(12).default([]),
+        notes: z.string().max(1_000).default(''),
+      })
+      .strict()
+      .parse(value ?? {});
+    this.context.database.sqlite
+      .prepare(
+        `UPDATE scene_video_generations SET review_status='ACCEPTED',review_notes=?,review_issues=?,updated_at=?
+         WHERE project_id=? AND id=? AND shot_stable_id=?`,
+      )
+      .run(
+        review.notes,
+        JSON.stringify(review.issues ?? []),
+        new Date().toISOString(),
+        projectId,
+        generationId,
+        shotId,
+      );
+    return this.generations.setCurrent(projectId, scene.stableId, generationId, shotId);
+  }
+
+  scheduleShot(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    value: unknown = {},
+    backendOverride?: VideoBackend,
+    backendFallbackUsed = false,
+    qualityPolicy?: VideoQualityPolicy,
+  ): SceneVideoScheduleResult {
+    const input = z
+      .object({
+        instructions: z.string().max(2_000).default(''),
+        retryCount: z.number().int().min(0).max(3).default(0),
+        seed: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+        qualityRetry: z
+          .object({
+            sourceGenerationId: z.string().uuid(),
+            criticEvaluationId: z.string().uuid(),
+            issues: z.array(z.string().max(60)).max(20),
+            guidance: z.string().max(2_000),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .parse(value ?? {});
+    const scene = this.scene(projectId, sceneId);
+    const plan = this.shotPlans.getCurrent(projectId, scene.id);
+    if (!plan || plan.reviewStatus !== 'APPROVED')
+      throw new AppError('PREREQUISITE_MISSING', 'An approved current Shot plan is required', 409);
+    const shot = plan.candidate.shots.find((candidate) => candidate.id === shotId);
+    if (!shot) throw new AppError('NOT_FOUND', 'Shot not found', 404);
+    const settings = this.settings.getOrCreate(projectId);
+    const allocation = this.ensureShotTimingAllocation(
+      projectId,
+      scene,
+      plan,
+      shotId,
+      backendOverride ?? settings.backend,
+    );
+    const sourceImage = this.assets.currentRenderableShotImage(projectId, scene.stableId, shotId, {
+      requireApproval: qualityPolicy?.requireImageApproval,
+    });
+    if (!sourceImage)
+      throw new AppError(
+        'PREREQUISITE_MISSING',
+        'A current quality-approved Shot image is required before AI video generation',
+        409,
+      );
+    let continuationSource: ContinuationSource | null = null;
+    let continuationFrameAssetId: Id | null = null;
+    const sourceImagePath = sourceImage.path;
+    const previous = plan.candidate.shots.find(
+      (candidate) => candidate.ordinal === shot.ordinal - 1,
+    );
+    if (previous && continuationEligibility(previous, shot).eligible) {
+      const previousGeneration = this.generations.getCurrent(
+        projectId,
+        scene.stableId,
+        previous.id,
+      );
+      const previousAsset = previousGeneration?.assetId
+        ? this.assets.get(previousGeneration.assetId)
+        : null;
+      if (
+        !previousGeneration ||
+        previousGeneration.status !== 'COMPLETED' ||
+        previousGeneration.freshness !== 'CURRENT' ||
+        (previousGeneration.automaticQualityStatus !== 'PASSED' &&
+          previousGeneration.reviewStatus !== 'ACCEPTED') ||
+        !previousAsset ||
+        previousAsset.status !== 'READY'
+      )
+        throw new AppError(
+          'CONTINUATION_SOURCE_MISSING',
+          'The eligible previous Shot video is no longer current and accepted',
+          409,
+        );
+      const frameAssetId = randomUUID();
+      continuationFrameAssetId = frameAssetId;
+      const framePath = `projects/${safePathSegment(projectId)}/video/continuation/${safePathSegment(scene.stableId)}/${safePathSegment(shotId)}/${frameAssetId}.png`;
+      const emptyHash = '0'.repeat(64);
+      this.assets.registerReference({
+        id: frameAssetId,
+        projectId,
+        type: 'SHOT_CONTINUATION_FRAME',
+        role: `shot:${shotId}:continuation-frame`,
+        path: framePath,
+        mediaType: 'image/png',
+        bytes: 0,
+        sha256: emptyHash,
+        sourceEntityId: previousGeneration.id,
+        inputFingerprint: previousGeneration.inputFingerprint,
+        validationError: 'Continuation frame extraction is pending',
+        metadata: {
+          sceneId: scene.stableId,
+          shotId,
+          sourceShotId: previous.id,
+          sourceVideoAssetId: previousAsset.id,
+          sourceVideoSha256: previousAsset.sha256,
+          framePosition: 1,
+          extractorVersion: 'ffmpeg-final-frame-v1',
+        },
+      });
+      continuationSource = {
+        sourceShotId: previous.id,
+        sourceVideoAssetId: previousAsset.id,
+        sourceVideoSha256: previousAsset.sha256,
+        frameAssetId,
+        frameSha256: emptyHash,
+        framePosition: 1,
+        extractorVersion: 'ffmpeg-final-frame-v1',
+      };
+    }
+    let result: SceneVideoScheduleResult;
+    try {
+      result = this.scheduleScene(
+        projectId,
+        scene,
+        input.instructions,
+        input.seed,
+        undefined,
+        {
+          planId: plan.id,
+          planFingerprint: plan.inputFingerprint,
+          shotId,
+          shot,
+          framePlan: allocation,
+          sourceImage,
+          sourceImagePath,
+          continuationSource,
+          retryCount: input.retryCount,
+          qualityRetry: input.qualityRetry,
+          qualityPolicy,
+        },
+        input.retryCount,
+        backendOverride,
+        backendFallbackUsed,
+        undefined,
+        qualityPolicy,
+      );
+    } catch (error) {
+      if (continuationFrameAssetId)
+        this.assets.invalidateRole(projectId, `shot:${shotId}:continuation-frame`);
+      throw error;
+    }
+    if (continuationFrameAssetId && result.reused)
+      this.assets.invalidateRole(projectId, `shot:${shotId}:continuation-frame`);
+    if (continuationSource && result.stepId) {
+      const extractionStepId = this.workflow.createStep(
+        result.executionId,
+        `shot-continuation:${scene.id}:${shotId}:${result.generation.revision}`,
+        'EXTRACT_SHOT_CONTINUATION_FRAME',
+        scene.id,
+        result.generation.inputFingerprint,
+        2,
+        {
+          projectId,
+          generationId: result.generation.id,
+          sceneRevisionId: scene.id,
+          sceneStableId: scene.stableId,
+          shotPlanId: plan.id,
+          shotId,
+          sourceShotId: continuationSource.sourceShotId,
+          sourceVideoAssetId: continuationSource.sourceVideoAssetId,
+          sourceVideoSha256: continuationSource.sourceVideoSha256,
+          frameAssetId: continuationSource.frameAssetId,
+          framePath: this.assets.get(continuationSource.frameAssetId)?.path ?? '',
+          framePosition: continuationSource.framePosition,
+          extractorVersion: continuationSource.extractorVersion,
+        },
+      );
+      this.workflow.dependency(result.stepId, extractionStepId);
+      this.workflow.createJob(
+        'EXTRACT_SHOT_CONTINUATION_FRAME',
+        continuationSource.frameAssetId,
+        extractionStepId,
+      );
+    }
+    return result;
+  }
+
+  regenerateShot(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+    generationId: Id,
+    value: unknown = {},
+  ): SceneVideoScheduleResult {
+    const input = sceneVideoRegenerationSchema.parse(value ?? {});
+    const source = this.getShotGeneration(projectId, sceneId, shotId, generationId);
+    if (source.status !== 'COMPLETED' || source.requestedSeed === null)
+      throw new AppError('INVALID_INPUT', 'Only a completed generation can be regenerated', 409);
+    let instructions = input.instructions;
+    if (input.useReviewFeedback) {
+      const guidance = buildFeedbackGuidance(source.reviewIssues, source.reviewNotes);
+      instructions = [instructions, guidance].filter(Boolean).join(' ');
+    }
+    return this.scheduleShot(projectId, sceneId, shotId, {
+      instructions,
+      seed: input.mode === 'SAME_SEED' ? source.requestedSeed : undefined,
+    });
+  }
   regenerate(
     projectId: Id,
     sceneId: Id,
@@ -433,7 +851,13 @@ export class SceneVideoService {
     return this.scheduleScene(projectId, scene, instructions, seed);
   }
 
-  scheduleBatch(projectId: Id, value: unknown): SceneVideoBatchScheduleResult {
+  scheduleBatch(
+    projectId: Id,
+    value: unknown,
+    backendOverride?: VideoBackend,
+    backendFallbackUsed = false,
+    qualityPolicy?: VideoQualityPolicy,
+  ): SceneVideoBatchScheduleResult {
     const request = aiVideoBatchSchema.parse(value);
     const executionId = this.workflow.createExecution(projectId, 'GENERATE_AI_SCENE_VIDEO');
     const jobs: SceneVideoScheduleResult[] = [];
@@ -453,7 +877,21 @@ export class SceneVideoService {
         skippedSceneIds.push(sceneId);
         continue;
       }
-      jobs.push(this.scheduleScene(projectId, scene, '', undefined, executionId));
+      jobs.push(
+        this.scheduleScene(
+          projectId,
+          scene,
+          '',
+          undefined,
+          executionId,
+          undefined,
+          0,
+          backendOverride,
+          backendFallbackUsed,
+          undefined,
+          qualityPolicy,
+        ),
+      );
     }
     return { executionId, jobs, skippedSceneIds };
   }
@@ -481,6 +919,64 @@ export class SceneVideoService {
       current.reviewStatus === 'ACCEPTED',
     );
   }
+  private ensureShotTimingAllocation(
+    projectId: Id,
+    scene: SceneDto,
+    plan: ShotPlanDto,
+    shotId: string,
+    backend: VideoGenerationSettingsDto['backend'],
+  ): FramePlan {
+    const timing = this.timings.getCurrentSceneTiming(scene.chapterId);
+    const sceneTiming = timing?.items.find((item) => item.sceneId === scene.id);
+    if (!timing || !sceneTiming)
+      throw new AppError(
+        'PREREQUISITE_MISSING',
+        'Current SceneTiming is required for Shot video',
+        409,
+      );
+    const shots = [...plan.candidate.shots].sort((left, right) => left.ordinal - right.ordinal);
+    const totalPlanned = shots.reduce(
+      (sum, value) => sum + Math.max(1, value.plannedDurationMs),
+      0,
+    );
+    let assigned = 0;
+    const durations = shots.map((shot, index) => {
+      const duration =
+        index === shots.length - 1
+          ? Math.max(1, sceneTiming.durationMs - assigned)
+          : Math.max(
+              1,
+              Math.round(
+                (sceneTiming.durationMs * Math.max(1, shot.plannedDurationMs)) / totalPlanned,
+              ),
+            );
+      assigned += duration;
+      return duration;
+    });
+    const fps =
+      backend === 'LTX2_19B_DISTILLED'
+        ? this.settings.getOrCreate(projectId).ltxFps
+        : VIDEO_OUTPUT_FPS;
+    const frames = allocateFramePlans(backend, durations, fps);
+    this.shotTiming.saveMany(
+      shots.map((shot, index) => ({
+        projectId,
+        sceneTimingRevisionId: timing.id,
+        shotPlanId: plan.id,
+        shotId: shot.id,
+        ordinal: shot.ordinal,
+        targetDurationMs: durations[index]!,
+        actualDurationMs: frames[index]!.actualDurationMs,
+        frameCount: frames[index]!.frameCount,
+        fps: frames[index]!.fps,
+        residualMs: frames[index]!.residualMs,
+        backend,
+      })),
+    );
+    const result = shots.findIndex((shot) => shot.id === shotId);
+    if (result < 0) throw new AppError('NOT_FOUND', 'Shot not found', 404);
+    return frames[result]!;
+  }
 
   private scheduleScene(
     projectId: Id,
@@ -488,11 +984,17 @@ export class SceneVideoService {
     instructions: string,
     seedOverride?: number,
     executionId?: Id,
+    shot?: ShotVideoScheduling,
+    retryCount = 0,
+    backendOverride?: VideoBackend,
+    backendFallbackUsed = false,
+    qualityRetry?: QualityRetryContext,
+    qualityPolicy?: VideoQualityPolicy,
   ): SceneVideoScheduleResult {
     if (scene.status !== 'CURRENT')
       throw new AppError('PREREQUISITE_MISSING', 'A current scene revision is required', 409);
     const motionSource = this.motionSources.get(projectId, scene.stableId);
-    if (motionSource === 'KEN_BURNS')
+    if (motionSource === 'KEN_BURNS' && !shot)
       throw new AppError(
         'INVALID_INPUT',
         'Scene motion source is KEN_BURNS; set it to AI_VIDEO or HYBRID first',
@@ -504,33 +1006,56 @@ export class SceneVideoService {
     // Scheduling must reuse the canonical downstream Scene-image gate: a
     // rejected, unreviewed-while-approval-required, or stale-source current
     // image is never an AI-video source input.
-    const image = new AssetRepository(this.context.database).currentRenderableSceneImage(
-      projectId,
-      scene.stableId,
-    );
+    const image =
+      shot?.sourceImage ??
+      this.assets.currentRenderableSceneImage(projectId, scene.stableId, {
+        requireApproval: qualityPolicy?.requireImageApproval,
+      });
     if (!image)
       throw new AppError(
         'PREREQUISITE_MISSING',
-        'A current accepted scene image is required before AI video generation',
+        shot
+          ? 'A current quality-approved Shot image is required before AI video generation'
+          : 'A current accepted scene image is required before AI video generation',
         409,
       );
     const preset = VIDEO_PRESETS[settings.preset];
-    const backend = resolveVideoBackend(settings.backend);
-    const fps = settings.backend === 'LTX2_19B_DISTILLED' ? settings.ltxFps : VIDEO_OUTPUT_FPS;
-    const frames = backend.framePlan((preset.frames * 1_000) / VIDEO_OUTPUT_FPS, fps);
+    const backendId = backendOverride ?? settings.backend;
+    const backend = resolveVideoBackend(backendId);
+    const fps = backendId === 'LTX2_19B_DISTILLED' ? settings.ltxFps : VIDEO_OUTPUT_FPS;
+    const frames =
+      shot?.framePlan ?? backend.framePlan((preset.frames * 1_000) / VIDEO_OUTPUT_FPS, fps);
     const seed = seedOverride ?? resolveVideoSeed(settings.seedMode, settings.fixedSeed);
-    const motionPrompt = instructions
-      ? `${plan.motionPrompt} Additional direction: ${instructions.trim()}`
+    const shotMotionPrompt = shot
+      ? [
+          shot.shot.staticIntent.subject,
+          shot.shot.staticIntent.action,
+          shot.shot.staticIntent.pose,
+          shot.shot.dynamicIntent.subjectMotion,
+          `Camera: ${shot.shot.dynamicIntent.cameraMotion}`,
+          shot.shot.dynamicIntent.environmentMotion,
+          shot.shot.dynamicIntent.emotionalTiming,
+          shot.shot.dynamicIntent.speakingMotion,
+        ]
+          .filter(Boolean)
+          .join('. ')
       : plan.motionPrompt;
+    const motionPrompt = instructions
+      ? `${shotMotionPrompt} Additional direction: ${instructions.trim()}`
+      : shotMotionPrompt;
     const providerJobId = randomUUID();
     const request = videoGenerationRequestSchema.parse({
       projectId,
       sceneId: scene.stableId,
       sceneRevisionId: scene.id,
+      shotPlanId: shot?.planId ?? null,
+      shotId: shot?.shotId ?? null,
+      backend: backendId,
+      continuationSource: shot?.continuationSource ?? null,
       providerJobId,
       sourceImageAssetId: image.id,
       sourceImageSha256: image.sha256,
-      sourceImagePath: image.path,
+      sourceImagePath: shot?.sourceImagePath ?? image.path,
       motionPrompt,
       negativePrompt: plan.negativePrompt,
       width: preset.width,
@@ -541,11 +1066,9 @@ export class SceneVideoService {
       providerSettings: {
         provider: settings.provider,
         baseUrl: settings.baseUrl,
-        backend: settings.backend,
+        backend: backendId,
         workflowTemplate:
-          settings.backend === 'LTX2_19B_DISTILLED'
-            ? 'ltx2-image-to-video-v1'
-            : 'image-to-video-v1',
+          backendId === 'LTX2_19B_DISTILLED' ? 'ltx2-image-to-video-v1' : 'image-to-video-v1',
         diffusionModel: settings.diffusionModel,
         textEncoder: settings.textEncoder,
         vaeName: settings.vaeName,
@@ -571,12 +1094,13 @@ export class SceneVideoService {
       motionPlanFingerprint: plan.inputFingerprint,
       settingsFingerprint,
     });
-    const execution =
-      executionId ?? this.workflow.createExecution(projectId, 'GENERATE_AI_SCENE_VIDEO');
+    const executionType = shot ? 'GENERATE_AI_SHOT_VIDEO' : 'GENERATE_AI_SCENE_VIDEO';
+    const execution = executionId ?? this.workflow.createExecution(projectId, executionType);
     const existing = this.generations.findCompletedByFingerprint(
       projectId,
       scene.stableId,
       inputFingerprint,
+      shot?.shotId ?? null,
     );
     if (existing)
       return {
@@ -591,9 +1115,12 @@ export class SceneVideoService {
       chapterId: scene.chapterId,
       sceneStableId: scene.stableId,
       sceneRevisionId: scene.id,
+      shotPlanId: shot?.planId ?? null,
+      shotStableId: shot?.shotId ?? null,
+      continuationSource: shot?.continuationSource ?? null,
       aiMotionPlanRevisionId: plan.id,
       provider: settings.provider,
-      backend: settings.backend,
+      backend: backendId,
       requestedSeed: seed,
       requestedWidth: request.width,
       requestedHeight: request.height,
@@ -616,19 +1143,31 @@ export class SceneVideoService {
       metadata: {
         request,
         motionPlanFingerprint: plan.inputFingerprint,
+        shotPlanFingerprint: shot?.planFingerprint ?? null,
         settingsFingerprint,
-        backend: settings.backend,
+        retryCount: shot?.retryCount ?? retryCount,
+        backend: backendId,
         mappingVersion: backend.mappingVersion,
         requestedDurationMs: frames.requestedDurationMs,
         actualDurationMs: frames.actualDurationMs,
         residualMs: frames.residualMs,
-        fallbackUsed: false,
+        fallbackUsed: backendFallbackUsed,
+        qualityRetry: shot?.qualityRetry ?? qualityRetry ?? null,
+        ...(qualityPolicy
+          ? {
+              requireImageApproval: qualityPolicy.requireImageApproval,
+              requireHumanApproval: qualityPolicy.requireHumanApproval,
+              qualityFallback: qualityPolicy.qualityFallback ?? 'MANUAL_REVIEW',
+              temporalRetryLimit: qualityPolicy.temporalRetryLimit ?? 2,
+            }
+          : {}),
       },
     });
+    const stepType = shot ? 'GENERATE_AI_SHOT_VIDEO' : 'GENERATE_AI_SCENE_VIDEO';
     const stepId = this.workflow.createStep(
       execution,
-      `scene-video:${scene.id}:${generation.revision}`,
-      'GENERATE_AI_SCENE_VIDEO',
+      `${shot ? 'shot' : 'scene'}-video:${scene.id}:${shot?.shotId ?? generation.revision}`,
+      stepType,
       scene.id,
       inputFingerprint,
       3,
@@ -638,7 +1177,7 @@ export class SceneVideoService {
     return {
       executionId: execution,
       stepId,
-      jobId: this.workflow.createJob('GENERATE_AI_SCENE_VIDEO', generation.id, stepId),
+      jobId: this.workflow.createJob(stepType, generation.id, stepId),
       generation,
       reused: false,
     };
@@ -653,20 +1192,47 @@ export class SceneVideoService {
     const payload = this.parseStepPayload(step);
     const generation = this.generations.get(payload.projectId, payload.generationId);
     if (!generation) throw new AppError('NOT_FOUND', 'Scene video generation not found', 404);
-    if (generation.status === 'COMPLETED') return;
+    if (generation.status === 'COMPLETED') {
+      if (
+        generation.criticEvaluationId ||
+        (generation.automaticQualityStatus && generation.automaticQualityStatus !== 'NOT_RUN') ||
+        !generation.assetId
+      )
+        return;
+      const scheduled = scheduledVideoRequestSchema.safeParse(generation.metadata);
+      const asset = this.assets.get(generation.assetId);
+      if (!scheduled.success || !asset || asset.status !== 'READY') return;
+      const scene = this.sceneByRevisionId(payload.projectId, generation.sceneRevisionId);
+      try {
+        await this.critiqueVideo(
+          payload.projectId,
+          scene,
+          generation,
+          scheduled.data.request,
+          safeWorkspacePath(this.context.workspace.root, asset.path),
+          signal,
+        );
+      } catch {
+        this.context.database.sqlite
+          .prepare(
+            "UPDATE scene_video_generations SET automatic_quality_status='UNAVAILABLE',updated_at=? WHERE project_id=? AND id=? AND automatic_quality_status='NOT_RUN'",
+          )
+          .run(new Date().toISOString(), payload.projectId, generation.id);
+      }
+      return;
+    }
     if (!['PENDING', 'RUNNING'].includes(generation.status))
       throw new AppError('STALE_INPUT', 'Scene video generation is not runnable', 409);
     const scheduled = scheduledVideoRequestSchema.parse(generation.metadata);
-    const request = scheduled.request;
     if (
-      request.projectId !== payload.projectId ||
-      request.sceneRevisionId !== generation.sceneRevisionId ||
-      request.providerJobId !== generation.providerJobId ||
+      scheduled.request.projectId !== payload.projectId ||
+      scheduled.request.sceneRevisionId !== generation.sceneRevisionId ||
+      scheduled.request.providerJobId !== generation.providerJobId ||
       generation.inputFingerprint !== step.input_fingerprint
     )
       throw new AppError('STALE_INPUT', 'Scene video generation metadata is stale', 409);
     try {
-      this.assertCurrentInputs(
+      const request = this.assertCurrentInputs(
         payload.projectId,
         generation.sceneId,
         generation.sceneRevisionId,
@@ -678,7 +1244,8 @@ export class SceneVideoService {
       if (
         result.providerJobId !== request.providerJobId ||
         result.seed !== request.seed ||
-        result.videos.length !== 1
+        result.videos.length !== 1 ||
+        (result.backend && result.backend !== request.providerSettings.backend)
       )
         throw new VideoProviderError(
           'OUTPUT_INVALID',
@@ -692,11 +1259,18 @@ export class SceneVideoService {
       const scene = this.sceneByRevisionId(payload.projectId, request.sceneRevisionId);
       const destination = safeWorkspacePath(
         this.context.workspace.root,
-        managedMotionRelativePath(
-          safePathSegment(payload.projectId),
-          safePathSegment(scene.stableId),
-          generation.id,
-        ),
+        request.shotId
+          ? managedShotMotionRelativePath(
+              safePathSegment(payload.projectId),
+              safePathSegment(scene.stableId),
+              safePathSegment(request.shotId),
+              generation.id,
+            )
+          : managedMotionRelativePath(
+              safePathSegment(payload.projectId),
+              safePathSegment(scene.stableId),
+              generation.id,
+            ),
       );
       try {
         await prepareProjectDirectories(this.context.workspace, payload.projectId);
@@ -715,12 +1289,13 @@ export class SceneVideoService {
             width: validated.width,
             height: validated.height,
             seed: result.seed,
-            fps: result.fps,
-            frameCount: result.frameCount,
+            fps: validated.fps,
+            frameCount: validated.frameCount,
             clipDurationMs: validated.durationMs,
             generationDurationMs: result.durationMs,
             metadata: {
               provider: result.provider,
+              backend: result.backend ?? request.providerSettings.backend,
               providerJobId: result.providerJobId,
               warnings: result.warnings,
               providerMetadata: result.metadata,
@@ -743,8 +1318,32 @@ export class SceneVideoService {
       } finally {
         await rm(output.stagingPath, { force: true });
       }
-      await this.critiqueVideo(payload.projectId, scene, generation, request, destination, signal);
-      progress(1, 'Scene AI video generation completed');
+      const committedGeneration = this.generations.get(payload.projectId, generation.id);
+      if (committedGeneration) {
+        try {
+          await this.critiqueVideo(
+            payload.projectId,
+            scene,
+            committedGeneration,
+            request,
+            destination,
+            signal,
+          );
+        } catch (error) {
+          if (videoFailure(error, signal).code === 'CANCELLED') throw error;
+          this.context.database.sqlite
+            .prepare(
+              "UPDATE scene_video_generations SET automatic_quality_status='UNAVAILABLE',updated_at=? WHERE project_id=? AND id=? AND automatic_quality_status='NOT_RUN'",
+            )
+            .run(new Date().toISOString(), payload.projectId, generation.id);
+        }
+      }
+      progress(
+        1,
+        request.shotId
+          ? 'Shot AI video generation completed'
+          : 'Scene AI video generation completed',
+      );
     } catch (error) {
       const failure = videoFailure(error, signal);
       if (failure.code === 'CANCELLED') {
@@ -771,6 +1370,149 @@ export class SceneVideoService {
       );
     }
   }
+  async executeContinuationStep(
+    step: ClaimedStep,
+    signal?: AbortSignal,
+    progress: (value: number, message: string) => void = () => undefined,
+  ): Promise<void> {
+    const payload = this.parseContinuationStepPayload(step);
+    const failContinuation = (message: string): never => {
+      const error = new AppError('CONTINUATION_SOURCE_MISSING', message, 409);
+      this.generations.markFailed(
+        payload.projectId,
+        payload.generationId,
+        error.code,
+        error.message,
+      );
+      throw error;
+    };
+    const sourceAsset = this.assets.get(payload.sourceVideoAssetId);
+    const currentSourceGeneration = this.generations.getCurrent(
+      payload.projectId,
+      payload.sceneStableId,
+      payload.sourceShotId,
+    );
+    if (
+      !sourceAsset ||
+      sourceAsset.status !== 'READY' ||
+      !sourceAsset.isCurrent ||
+      sourceAsset.sha256 !== payload.sourceVideoSha256 ||
+      !currentSourceGeneration ||
+      currentSourceGeneration.assetId !== payload.sourceVideoAssetId ||
+      currentSourceGeneration.status !== 'COMPLETED' ||
+      currentSourceGeneration.freshness !== 'CURRENT' ||
+      (currentSourceGeneration.automaticQualityStatus !== 'PASSED' &&
+        currentSourceGeneration.reviewStatus !== 'ACCEPTED')
+    )
+      return failContinuation('The accepted previous Shot video is no longer current');
+    const frameAsset = this.assets.get(payload.frameAssetId);
+    if (!frameAsset) return failContinuation('Continuation frame asset is missing');
+    if (
+      frameAsset.projectId !== payload.projectId ||
+      frameAsset.type !== 'SHOT_CONTINUATION_FRAME' ||
+      frameAsset.path !== payload.framePath ||
+      frameAsset.sourceEntityId !== currentSourceGeneration.id ||
+      frameAsset.inputFingerprint !== currentSourceGeneration.inputFingerprint
+    )
+      return failContinuation('Continuation frame lineage is stale');
+    let frameMetadata: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(String(frameAsset.metadata ?? '{}')) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        return failContinuation('Continuation frame metadata is invalid');
+      frameMetadata = parsed as Record<string, unknown>;
+    } catch {
+      return failContinuation('Continuation frame metadata is invalid');
+    }
+    if (
+      frameMetadata.sourceShotId !== payload.sourceShotId ||
+      frameMetadata.sourceVideoAssetId !== payload.sourceVideoAssetId ||
+      frameMetadata.sourceVideoSha256 !== payload.sourceVideoSha256 ||
+      frameMetadata.framePosition !== payload.framePosition ||
+      frameMetadata.extractorVersion !== payload.extractorVersion
+    )
+      return failContinuation('Continuation frame metadata is stale');
+    if (frameAsset.status === 'READY') {
+      if (
+        !frameAsset.isCurrent ||
+        !/^[0-9a-f]{64}$/u.test(frameAsset.sha256) ||
+        frameAsset.sha256 === '0'.repeat(64)
+      )
+        return failContinuation('Continuation frame asset is not current');
+      const continuationSource = continuationSourceSchema.parse({
+        sourceShotId: payload.sourceShotId,
+        sourceVideoAssetId: payload.sourceVideoAssetId,
+        sourceVideoSha256: payload.sourceVideoSha256,
+        frameAssetId: payload.frameAssetId,
+        frameSha256: frameAsset.sha256,
+        framePosition: payload.framePosition,
+        extractorVersion: payload.extractorVersion,
+      });
+      this.generations.updateContinuationSource(
+        payload.projectId,
+        payload.generationId,
+        continuationSource,
+      );
+      progress(1, 'Shot continuation frame already extracted');
+      return;
+    }
+    const sourcePath = safeWorkspacePath(this.context.workspace.root, sourceAsset.path);
+    const stagingPath = join(
+      this.context.workspace.staging,
+      `continuation-${payload.frameAssetId}.png`,
+    );
+    const destination = safeWorkspacePath(this.context.workspace.root, payload.framePath);
+    try {
+      progress(0.2, 'Extracting the accepted previous Shot final frame');
+      await this.context.media.extractFinalVideoFrame(sourcePath, stagingPath, signal);
+      const image = await validateImageFile(this.context.media, stagingPath);
+      await prepareProjectDirectories(this.context.workspace, payload.projectId);
+      await promoteFile(stagingPath, destination);
+      const file = await sha256File(destination);
+      this.assets.completeContinuationFrame({
+        projectId: payload.projectId,
+        assetId: payload.frameAssetId,
+        path: relativeAssetPath(this.context.workspace.root, destination),
+        bytes: file.bytes,
+        sha256: file.hash,
+        width: image.width,
+        height: image.height,
+        sourceStepId: step.id,
+      });
+      const generation = this.generations.get(payload.projectId, payload.generationId);
+      if (!generation || generation.shotId !== payload.shotId)
+        throw new AppError('STALE_INPUT', 'Shot video generation is no longer current', 409);
+      const continuationSource = continuationSourceSchema.parse({
+        sourceShotId: payload.sourceShotId,
+        sourceVideoAssetId: payload.sourceVideoAssetId,
+        sourceVideoSha256: payload.sourceVideoSha256,
+        frameAssetId: payload.frameAssetId,
+        frameSha256: file.hash,
+        framePosition: payload.framePosition,
+        extractorVersion: payload.extractorVersion,
+      });
+      this.generations.updateContinuationSource(
+        payload.projectId,
+        payload.generationId,
+        continuationSource,
+      );
+      progress(1, 'Shot continuation frame extracted');
+    } catch (error) {
+      const failure = videoFailure(error, signal);
+      if (failure.code === 'CANCELLED')
+        this.generations.markCancelled(payload.projectId, payload.generationId, failure.message);
+      else
+        this.generations.markFailed(
+          payload.projectId,
+          payload.generationId,
+          'CONTINUATION_SOURCE_MISSING',
+          failure.message,
+        );
+      throw error;
+    } finally {
+      await rm(stagingPath, { force: true });
+    }
+  }
 
   private assertCurrentInputs(
     projectId: Id,
@@ -780,19 +1522,82 @@ export class SceneVideoService {
       request: VideoGenerationRequest;
       motionPlanFingerprint: string;
       settingsFingerprint: string;
+      shotPlanFingerprint?: string | null;
+      requireImageApproval?: boolean;
     },
-  ): void {
-    const imageSha = this.generations.currentSourceImageSha(projectId, sceneStableId);
+  ): VideoGenerationRequest {
+    const shotId = scheduled.request.shotId ?? null;
+    const imageSha = this.generations.currentSourceImageSha(
+      projectId,
+      sceneStableId,
+      shotId,
+      scheduled.requireImageApproval,
+    );
     if (!imageSha)
-      throw new AppError('STALE_INPUT', 'Scene no longer has a current accepted image', 409);
+      throw new AppError(
+        'STALE_INPUT',
+        shotId
+          ? 'Shot no longer has a current accepted image'
+          : 'Scene no longer has a current accepted image',
+        409,
+      );
     if (imageSha !== scheduled.request.sourceImageSha256)
-      throw new AppError('STALE_INPUT', 'The accepted scene image changed during generation', 409);
+      throw new AppError(
+        'STALE_INPUT',
+        shotId
+          ? 'The accepted Shot image changed during generation'
+          : 'The accepted scene image changed during generation',
+        409,
+      );
     const settings = this.settings.get(projectId);
     if (!settings || settings.inputFingerprint !== scheduled.settingsFingerprint)
       throw new AppError('STALE_INPUT', 'Video generation settings changed', 409);
     const plan = this.plans.getCurrent(projectId, sceneRevisionId);
     if (!plan || plan.inputFingerprint !== scheduled.motionPlanFingerprint)
       throw new AppError('STALE_INPUT', 'AI motion plan changed', 409);
+    if (shotId) {
+      const shotPlan = this.shotPlans.getCurrent(projectId, sceneRevisionId);
+      if (
+        !shotPlan ||
+        shotPlan.id !== scheduled.request.shotPlanId ||
+        shotPlan.inputFingerprint !== scheduled.shotPlanFingerprint ||
+        !shotPlan.candidate.shots.some((shot) => shot.id === shotId)
+      )
+        throw new AppError('STALE_INPUT', 'Shot plan changed during generation', 409);
+    }
+    const continuation = scheduled.request.continuationSource;
+    if (!continuation) return scheduled.request;
+    const frame = this.assets.get(continuation.frameAssetId);
+    const sourceGeneration = this.generations.getCurrent(
+      projectId,
+      sceneStableId,
+      continuation.sourceShotId,
+    );
+    if (
+      !frame ||
+      frame.type !== 'SHOT_CONTINUATION_FRAME' ||
+      frame.status !== 'READY' ||
+      frame.sha256 !== continuation.frameSha256 ||
+      !sourceGeneration ||
+      sourceGeneration.assetId !== continuation.sourceVideoAssetId ||
+      sourceGeneration.status !== 'COMPLETED' ||
+      sourceGeneration.freshness !== 'CURRENT' ||
+      (sourceGeneration.automaticQualityStatus !== 'PASSED' &&
+        sourceGeneration.reviewStatus !== 'ACCEPTED')
+    )
+      throw new AppError(
+        'CONTINUATION_SOURCE_MISSING',
+        'The accepted previous Shot final frame is unavailable',
+        409,
+      );
+    return videoGenerationRequestSchema.parse({
+      ...scheduled.request,
+      sourceImagePath: frame.path,
+      continuationSource: {
+        ...continuation,
+        frameSha256: frame.sha256,
+      },
+    });
   }
 
   private parseStepPayload(step: ClaimedStep): z.infer<typeof videoStepPayloadSchema> {
@@ -800,6 +1605,15 @@ export class SceneVideoService {
       return videoStepPayloadSchema.parse(JSON.parse(step.payload));
     } catch {
       throw new AppError('DATA_CORRUPTION', 'Scene video step payload is invalid', 500);
+    }
+  }
+  private parseContinuationStepPayload(
+    step: ClaimedStep,
+  ): z.infer<typeof continuationStepPayloadSchema> {
+    try {
+      return continuationStepPayloadSchema.parse(JSON.parse(step.payload));
+    } catch {
+      throw new AppError('DATA_CORRUPTION', 'Continuation extraction step payload is invalid', 500);
     }
   }
   private async critiqueVideo(
@@ -810,14 +1624,44 @@ export class SceneVideoService {
     clipPath: string,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (!this.critic || !generation.assetId) return;
+    const settleUnavailable = (): void => {
+      this.context.database.sqlite
+        .prepare(
+          `UPDATE scene_video_generations
+           SET automatic_quality_status='UNAVAILABLE',critic_evaluation_id=NULL,updated_at=?
+           WHERE project_id=? AND id=?`,
+        )
+        .run(new Date().toISOString(), projectId, generation.id);
+    };
+    if (!this.critic || !generation.assetId) {
+      settleUnavailable();
+      if (generation.reviewStatus !== 'ACCEPTED')
+        this.generations.clearCurrent(
+          projectId,
+          scene.stableId,
+          generation.id,
+          generation.shotId ?? null,
+        );
+      return;
+    }
     const plan = this.shotPlans.getCurrent(projectId, scene.id);
-    const shot =
-      plan?.candidate.shots.find((candidate) => candidate.hero) ?? plan?.candidate.shots[0];
-    const source = this.assets.get(request.sourceImageAssetId);
-    if (!shot || !source || source.status !== 'READY') return;
-    const resolvedShot = shot;
-    const resolvedSource = source;
+    const shot = generation.shotId
+      ? (plan?.candidate.shots.find((candidate) => candidate.id === generation.shotId) ?? null)
+      : (plan?.candidate.shots.find((candidate) => candidate.hero) ??
+        plan?.candidate.shots[0] ??
+        null);
+    const sourceAssetId = request.continuationSource?.frameAssetId ?? request.sourceImageAssetId;
+    const source = this.assets.get(sourceAssetId);
+    if (!source || source.status !== 'READY') {
+      if (generation.reviewStatus !== 'ACCEPTED')
+        this.generations.clearCurrent(
+          projectId,
+          scene.stableId,
+          generation.id,
+          generation.shotId ?? null,
+        );
+      return;
+    }
     const clipDurationMs =
       generation.clipDurationMs ??
       Math.round(((generation.frameCount ?? 1) / (generation.fps ?? 25)) * 1_000);
@@ -869,12 +1713,15 @@ export class SceneVideoService {
         });
       }
       const clip = this.assets.get(generation.assetId);
-      if (!clip || clip.status !== 'READY') return;
+      if (!clip || clip.status !== 'READY') {
+        settleUnavailable();
+        return;
+      }
       const evaluation = await this.critic.evaluate(
         {
           projectId,
           generationId: generation.id,
-          shot: resolvedShot,
+          shot,
           sceneRevisionId: scene.id,
           clipAssetId: clip.id,
           clipSha256: clip.sha256,
@@ -883,8 +1730,8 @@ export class SceneVideoService {
           evidence: [
             { assetId: clip.id, sha256: clip.sha256, role: 'CANDIDATE', samplePosition: null },
             {
-              assetId: resolvedSource.id,
-              sha256: resolvedSource.sha256,
+              assetId: source.id,
+              sha256: source.sha256,
               role: 'REFERENCE',
               samplePosition: null,
             },
@@ -896,7 +1743,7 @@ export class SceneVideoService {
             })),
           ],
           imagePaths: [
-            resolvedSource.path,
+            source.path,
             ...sampleDestinations.map((path) =>
               relativeAssetPath(this.context.workspace.root, path),
             ),
@@ -904,11 +1751,140 @@ export class SceneVideoService {
         },
         signal,
       );
+      const criticStatus =
+        evaluation.status === 'PASSED' ||
+        evaluation.status === 'REJECTED' ||
+        evaluation.status === 'UNAVAILABLE' ||
+        evaluation.status === 'MANUAL_REVIEW_REQUIRED'
+          ? evaluation.status
+          : 'UNAVAILABLE';
+      const metadata = generation.metadata;
+      const profile =
+        this.profiles.getCurrent(projectId, 'AUTO') ??
+        this.profiles.getCurrent(projectId, 'BALANCED');
+      const settings = this.settings.get(projectId);
+      const fallback =
+        metadata.qualityFallback === 'BLOCK' || metadata.qualityFallback === 'MANUAL_REVIEW'
+          ? metadata.qualityFallback
+          : (profile?.settings.qualityFallback ?? 'MANUAL_REVIEW');
+      const requireHumanApproval =
+        typeof metadata.requireHumanApproval === 'boolean'
+          ? metadata.requireHumanApproval
+          : Boolean(settings?.requireMotionApproval);
+      const retryLimit =
+        typeof metadata.temporalRetryLimit === 'number' &&
+        Number.isInteger(metadata.temporalRetryLimit)
+          ? metadata.temporalRetryLimit
+          : (profile?.settings.temporalRetryLimit ?? 2);
+      const action = automaticQualityAction(criticStatus, fallback);
+      const guidance = temporalRetryGuidance(
+        evaluation.issues,
+        evaluation.guidance,
+        evaluation.explanation,
+      );
+      const outcomeNotes =
+        criticStatus === 'PASSED'
+          ? null
+          : `Automatic temporal quality ${criticStatus}: ${guidance}`.slice(0, 1_000);
       this.context.database.sqlite
         .prepare(
-          'UPDATE scene_video_generations SET automatic_quality_status=?,critic_evaluation_id=?,updated_at=? WHERE id=?',
+          'UPDATE scene_video_generations SET automatic_quality_status=?,critic_evaluation_id=?,review_notes=COALESCE(?,review_notes),updated_at=? WHERE id=?',
         )
-        .run(evaluation.status, evaluation.id, new Date().toISOString(), generation.id);
+        .run(criticStatus, evaluation.id, outcomeNotes, new Date().toISOString(), generation.id);
+      if (action === 'ACCEPT' && settings && !requireHumanApproval)
+        this.generations.setCurrent(
+          projectId,
+          scene.stableId,
+          generation.id,
+          generation.shotId ?? null,
+          requireHumanApproval,
+        );
+      if (action !== 'ACCEPT' && generation.reviewStatus !== 'ACCEPTED')
+        this.generations.clearCurrent(
+          projectId,
+          scene.stableId,
+          generation.id,
+          generation.shotId ?? null,
+        );
+      if (action !== 'RETRY') return;
+      const retryCount =
+        typeof metadata.retryCount === 'number' && Number.isInteger(metadata.retryCount)
+          ? metadata.retryCount
+          : 0;
+      if (retryCount >= retryLimit) {
+        this.context.database.sqlite
+          .prepare(
+            "UPDATE scene_video_generations SET automatic_quality_status='MANUAL_REVIEW_REQUIRED',review_notes=?,updated_at=? WHERE project_id=? AND id=?",
+          )
+          .run(
+            `Automatic temporal quality retry limit exhausted: ${guidance}`.slice(0, 1_000),
+            new Date().toISOString(),
+            projectId,
+            generation.id,
+          );
+        return;
+      }
+      const retryContext: QualityRetryContext = {
+        sourceGenerationId: generation.id,
+        criticEvaluationId: evaluation.id,
+        issues: evaluation.issues,
+        guidance,
+      };
+      const qualityPolicy =
+        typeof metadata.requireImageApproval === 'boolean' &&
+        typeof metadata.requireHumanApproval === 'boolean'
+          ? {
+              requireImageApproval: metadata.requireImageApproval,
+              requireHumanApproval: metadata.requireHumanApproval,
+              qualityFallback: fallback,
+              temporalRetryLimit: retryLimit,
+            }
+          : undefined;
+      const retrySeed = deterministicRetrySeed(generation.inputFingerprint, retryCount + 1);
+      try {
+        if (generation.shotId)
+          this.scheduleShot(
+            projectId,
+            scene.id,
+            generation.shotId,
+            {
+              instructions: guidance,
+              retryCount: retryCount + 1,
+              seed: retrySeed,
+              qualityRetry: retryContext,
+            },
+            undefined,
+            false,
+            qualityPolicy,
+          );
+        else
+          this.scheduleScene(
+            projectId,
+            scene,
+            guidance,
+            retrySeed,
+            undefined,
+            undefined,
+            retryCount + 1,
+            undefined,
+            false,
+            retryContext,
+            qualityPolicy,
+          );
+      } catch (error) {
+        this.context.database.sqlite
+          .prepare(
+            'UPDATE scene_video_generations SET review_notes=?,updated_at=? WHERE project_id=? AND id=?',
+          )
+          .run(
+            `Automatic retry could not be scheduled: ${
+              error instanceof Error ? error.message : 'unknown error'
+            }`,
+            new Date().toISOString(),
+            projectId,
+            generation.id,
+          );
+      }
     } finally {
       await Promise.all(samplePaths.map((path) => rm(path, { force: true })));
     }

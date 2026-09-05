@@ -231,6 +231,7 @@ const workspaceRelativePathSchema = z
 export const imageConditioningCharacterSchema = z
   .object({
     characterId: z.string().trim().min(1).max(120),
+    appearanceStageId: z.string().trim().min(1).max(120).nullable().default(null),
     referenceAssetId: idSchema,
     referenceSha256: referenceSha256Schema,
     referencePath: workspaceRelativePathSchema,
@@ -363,14 +364,15 @@ export const imageCandidateRankingSchema = z
 export type ImageCandidateRanking = z.infer<typeof imageCandidateRankingSchema>;
 
 export type ImageGenerationRequest = z.infer<typeof imageGenerationRequestSchema>;
-
 export const imageGenerationRequestSchema = z
   .object({
     projectId: idSchema,
     sceneId: idSchema,
     visualPromptPackageId: idSchema,
-    shotId: z.string().trim().min(1).max(120).nullable().optional(),
-    shotRevision: z.number().int().positive().nullable().optional(),
+    shotPlanId: idSchema.nullable().default(null),
+    shotId: z.string().trim().min(1).max(120).nullable().default(null),
+    shotRevision: z.number().int().positive().nullable().default(null),
+    shotOrdinal: z.number().int().positive().nullable().default(null),
     providerJobId: idSchema,
     prompt: boundedString(8_000),
     negativePrompt: boundedString(3_000).nullable(),
@@ -394,6 +396,8 @@ export const sceneImageGenerationScheduleSchema = z
     instructions: boundedString(2_000).default(''),
     conditioningMode: imageConditioningModeSchema.optional(),
     candidateCount: z.number().int().min(1).max(4).default(1),
+    qualityThreshold: z.number().min(0).max(5).optional(),
+    qualityRetryLimit: z.number().int().min(0).max(5).optional(),
   })
   .strict();
 export type SceneImageGenerationSchedule = z.infer<typeof sceneImageGenerationScheduleSchema>;
@@ -496,6 +500,8 @@ export const imageGenerationBatchSchema = z
     onlyMissing: z.boolean().default(true),
     includeStale: z.boolean().default(false),
     candidateCount: z.number().int().min(1).max(4).default(1),
+    qualityThreshold: z.number().min(0).max(5).optional(),
+    qualityRetryLimit: z.number().int().min(0).max(5).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -513,6 +519,8 @@ export const imageGenerationChapterBatchSchema = z
     onlyMissing: z.boolean().default(true),
     includeStale: z.boolean().default(false),
     candidateCount: z.number().int().min(1).max(4).default(1),
+    qualityThreshold: z.number().min(0).max(5).optional(),
+    qualityRetryLimit: z.number().int().min(0).max(5).optional(),
   })
   .strict();
 export type ImageGenerationChapterBatch = z.infer<typeof imageGenerationChapterBatchSchema>;
@@ -522,8 +530,6 @@ export const sceneImageCurrentSelectionSchema = z
     expectedSceneRevision: z.number().int().positive().optional(),
   })
   .strict();
-export type SceneImageCurrentSelection = z.infer<typeof sceneImageCurrentSelectionSchema>;
-
 export const sceneImageGenerationDtoSchema = z
   .object({
     id: idSchema,
@@ -531,6 +537,10 @@ export const sceneImageGenerationDtoSchema = z
     sceneId: z.string().trim().min(1).max(120),
     sceneRevisionId: idSchema,
     visualPromptPackageId: idSchema.nullable(),
+    shotPlanId: idSchema.nullable().default(null),
+    shotId: z.string().trim().min(1).max(120).nullable().default(null),
+    shotRevision: z.number().int().positive().nullable().default(null),
+    shotOrdinal: z.number().int().positive().nullable().default(null),
     revision: z.number().int().positive(),
     source: sceneImageSourceSchema,
     provider: imageProviderSchema.nullable(),
@@ -538,6 +548,8 @@ export const sceneImageGenerationDtoSchema = z
     freshness: sceneImageFreshnessSchema,
     reviewStatus: sceneImageReviewStatusSchema,
     review: imageQualityReviewSchema.nullable(),
+    automaticQualityStatus: automaticQualityStatusSchema.default('NOT_RUN'),
+    criticEvaluationId: idSchema.nullable().default(null),
     candidateSetId: idSchema.nullable(),
     candidateIndex: z.number().int().positive().nullable(),
     productionReady: z.boolean().default(false),
@@ -576,6 +588,8 @@ export const sceneImageCandidateSetDtoSchema = z
     sceneId: z.string().trim().min(1).max(120),
     sceneRevisionId: idSchema,
     visualPromptPackageId: idSchema.nullable(),
+    shotPlanId: idSchema.nullable().default(null),
+    shotId: z.string().trim().min(1).max(120).nullable().default(null),
     mode: imageConditioningModeSchema,
     workflowTemplate: imageWorkflowTemplateSchema.nullable(),
     packageFingerprint: z.string().min(1).max(128).nullable(),

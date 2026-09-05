@@ -3,6 +3,12 @@ import { shotPhysicalStateSchema } from '@studio/shared';
 import type { Shot, ShotContinuationDecision, ShotPhysicalState } from '@studio/shared';
 import { stableSerialize } from './story-prompts.js';
 
+function appearanceStageId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || !('appearanceStageId' in value)) return undefined;
+  const stage = value.appearanceStageId;
+  return typeof stage === 'string' ? stage : undefined;
+}
+
 function fingerprint(state: Omit<ShotPhysicalState, 'fingerprint'>): string {
   return createHash('sha256').update(stableSerialize(state)).digest('hex');
 }
@@ -70,13 +76,44 @@ export function continuationEligibility(previous: Shot, current: Shot): ShotCont
     .sort();
   if (stableSerialize(previousIds) !== stableSerialize(currentIds))
     return reject('Visible identity set changed');
+  const previousObjects = new Map(
+    previous.finalState.objects.map((value) => [value.objectId, value]),
+  );
+  const currentObjects = new Map(
+    current.initialState.objects.map((value) => [value.objectId, value]),
+  );
+  if (
+    stableSerialize([...previousObjects.keys()].sort()) !==
+    stableSerialize([...currentObjects.keys()].sort())
+  )
+    return reject('Physical object set changed');
+  for (const [objectId, object] of currentObjects) {
+    const source = previousObjects.get(objectId);
+    if (
+      !source ||
+      source.position !== object.position ||
+      source.holderCharacterId !== object.holderCharacterId
+    )
+      return reject('Physical object state changed');
+  }
   for (const character of current.initialState.characters) {
     const source = previous.finalState.characters.find(
       (value) => value.characterId === character.characterId,
     );
     if (!source) return reject('Character leaves or returns');
-    if (source.worldPosition !== character.worldPosition || source.facing !== character.facing)
-      return reject('Character repositioned or reversed');
+    const sourceAppearanceStageId = appearanceStageId(source);
+    const currentAppearanceStageId = appearanceStageId(character);
+    if (
+      sourceAppearanceStageId !== currentAppearanceStageId &&
+      (sourceAppearanceStageId !== undefined || currentAppearanceStageId !== undefined)
+    )
+      return reject('Character appearance, physical state, or held objects changed');
+    if (
+      source.bodyOrientation !== character.bodyOrientation ||
+      source.pose !== character.pose ||
+      stableSerialize(source.heldObjectIds) !== stableSerialize(character.heldObjectIds)
+    )
+      return reject('Character appearance, physical state, or held objects changed');
     if (
       character.faceVisibility === 'FRONTAL' &&
       !['FRONTAL', 'PROFILE', 'PARTIAL'].includes(source.faceVisibility)

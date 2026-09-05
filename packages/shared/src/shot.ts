@@ -137,6 +137,7 @@ export type ShotDynamicIntent = z.infer<typeof shotDynamicIntentSchema>;
 export const shotCharacterContinuitySchema = z
   .object({
     characterId: stableIdSchema,
+    appearanceStageId: stableIdSchema.optional(),
     visible: z.boolean(),
     screenRegion: bounded(120).default(''),
     worldPosition: bounded(300).default(''),

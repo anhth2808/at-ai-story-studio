@@ -37,8 +37,8 @@
 - [x] 3.7 Implement exact Character-stage reference resolution by stable IDs; verify missing stage, similar stage name, prototype, other stage, other Character, rejected, stale, and cross-project Assets never substitute.
 - [x] 3.8 Separate hard Location geometry fields from soft Scene-time weather, lighting, atmosphere, temporary objects, and damage; verify a weather-only edit leaves canonical Location revision unchanged.
 - [x] 3.9 Implement character-free canonical Location reference prompt/generation/review using only hard geometry; verify transient lighting/weather/story props and Characters are excluded.
-- [ ] 3.10 Extend existing Visual Bible/reference UI and APIs minimally for prototype, stage, and Location candidates, provenance, approval, rejection, and currentness; verify keyboard access and 375px layout.
-- [ ] 3.11 Verify replacing one prototype, stage, or Location reference stales only exact dependent prompt/image/video/render descendants and preserves unrelated Story/TTS/media.
+- [x] 3.10 Extend existing Visual Bible/reference UI and APIs minimally for prototype, stage, and Location candidates, provenance, approval, rejection, and currentness; verify keyboard access and 375px layout.
+- [x] 3.11 Verify replacing one prototype, stage, or Location reference stales only exact dependent prompt/image/video/render descendants and preserves unrelated Story/TTS/media.
 
 ## 4. Visual-only prompt compiler and physical continuity
 
@@ -51,17 +51,17 @@
 - [x] 4.7 Implement close/medium/wide reference policy retaining canonical Location in close-ups as a cropped/local slice and prioritizing Location in wide Shots; verify all three policies deterministically bind expected Assets.
 - [x] 4.8 Separate `visibleCharacters` and `offscreenCharacters`; verify bare off-screen names, identity text, and references are stripped while gaze becomes a neutral off-camera direction.
 - [x] 4.9 Implement minimum-change prompt safety rewriting with immutable binding metadata and exact placeholder-multiset validation; verify deletion, addition, duplication, or renumbering fails before submission.
-- [ ] 4.11 Extend Visual Prompt Package persistence, fingerprints, stale propagation, selective APIs, and review UI for Shot identity, continuity, static/dynamic prompts, and binding evidence; verify normal dashboard payloads remain bounded.
+- [x] 4.11 Extend Visual Prompt Package persistence, fingerprints, stale propagation, selective APIs, and review UI for Shot identity, continuity, static/dynamic prompts, and binding evidence; verify normal dashboard payloads remain bounded.
 
 ## 5. Strict continuation and Shot timing
 
 - [x] 5.1 Implement deterministic continuation eligibility covering inward crop/push, identity set, face basis, frame retention, emotional reset, repositioning, Location change, leave/return, reverse angle, and camera reorientation; verify every named invalid case returns false.
 - [x] 5.2 Verify a valid inward continuation with supported subject/face state returns true and records an explainable versioned decision.
-- [ ] 5.3 Add `EXTRACT_SHOT_CONTINUATION_FRAME` using centralized safe FFmpeg execution, actual final decodable frame extraction, media validation, hashing, cancellation, and managed Asset promotion.
-- [ ] 5.4 Persist continuation source video Asset/hash, source Shot, source frame position, extractor version, and frame Asset/hash; verify a stale/rejected/missing/wrong-revision source fails with `CONTINUATION_SOURCE_MISSING` or equivalent.
-- [ ] 5.5 Ensure eligible continuation skips independent keyframe generation and uses the extracted prior frame as video input; verify invalid continuation schedules a normal keyframe instead.
-- [ ] 5.6 Add Shot allocations below existing SceneTiming with exact plan revision, target/actual duration, legal frame count, FPS, and residual; verify allocations stay ordered and preserve Scene timing ownership.
-- [ ] 5.7 Compose accepted Shot media into existing SceneClip planning and reject stale, failed-QC, missing-reference, or non-current inputs; verify one failed Shot blocks only its Scene descendants and preserves accepted siblings.
+- [x] 5.3 Add `EXTRACT_SHOT_CONTINUATION_FRAME` using centralized safe FFmpeg execution, actual final decodable frame extraction, media validation, hashing, cancellation, and managed Asset promotion.
+- [x] 5.4 Persist continuation source video Asset/hash, source Shot, source frame position, extractor version, and frame Asset/hash; verify a stale/rejected/missing/wrong-revision source fails with `CONTINUATION_SOURCE_MISSING` or equivalent.
+- [x] 5.5 Ensure eligible continuation skips independent keyframe generation and uses the extracted prior frame as video input; verify invalid continuation schedules a normal keyframe instead.
+- [x] 5.6 Add Shot allocations below existing SceneTiming with exact plan revision, target/actual duration, legal frame count, FPS, and residual; verify allocations stay ordered and preserve Scene timing ownership.
+- [x] 5.7 Compose accepted Shot media into existing SceneClip planning and reject stale, failed-QC, missing-reference, or non-current inputs; verify one failed Shot blocks only its Scene descendants and preserves accepted siblings.
 
 ## 6. Image candidate policy, critic, ranking, and regeneration
 
@@ -73,10 +73,10 @@
 - [x] 6.6 Cover identity, face, hair, clothing/stage, visible Character count, prompt, composition, framing, pose, Location, objects, anatomy, hands, style drift, and reference-pose bleed in the critic schema/prompt; verify malformed or unknown output is rejected.
 - [x] 6.7 Implement versioned deterministic ranking with hard-failure exclusion, weighted scores, severe-issue count, candidate index, and stable-ID tie break; verify tied persisted inputs choose the same winner and record why.
 - [x] 6.8 Persist candidate-set ranking order, exclusions, scores, winner, and reason without adding hidden mutable best-image state; verify all candidate Assets and evaluations remain historical.
-- [ ] 6.9 Implement deterministic issue-to-regeneration guidance and bounded automatic candidate attempts under image regeneration/resource/stage/cancellation limits; verify successful siblings are not regenerated.
-- [ ] 6.10 Verify all-failed exhaustion becomes MANUAL_REVIEW_REQUIRED, intervention, or block by profile and never quality pass.
-- [ ] 6.11 Extend current renderable-image selection to require exact current Shot/Scene revision, required references, current accepted/ranked candidate, and passing or explicit degraded-review QC; verify stale/rejected/wrong-revision images cannot feed video.
-- [ ] 6.12 Integrate image critic/rank/retry settlement with existing worker and ProductionStage reconciliation; verify restart reuses completed evaluations and accepted Assets without duplicate provider work.
+- [x] 6.9 Implement deterministic issue-to-regeneration guidance and bounded automatic candidate attempts under image regeneration/resource/stage/cancellation limits; verify successful siblings are not regenerated.
+- [x] 6.10 Verify all-failed exhaustion becomes MANUAL_REVIEW_REQUIRED, intervention, or block by profile and never quality pass.
+- [x] 6.11 Extend current renderable-image selection to require exact current Shot/Scene revision, required references, current accepted/ranked candidate, and passing or explicit degraded-review QC; verify stale/rejected/wrong-revision images cannot feed video.
+- [x] 6.12 Integrate image critic/rank/retry settlement with existing worker and ProductionStage reconciliation; verify restart reuses completed evaluations and accepted Assets without duplicate provider work.
 
 ## 7. Wan and LTX-2 video backends
 
@@ -104,36 +104,36 @@
 - [x] 8.6 Implement primary-person versus background-extra semantics; verify incidental crowd changes do not fail but an unjustified new primary person does.
 - [x] 8.7 Implement fabricated-face detection from source face visibility/orientation and reference basis; verify a new frontal face from a back-facing/occluded source rejects in strict mode.
 - [x] 8.8 Ensure critic infrastructure errors persist `UNAVAILABLE` and follow technical retry/fallback/intervention policy rather than semantic generation retry or PASS.
-- [ ] 8.9 Implement deterministic temporal issue guidance and bounded semantic regeneration under `temporalRetryLimit`; verify attempt, reject reason, issues, guidance, and lineage persist and exhaustion blocks/escalates.
-- [ ] 8.10 Add an optional backend-local early-quality hook only if the approved LTX base decode/refinement topology supports it without global ComfyUI modification; otherwise record DEFERRED and verify full-output temporal QC remains active.
-- [ ] 8.11 Integrate temporal QC settlement and current-clip acceptance with worker recovery and ProductionStage reconciliation; verify restart reuses committed critic/clip state and rejected/stale clips never feed timeline.
+- [x] 8.9 Implement deterministic temporal issue guidance and bounded semantic regeneration under `temporalRetryLimit`; verify attempt, reject reason, issues, guidance, and lineage persist and exhaustion blocks/escalates.
+- [x] 8.10 Add an optional backend-local early-quality hook only if the approved LTX base decode/refinement topology supports it without global ComfyUI modification; otherwise record DEFERRED and verify full-output temporal QC remains active.
+- [x] 8.11 Integrate temporal QC settlement and current-clip acceptance with worker recovery and ProductionStage reconciliation; verify restart reuses committed critic/clip state and rejected/stale clips never feed timeline.
 
 ## 9. Production, Story identity, and audio integration
 
-- [ ] 9.1 Materialize updated MANUAL_REVIEW, BALANCED, and AUTO profile defaults so all three run automatic image/video quality gates while human approval differs; verify AUTO never disables critics.
-- [ ] 9.2 Update production preflight/planning to report exact missing references, critic readiness, backend readiness, candidate work, retry exhaustion, and honest estimates without scheduling side effects.
-- [ ] 9.3 Update existing `SCENES`, `VISUAL_PROFILES`, `VISUAL_PROMPTS`, `SCENE_IMAGES`, `AI_MOTION`, and `TIMELINE` adapters to aggregate bounded Shot work without adding Product stages or direct provider/critic/FFmpeg calls.
-- [ ] 9.4 Verify quality blockers create deduplicated interventions and no stage completes while a required Shot lacks eligible media; verify BALANCED escalates only uncertainty/exhaustion and MANUAL_REVIEW pauses at human gates.
-- [ ] 9.5 Verify backend-setting changes invalidate video only, Shot-plan changes invalidate exact Shot descendants, Location/stage changes invalidate bound Shots only, and timing-only edits reuse accepted raw video.
-- [ ] 9.6 Add bounded future-reveal Character resolution from aliases, blueprint, plan windows, summaries, and capped later context with evidence/confidence; verify one revealed identity reuses canonical Character, voice, and reference IDs.
-- [ ] 9.7 Verify ambiguous future identity remains unresolved for review and future-only Characters do not receive current-chapter resources.
+- [x] 9.1 Materialize updated MANUAL_REVIEW, BALANCED, and AUTO profile defaults so all three run automatic image/video quality gates while human approval differs; verify AUTO never disables critics.
+- [x] 9.2 Update production preflight/planning to report exact missing references, critic readiness, backend readiness, candidate work, retry exhaustion, and honest estimates without scheduling side effects.
+- [x] 9.3 Update existing `SCENES`, `VISUAL_PROFILES`, `VISUAL_PROMPTS`, `SCENE_IMAGES`, `AI_MOTION`, and `TIMELINE` adapters to aggregate bounded Shot work without adding Product stages or direct provider/critic/FFmpeg calls.
+- [x] 9.4 Verify quality blockers create deduplicated interventions and no stage completes while a required Shot lacks eligible media; verify BALANCED escalates only uncertainty/exhaustion and MANUAL_REVIEW pauses at human gates.
+- [x] 9.5 Verify backend-setting changes invalidate video only, Shot-plan changes invalidate exact Shot descendants, Location/stage changes invalidate bound Shots only, and timing-only edits reuse accepted raw video.
+- [x] 9.6 Add bounded future-reveal Character resolution from aliases, blueprint, plan windows, summaries, and capped later context with evidence/confidence; verify one revealed identity reuses canonical Character, voice, and reference IDs.
+- [x] 9.7 Verify ambiguous future identity remains unresolved for review and future-only Characters do not receive current-chapter resources.
 - [x] 9.8 Add robust decodable playback-duration measurement to centralized media utilities with measurement provenance and explicit fallback; verify a padded MP3 uses decoded duration for accumulation.
 - [x] 9.9 Add provider-aware TTS anomaly checks for near-empty audio, text/duration ratio, excessive silence/activity loss, and extreme duration; verify a short-speech/long-silence segment is rejected.
 - [x] 9.10 Integrate TTS quality retry at segment scope under existing limits and explicit fallback policy; verify completed sibling segments are not regenerated and inspection failure is not quality pass.
-- [ ] 9.11 Verify pause/cancel/retry/restart/worker settlement and second-run reuse across new Shot/reference/critic/backend steps using existing canonical outputs as source of truth.
+- [x] 9.11 Verify pause/cancel/retry/restart/worker settlement and second-run reuse across new Shot/reference/critic/backend steps using existing canonical outputs as source of truth.
 
 ## 10. Focused behavioral verification
 
 - [x] 10.1 Add Director tests for overloaded Shot, turning-point split, filler rejection, dialogue carrier, internal-monologue mouth rule, prompt separation, duration ceiling, and variation warning.
-- [ ] 10.2 Add Character/Location tests for prototype contract, prototype-derived stage, transient-state exclusion, supported/unsupported wardrobe inference, exact stage identity, no substitution, hard/soft split, no-character Location reference, and Location binding.
+- [x] 10.2 Add Character/Location tests for prototype contract, prototype-derived stage, transient-state exclusion, supported/unsupported wardrobe inference, exact stage identity, no substitution, hard/soft split, no-character Location reference, and Location binding.
 - [x] 10.3 Add prompt compiler tests proving no `currentGoal`, `knowledge`, raw serialized JSON, or off-screen names; deterministic order; close/medium/wide policy; exact ordinals; and safety rewrite preservation.
-- [ ] 10.4 Add continuity/continuation tests proving previous final state affects next initial state, every invalid continuation case is rejected, and valid continuation uses exact prior-frame lineage.
-- [ ] 10.5 Add image-quality tests proving profile candidate counts, persisted critic scores, deterministic ranking, bounded regeneration, exhaustion policy, restart reuse, and stale/rejected keyframe exclusion.
+- [x] 10.4 Add continuity/continuation tests proving previous final state affects next initial state, every invalid continuation case is rejected, and valid continuation uses exact prior-frame lineage.
+- [x] 10.5 Add image-quality tests proving profile candidate counts, persisted critic scores, deterministic ranking, bounded regeneration, exhaustion policy, restart reuse, and stale/rejected keyframe exclusion.
 - [x] 10.6 Add backend tests for Wan resolver/regression, LTX resolver/readiness, QUALITY selection/fallback audit, separate frame rules, complete metadata, FPS ownership, duration conversion, and grouped residual allocation.
-- [ ] 10.7 Add temporal-quality tests for extra primary person, allowed background extras, fabricated face, identity drift, background morph, critic unavailable, bounded retry, exhaustion, and stale/rejected timeline exclusion.
-- [ ] 10.8 Add Production tests proving AUTO executes automatic gates, MANUAL_REVIEW pauses, BALANCED escalates only when needed, status remains bounded, and completed critic/accepted media reuse after restart.
-- [ ] 10.9 Add migration/repository tests for current promotion, immutable history, optimistic conflicts, project isolation, exact dependency queries, and an existing `0015` upgrade.
-- [ ] 10.10 Add API integration tests for selective Shot/reference/critic/backend endpoints, safe error mapping, bounded production responses, and no absolute paths/secrets/raw graphs.
+- [x] 10.7 Add temporal-quality tests for extra primary person, allowed background extras, fabricated face, identity drift, background morph, critic unavailable, bounded retry, exhaustion, and stale/rejected timeline exclusion.
+- [x] 10.8 Add Production tests proving AUTO executes automatic gates, MANUAL_REVIEW pauses, BALANCED escalates only when needed, status remains bounded, and completed critic/accepted media reuse after restart.
+- [x] 10.9 Add migration/repository tests for current promotion, immutable history, optimistic conflicts, project isolation, exact dependency queries, and an existing `0015` upgrade.
+- [x] 10.10 Add API integration tests for selective Shot/reference/critic/backend endpoints, safe error mapping, bounded production responses, and no absolute paths/secrets/raw graphs.
 
 ## 11. Documentation and durable rules
 
@@ -146,10 +146,10 @@
 
 ## 12. Real local and release verification
 
-- [ ] 12.1 Run a real local FLUX smoke for Character prototype, prototype-derived stage, character-free Location, exact Character+Location Shot candidates, automatic critic, ranking, and accepted keyframe; record IDs, hashes, models, seeds, durations, and verdicts.
-- [ ] 12.2 Run the retained real Wan smoke after backend abstraction with an accepted keyframe and conservative motion; record backend/workflow/model/resolution/frames/FPS/duration/seed/codec/container/hash/generation time/QC verdict.
+- [x] 12.1 Run a real local FLUX smoke for Character prototype, prototype-derived stage, character-free Location, exact Character+Location Shot candidates, automatic critic, ranking, and accepted keyframe; record IDs, hashes, models, seeds, durations, and verdicts.
+- [x] 12.2 Run the retained real Wan smoke after backend abstraction with an accepted keyframe and conservative motion; record backend/workflow/model/resolution/frames/FPS/duration/seed/codec/container/hash/generation time/QC verdict.
 - [x] 12.3 Run a real LTX-2 19B distilled image-to-video smoke against the existing local ComfyUI without downloads or global changes; record the same reproducibility and temporal-QC evidence or exact BLOCKED reason.
-- [ ] 12.4 Run the controlled comparison Shot through accepted Character+Location references, candidate selection, Wan, LTX, and temporal QC; record observed output and state explicitly whether human perceptual comparison was executed.
+- [x] 12.4 Run the controlled comparison Shot through accepted Character+Location references, candidate selection, Wan, LTX, and temporal QC; record observed output and state explicitly whether human perceptual comparison was executed.
 - [ ] 12.5 Run the real combined three-Chapter API/worker/SQLite/filesystem production through Shot plans, references, quality gates, timeline, render, PublicationPackage, manifest, export, and playable MP4 probe.
 - [ ] 12.6 During the real run, restart the worker, resolve a review wait, retry one failed smallest unit, and verify completion without losing accepted media or duplicating expensive work.
 - [ ] 12.7 Start a second equivalent production run and verify canonical Shot plans, references, critic results, accepted media, renders, and package inputs are reused with zero duplicate expensive submissions.

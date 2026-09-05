@@ -18,6 +18,9 @@ import {
   type GenerationMetadata,
   type Id,
   type LocationVisualProfileDto,
+  type ReferenceBinding,
+  type SceneDto,
+  type Shot,
   type VisualObjectProfileDto,
   type VisualProfileGenerationKind,
   type VisualPromptPackageDto,
@@ -25,17 +28,21 @@ import {
   type VisualStyleSettingsDto,
 } from '@studio/shared';
 import {
+  AppearanceStageRepository,
   AssetRepository,
   ChapterRepository,
   SceneObjectResolutionRepository,
   SceneRepository,
+  ShotPlanRepository,
   StoryRepository,
   VisualProfileRepository,
   VisualPromptPackageRepository,
+  VisualReferenceGenerationRepository,
   type DatabaseHandle,
 } from '@studio/database';
 import type { AiAgent, AiAgentProgress, AiAgentResult } from './omp-agent.js';
 import {
+  buildShotVisualPromptPackage,
   buildVisualPromptPackage,
   fingerprintValue,
   missingVisualPromptConstraints,
@@ -75,6 +82,10 @@ type VisualProfileResult = {
   generationId: Id | null;
   profile: CharacterVisualProfileDto | LocationVisualProfileDto | VisualObjectProfileDto;
 };
+export type ShotPromptBuildOptions = VisualPromptBuildOptions & {
+  shotId: string;
+  expectedShotPlanRevision?: number;
+};
 
 export type VisualPromptBuildOptions = {
   projectId: Id;
@@ -92,6 +103,9 @@ export class VisualConsistencyService {
     private readonly objectResolutions: SceneObjectResolutionRepository,
     private readonly packages: VisualPromptPackageRepository,
     private readonly assets: AssetRepository,
+    private readonly shotPlans: ShotPlanRepository,
+    private readonly stages: AppearanceStageRepository,
+    private readonly references: VisualReferenceGenerationRepository,
     private readonly agent: AiAgent | null = null,
   ) {}
 
@@ -620,6 +634,187 @@ export class VisualConsistencyService {
       generationId,
     });
   }
+  buildShotPromptPackage(options: ShotPromptBuildOptions): VisualPromptPackageDto {
+    const scene = this.scenes.getScene(options.sceneId);
+    if (!scene || scene.projectId !== options.projectId)
+      throw new AppError('NOT_FOUND', 'Scene not found', 404);
+    if (
+      options.expectedSceneRevision !== undefined &&
+      scene.revision !== options.expectedSceneRevision
+    )
+      throw new AppError('STALE_INPUT', 'Visual prompt build input is stale', 409);
+    const plan = this.shotPlans.getCurrent(options.projectId, scene.id);
+    if (!plan) throw new AppError('NOT_FOUND', 'Current Shot plan not found for Scene', 409);
+    if (
+      options.expectedShotPlanRevision !== undefined &&
+      plan.revision !== options.expectedShotPlanRevision
+    )
+      throw new AppError('STALE_INPUT', 'Shot plan input is stale', 409);
+    const shot = plan.candidate.shots.find((candidate) => candidate.id === options.shotId);
+    if (!shot) throw new AppError('NOT_FOUND', 'Shot not found in current Shot plan', 404);
+    const result = buildShotVisualPromptPackage({
+      projectId: options.projectId,
+      scene,
+      shot,
+      shotPlanId: plan.id,
+      shotPlanRevision: plan.revision,
+      referenceBindings: this.shotReferenceBindings(options.projectId, scene, shot),
+      blueprint: this.story.getBlueprint(options.projectId)?.blueprint ?? null,
+      storyState: this.story.getStoryState(options.projectId),
+      style: this.scenes.getVisualStyle(options.projectId),
+      profiles: this.profiles,
+      objectResolutions: this.objectResolutions,
+      locationMatches: (projectId, name) => this.scenes.listLocationMatches(projectId, name),
+    });
+    const generationId = this.story.createGenerationRecord(
+      options.projectId,
+      'BUILD_VISUAL_PROMPT',
+      scene.id,
+      options.generationId ?? null,
+      result.package.inputFingerprint,
+      { deterministic: true, shotId: shot.id, shotPlanId: plan.id },
+      'COMPLETED',
+    );
+    return this.packages.saveCurrent({
+      projectId: options.projectId,
+      sceneRevisionId: scene.id,
+      shotPlanId: plan.id,
+      shotStableId: shot.id,
+      payload: result.package,
+      generationId,
+    });
+  }
+
+  private shotReferenceBindings(projectId: Id, scene: SceneDto, shot: Shot): ReferenceBinding[] {
+    const visible = scene.characters.filter(
+      (character) =>
+        character.characterId !== null && shot.visibleCharacterIds.includes(character.characterId),
+    );
+    const primaryId =
+      shot.speakerCharacterId && shot.visibleCharacterIds.includes(shot.speakerCharacterId)
+        ? shot.speakerCharacterId
+        : (visible[0]?.characterId ?? null);
+    const bindings: ReferenceBinding[] = [];
+    for (const character of visible) {
+      if (!character.characterId) continue;
+      const profile = this.profiles.getCharacter(projectId, character.characterId);
+      const role = character.characterId === primaryId ? 'PRIMARY_CHARACTER' : 'CHARACTER';
+      const stageKey = character.visualState.variantKey;
+      if (stageKey) {
+        const stage = this.stages.getCurrent(projectId, stageKey);
+        if (
+          !stage ||
+          stage.characterId !== character.characterId ||
+          stage.reviewStatus !== 'APPROVED'
+        )
+          throw new AppError(
+            'INVALID_REFERENCE',
+            `Approved appearance stage is required for ${character.characterId}`,
+            409,
+          );
+        const generated = this.references.resolveApproved(
+          projectId,
+          'CHARACTER_STAGE',
+          stage.stableId,
+          stage.revision,
+        );
+        if (!generated?.assetId || !generated.assetSha256)
+          throw new AppError(
+            'INVALID_REFERENCE',
+            `Approved appearance-stage reference is unavailable for ${character.characterId}`,
+            409,
+          );
+        const asset = this.assets.get(generated.assetId);
+        if (!asset || asset.status !== 'READY' || asset.sha256 !== generated.assetSha256)
+          throw new AppError(
+            'INVALID_REFERENCE',
+            `Approved appearance-stage reference is unavailable for ${character.characterId}`,
+            409,
+          );
+        bindings.push({
+          ordinal: bindings.length + 1,
+          role,
+          assetId: asset.id,
+          entityId: character.characterId,
+          stageId: stage.stableId,
+          sha256: asset.sha256,
+          revision: stage.revision,
+          fingerprint: generated.inputFingerprint,
+        });
+        continue;
+      }
+      const asset = (profile?.payload.referenceAssetIds ?? [])
+        .map((assetId) => this.assets.get(assetId))
+        .find(
+          (candidate) =>
+            candidate?.projectId === projectId &&
+            candidate?.status === 'READY' &&
+            candidate?.type === 'CHARACTER_REFERENCE_IMAGE' &&
+            Boolean(candidate?.sha256) &&
+            (() => {
+              try {
+                const metadata = JSON.parse(String(candidate?.metadata ?? '{}')) as Record<
+                  string,
+                  unknown
+                >;
+                return (
+                  metadata.approval === 'APPROVED' && metadata.characterId === character.characterId
+                );
+              } catch {
+                return false;
+              }
+            })(),
+        );
+      if (profile && asset)
+        bindings.push({
+          ordinal: bindings.length + 1,
+          role,
+          assetId: asset.id,
+          entityId: character.characterId,
+          stageId: null,
+          sha256: asset.sha256,
+          revision: profile.revision,
+          fingerprint: profile.inputFingerprint,
+        });
+    }
+    if (scene.locationId) {
+      const profile = this.profiles.getLocation(projectId, scene.locationId);
+      if (profile) {
+        const generated = this.references.resolveApproved(
+          projectId,
+          'LOCATION',
+          scene.locationId,
+          profile.revision,
+        );
+        const generatedAsset = generated?.assetId ? this.assets.get(generated.assetId) : null;
+        const asset =
+          generatedAsset?.status === 'READY' &&
+          generatedAsset.sha256 === (generated?.assetSha256 ?? '')
+            ? generatedAsset
+            : (profile.payload.referenceAssetIds ?? [])
+                .map((assetId) => this.assets.get(assetId))
+                .find(
+                  (candidate) =>
+                    candidate?.projectId === projectId &&
+                    candidate?.status === 'READY' &&
+                    (candidate?.type === 'LOCATION_REFERENCE' ||
+                      candidate?.type === 'LOCATION_REFERENCE_IMAGE'),
+                );
+        if (asset)
+          bindings.push({
+            ordinal: bindings.length + 1,
+            role: 'LOCATION',
+            assetId: asset.id,
+            entityId: scene.locationId,
+            stageId: null,
+            sha256: asset.sha256,
+            revision: profile.revision,
+            fingerprint: generated?.inputFingerprint ?? profile.inputFingerprint,
+          });
+      }
+    }
+    return bindings;
+  }
 
   buildChapterPackages(
     projectId: Id,
@@ -664,8 +859,12 @@ export class VisualConsistencyService {
     );
   }
 
-  getCurrentPromptPackage(projectId: Id, sceneRevisionId: Id): VisualPromptPackageDto | null {
-    return this.packages.getCurrent(projectId, sceneRevisionId);
+  getCurrentPromptPackage(
+    projectId: Id,
+    sceneRevisionId: Id,
+    shotStableId: string | null = null,
+  ): VisualPromptPackageDto | null {
+    return this.packages.getCurrent(projectId, sceneRevisionId, shotStableId);
   }
 
   listSceneObjectResolutions(projectId: Id, sceneRevisionId: Id) {
@@ -854,11 +1053,15 @@ export class VisualConsistencyService {
     },
   ) {
     return {
-      ...prompt,
+      operation: prompt.operation,
       model: this.story.getSettings(projectId)?.generation.model ?? null,
+      promptVersion: prompt.promptVersion,
+      schemaVersion: prompt.schemaVersion,
+      inputFingerprint: prompt.inputFingerprint,
+      systemPrompt: prompt.systemPrompt,
+      userPrompt: prompt.userPrompt,
     };
   }
-
   private assertReferences(projectId: Id, assetIds: string[], expectedType: string): void {
     for (const id of assetIds) {
       const asset = this.assets.get(id);
@@ -946,6 +1149,9 @@ export function createVisualConsistencyService(
     new SceneObjectResolutionRepository(database),
     new VisualPromptPackageRepository(database),
     new AssetRepository(database),
+    new ShotPlanRepository(database),
+    new AppearanceStageRepository(database),
+    new VisualReferenceGenerationRepository(database),
     agent,
   );
 }

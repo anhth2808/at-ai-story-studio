@@ -947,33 +947,95 @@ export class AssetRepository {
       .get(projectId, role) as CurrentAsset | undefined;
     return asset ?? null;
   }
-  currentRenderableSceneImage(projectId: Id, sceneStableId: string): CurrentAsset | null {
+  currentRenderableSceneImage(
+    projectId: Id,
+    sceneStableId: string,
+    options: { requireApproval?: boolean } = {},
+  ): CurrentAsset | null {
     const asset = this.database.sqlite
       .prepare(
-        `SELECT a.id,a.path,a.type,a.sha256,a.media_type as mediaType,a.input_fingerprint as inputFingerprint
+        `SELECT a.id,a.path,a.type,a.sha256,a.media_type as mediaType,a.input_fingerprint as inputFingerprint,
+          g.review_status as reviewStatus,g.automatic_quality_status as automaticQualityStatus,
+          COALESCE(s.require_image_approval,0) as requireImageApproval
          FROM assets a
-         LEFT JOIN scene_image_generations g ON g.asset_id=a.id
+         JOIN scene_image_generations g ON g.asset_id=a.id
+         JOIN scene_revisions current_scene
+           ON current_scene.project_id=a.project_id AND current_scene.stable_id=?
+          AND current_scene.is_current=1 AND current_scene.id=g.scene_revision_id
          LEFT JOIN visual_prompt_packages p ON p.id=g.visual_prompt_package_id
          LEFT JOIN image_generation_settings s ON s.project_id=a.project_id
          WHERE a.project_id=? AND a.role=? AND a.type='SCENE_IMAGE'
            AND a.is_current=1 AND a.status='READY'
+           AND g.scene_stable_id=? AND g.is_current=1
+           AND g.status='COMPLETED' AND g.review_status<>'REJECTED'
            AND (
-             g.id IS NULL OR (
-               g.status='COMPLETED' AND g.review_status<>'REJECTED' AND
-               (COALESCE(s.require_image_approval,0)=0 OR g.review_status='ACCEPTED') AND
-               (
-                 g.source='MANUAL' OR (
-                   p.status='CURRENT' AND p.is_current=1 AND
-                   p.input_fingerprint=g.package_fingerprint AND
-                   s.input_fingerprint=g.settings_fingerprint
-                 )
-               )
+             g.source='MANUAL' OR
+             (
+               (g.automatic_quality_status='PASSED' OR g.review_status='ACCEPTED') AND
+               p.status='CURRENT' AND p.is_current=1 AND
+               p.scene_revision_id=g.scene_revision_id AND
+               p.input_fingerprint=g.package_fingerprint AND
+               s.input_fingerprint=g.settings_fingerprint
              )
            )
          ORDER BY a.created_at DESC LIMIT 1`,
       )
-      .get(projectId, `scene:${sceneStableId}:image`) as CurrentAsset | undefined;
-    return asset ?? null;
+      .get(sceneStableId, projectId, `scene:${sceneStableId}:image`, sceneStableId) as
+      | (CurrentAsset & {
+          reviewStatus: string;
+          automaticQualityStatus: string;
+          requireImageApproval: number;
+        })
+      | undefined;
+    if (!asset) return null;
+    const requiresApproval = options.requireApproval ?? Boolean(asset.requireImageApproval);
+    if (requiresApproval && asset.reviewStatus !== 'ACCEPTED') return null;
+    return asset;
+  }
+  currentRenderableShotImage(
+    projectId: Id,
+    sceneStableId: string,
+    shotStableId: string,
+    options: { requireApproval?: boolean } = {},
+  ): CurrentAsset | null {
+    const asset = this.database.sqlite
+      .prepare(
+        `SELECT a.id,a.path,a.type,a.sha256,a.media_type as mediaType,a.input_fingerprint as inputFingerprint,
+          g.review_status as reviewStatus,g.automatic_quality_status as automaticQualityStatus,
+          COALESCE(s.require_image_approval,0) as requireImageApproval
+         FROM assets a
+         JOIN scene_image_generations g ON g.asset_id=a.id
+         JOIN scene_revisions current_scene
+           ON current_scene.project_id=a.project_id AND current_scene.stable_id=?
+          AND current_scene.is_current=1 AND current_scene.id=g.scene_revision_id
+         LEFT JOIN image_generation_settings s ON s.project_id=a.project_id
+         JOIN shot_plans sp ON sp.id=g.shot_plan_id AND sp.project_id=a.project_id
+          AND sp.is_current=1 AND sp.status='CURRENT' AND sp.review_status='APPROVED'
+         JOIN visual_prompt_packages p ON p.id=g.visual_prompt_package_id
+          AND p.status='CURRENT' AND p.is_current=1
+         WHERE a.project_id=? AND a.role=? AND a.type='SHOT_IMAGE'
+           AND a.is_current=1 AND a.status='READY'
+           AND g.scene_stable_id=? AND g.shot_stable_id=? AND g.is_current=1
+           AND g.status='COMPLETED' AND g.review_status<>'REJECTED'
+           AND (g.automatic_quality_status='PASSED' OR g.review_status='ACCEPTED')
+           AND p.scene_revision_id=g.scene_revision_id
+           AND p.shot_plan_id=g.shot_plan_id
+           AND p.shot_stable_id=g.shot_stable_id
+           AND p.input_fingerprint=g.package_fingerprint
+           AND s.input_fingerprint=g.settings_fingerprint
+         ORDER BY a.created_at DESC LIMIT 1`,
+      )
+      .get(sceneStableId, projectId, `shot:${shotStableId}:image`, sceneStableId, shotStableId) as
+      | (CurrentAsset & {
+          reviewStatus: string;
+          automaticQualityStatus: string;
+          requireImageApproval: number;
+        })
+      | undefined;
+    if (!asset) return null;
+    const requiresApproval = options.requireApproval ?? Boolean(asset.requireImageApproval);
+    if (requiresApproval && asset.reviewStatus !== 'ACCEPTED') return null;
+    return asset;
   }
   registerReference(input: AssetRegistration): void {
     this.assertSafePath(input.path);
@@ -1001,6 +1063,47 @@ export class AssetRepository {
         stamp,
         stamp,
       );
+  }
+  completeContinuationFrame(input: {
+    projectId: Id;
+    assetId: Id;
+    path: string;
+    bytes: number;
+    sha256: string;
+    width: number;
+    height: number;
+    sourceStepId: Id;
+  }): AssetRecord {
+    this.assertSafePath(input.path);
+    const asset = this.database.sqlite
+      .prepare(
+        "SELECT role FROM assets WHERE id=? AND project_id=? AND type='SHOT_CONTINUATION_FRAME'",
+      )
+      .get(input.assetId, input.projectId) as { role: string } | undefined;
+    if (!asset) throw new AppError('NOT_FOUND', 'Continuation frame asset not found', 404);
+    const stamp = now();
+    this.retireCurrentRole(input.projectId, asset.role, stamp);
+    const result = this.database.sqlite
+      .prepare(
+        `UPDATE assets SET status='READY',path=?,bytes=?,sha256=?,source_step_id=?,is_current=1,
+          metadata=json_set(metadata,'$.width',json(?),'$.height',json(?)),
+          validation_error=NULL,updated_at=?
+         WHERE id=? AND project_id=? AND type='SHOT_CONTINUATION_FRAME'`,
+      )
+      .run(
+        input.path,
+        input.bytes,
+        input.sha256,
+        input.sourceStepId,
+        input.width,
+        input.height,
+        stamp,
+        input.assetId,
+        input.projectId,
+      );
+    if (result.changes !== 1)
+      throw new AppError('NOT_FOUND', 'Continuation frame asset not found', 404);
+    return this.get(input.assetId)!;
   }
   listCharacterReferences(projectId: Id, characterId: string): AssetRecord[] {
     return this.database.sqlite

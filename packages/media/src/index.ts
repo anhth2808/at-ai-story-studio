@@ -173,6 +173,22 @@ export function managedMotionRelativePath(
     throw new AppError('UNSAFE_PATH', 'Managed motion identifiers are invalid', 400);
   return `projects/${projectId}/video/motion/${sceneStableId}/${generationId}.mp4`;
 }
+export function managedShotMotionRelativePath(
+  projectId: string,
+  sceneStableId: string,
+  shotStableId: string,
+  generationId: string,
+): string {
+  if (
+    !projectId.trim() ||
+    !sceneStableId.trim() ||
+    !shotStableId.trim() ||
+    !generationId.trim() ||
+    [projectId, sceneStableId, shotStableId, generationId].some((value) => /[\\/]/u.test(value))
+  )
+    throw new AppError('UNSAFE_PATH', 'Managed shot motion identifiers are invalid', 400);
+  return `projects/${projectId}/video/motion/${sceneStableId}/shots/${shotStableId}/${generationId}.mp4`;
+}
 
 export async function promoteManagedFile(
   paths: WorkspacePaths,

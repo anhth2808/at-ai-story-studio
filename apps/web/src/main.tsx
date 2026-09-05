@@ -45,6 +45,7 @@ import type {
   RenderPlan,
   SceneTimingUpdate,
   ShotPlanDto,
+  CharacterAppearanceStage,
   VisualReferenceGeneration,
 } from '@studio/shared';
 import './styles.css';
@@ -301,6 +302,124 @@ const shotApi = {
       body: JSON.stringify({ status, notes: '', expectedRowVersion }),
     }),
 };
+const shotImageApi = {
+  list: (projectId: string, sceneId: string, shotId: string) =>
+    api<SceneImageGenerationDto[]>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images?limit=50&offset=0`,
+    ),
+  generate: (projectId: string, sceneId: string, shotId: string, instructions = '') =>
+    api<ImageScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/generate`,
+      { method: 'POST', body: JSON.stringify({ instructions }) },
+    ),
+  regenerate: (
+    projectId: string,
+    sceneId: string,
+    shotId: string,
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ) =>
+    api<ImageScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/${generationId}/regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          mode,
+          instructions: '',
+          useReviewFeedback: false,
+        }),
+      },
+    ),
+  review: (
+    projectId: string,
+    sceneId: string,
+    shotId: string,
+    generationId: string,
+    status: 'UNREVIEWED' | 'REJECTED',
+    notes = '',
+  ) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/${generationId}/review`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ status, notes, scores: {}, issues: [] }),
+      },
+    ),
+  accept: (projectId: string, sceneId: string, shotId: string, generationId: string) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/${generationId}/accept`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'REJECTED', notes: '', scores: {}, issues: [] }),
+      },
+    ),
+  setCurrent: (
+    projectId: string,
+    sceneId: string,
+    shotId: string,
+    generationId: string,
+    expectedSceneRevision: number,
+  ) =>
+    api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/${generationId}/current`,
+      { method: 'PUT', body: JSON.stringify({ expectedSceneRevision }) },
+    ),
+  upload: (projectId: string, sceneId: string, shotId: string, file: File) => {
+    const body = new FormData();
+    body.append('file', file);
+    return api<SceneImageGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/images/manual`,
+      { method: 'POST', body },
+    );
+  },
+};
+const shotVideoApi = {
+  state: (projectId: string, sceneId: string, shotId: string) =>
+    api<{ current: SceneVideoGenerationDto | null; generations: SceneVideoGenerationDto[] }>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video`,
+    ),
+  generate: (projectId: string, sceneId: string, shotId: string, instructions = '') =>
+    api<VideoScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video/generate`,
+      { method: 'POST', body: JSON.stringify({ instructions }) },
+    ),
+  regenerate: (
+    projectId: string,
+    sceneId: string,
+    shotId: string,
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ) =>
+    api<VideoScheduleDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video/${generationId}/regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode, instructions: '', useReviewFeedback: false }),
+      },
+    ),
+  review: (
+    projectId: string,
+    sceneId: string,
+    shotId: string,
+    generationId: string,
+    issues: string[] = [],
+    notes = '',
+  ) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video/${generationId}/review`,
+      { method: 'PUT', body: JSON.stringify({ status: 'REJECTED', issues, notes }) },
+    ),
+  accept: (projectId: string, sceneId: string, shotId: string, generationId: string) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video/${generationId}/accept`,
+      { method: 'PUT', body: JSON.stringify({ issues: [], notes: '' }) },
+    ),
+  setCurrent: (projectId: string, sceneId: string, shotId: string, generationId: string) =>
+    api<SceneVideoGenerationDto>(
+      `/api/projects/${projectId}/scenes/${sceneId}/shots/${shotId}/ai-video/${generationId}/current`,
+      { method: 'PUT' },
+    ),
+};
 const visualReferenceApi = {
   list: (projectId: string, targetKind: string, targetEntityId: string) =>
     api<VisualReferenceGeneration[]>(
@@ -315,6 +434,32 @@ const visualReferenceApi = {
     api<VisualReferenceGeneration>(
       `/api/projects/${projectId}/visual-references/${generationId}/review`,
       { method: 'POST', body: JSON.stringify({ approval }) },
+    ),
+  appearanceStages: (projectId: string, characterId: string) =>
+    api<CharacterAppearanceStage[]>(
+      `/api/projects/${projectId}/characters/${characterId}/appearance-stages?limit=50`,
+    ),
+  saveAppearanceStage: (
+    projectId: string,
+    characterId: string,
+    stage: CharacterAppearanceStage,
+    reviewStatus: 'DRAFT' | 'APPROVED' | 'REJECTED',
+  ) =>
+    api<CharacterAppearanceStage>(
+      `/api/projects/${projectId}/characters/${characterId}/appearance-stages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          stableId: stage.stableId,
+          profileId: stage.profileId,
+          profileRevision: stage.profileRevision,
+          name: stage.name,
+          payload: stage.payload,
+          provenance: stage.provenance,
+          reviewStatus,
+          expectedRevision: stage.revision,
+        }),
+      },
     ),
 };
 type TimelineRenderRequest = {
@@ -2811,6 +2956,8 @@ function VisualBibleWorkspace({
           onApprove={(id, revision) =>
             run(() => visualApi.approve(projectId, 'locations', id, revision))
           }
+          referenceProjectId={projectId}
+          referenceTargetKind="LOCATION"
         />
         <VisualProfileCard
           title="Vật thể"
@@ -2986,33 +3133,78 @@ function CharacterReferenceStrip({
 }) {
   const [references, setReferences] = useState<CharacterReferenceItem[] | null>(null);
   const [generated, setGenerated] = useState<VisualReferenceGeneration[]>([]);
+  const [stages, setStages] = useState<CharacterAppearanceStage[]>([]);
+  const [stageGenerated, setStageGenerated] = useState<Record<string, VisualReferenceGeneration[]>>(
+    {},
+  );
   const load = async (): Promise<void> => {
     try {
-      const [response, candidates] = await Promise.all([
+      const [response, candidates, stageRows] = await Promise.all([
         imageApi.references(projectId, characterId),
         visualReferenceApi.list(projectId, 'CHARACTER_PROTOTYPE', characterId),
+        visualReferenceApi.appearanceStages(projectId, characterId),
       ]);
+      const stageCandidates: Record<string, VisualReferenceGeneration[]> = {};
+      await Promise.all(
+        stageRows.map(async (stage) => {
+          stageCandidates[stage.stableId] = await visualReferenceApi.list(
+            projectId,
+            'CHARACTER_STAGE',
+            stage.stableId,
+          );
+        }),
+      );
       setReferences(response.references);
       setGenerated(candidates);
+      setStages(stageRows);
+      setStageGenerated(stageCandidates);
     } catch {
       setReferences([]);
       setGenerated([]);
+      setStages([]);
+      setStageGenerated({});
     }
   };
   useEffect(() => {
     void load();
   }, [projectId, characterId, profileRevision]);
   useEffect(() => {
-    if (!generated.some((item) => item.status === 'PENDING' || item.status === 'RUNNING')) return;
+    if (
+      !generated.some((item) => item.status === 'PENDING' || item.status === 'RUNNING') &&
+      !Object.values(stageGenerated).some((items) =>
+        items.some((item) => item.status === 'PENDING' || item.status === 'RUNNING'),
+      )
+    )
+      return;
     const timer = window.setInterval(() => void load(), 3_000);
     return () => window.clearInterval(timer);
-  }, [projectId, characterId, generated]);
+  }, [projectId, characterId, generated, stageGenerated]);
   const generatePrototype = async (): Promise<void> => {
     try {
       await visualReferenceApi.generate(projectId, 'CHARACTER_PROTOTYPE', characterId);
       await load();
     } catch (cause) {
       window.alert(cause instanceof Error ? cause.message : 'Không thể tạo ảnh nguyên mẫu');
+    }
+  };
+  const generateStage = async (stage: CharacterAppearanceStage): Promise<void> => {
+    try {
+      await visualReferenceApi.generate(projectId, 'CHARACTER_STAGE', stage.stableId);
+      await load();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể tạo ảnh appearance stage');
+    }
+  };
+  const reviewStage = async (
+    stage: CharacterAppearanceStage,
+    reviewStatus: 'APPROVED' | 'REJECTED',
+  ): Promise<void> => {
+    try {
+      await visualReferenceApi.saveAppearanceStage(projectId, characterId, stage, reviewStatus);
+      await load();
+      onChanged();
+    } catch (cause) {
+      window.alert(cause instanceof Error ? cause.message : 'Không thể duyệt appearance stage');
     }
   };
   const reviewGenerated = async (
@@ -3163,6 +3355,91 @@ function CharacterReferenceStrip({
           </figure>
         ))}
       </div>
+      {stages.length > 0 && (
+        <div className="appearance-stage-list">
+          <span className="field-label">Appearance stages</span>
+          {stages.map((stage) => (
+            <article className="appearance-stage-card" key={`${stage.stableId}-${stage.revision}`}>
+              <div className="section-head">
+                <strong>{stage.name}</strong>
+                <span
+                  className={`status-chip ${stage.reviewStatus === 'APPROVED' ? 'status-current' : 'status-warn'}`}
+                >
+                  {stage.reviewStatus} v{stage.revision}
+                </span>
+              </div>
+              <p className="muted">
+                {stage.provenance.mode} · độ tin cậy {Math.round(stage.provenance.confidence * 100)}
+                % · {stage.provenance.reason}
+              </p>
+              <div className="reference-grid">
+                {(stageGenerated[stage.stableId] ?? []).map((item) => (
+                  <figure
+                    className={`reference-item approval-${item.approval.toLowerCase()}`}
+                    key={item.id}
+                  >
+                    {item.assetId ? (
+                      <img
+                        src={`${API_BASE}/api/assets/${item.assetId}`}
+                        alt={`Ảnh ${stage.name}`}
+                      />
+                    ) : (
+                      <div className="scene-image-empty">{item.status}</div>
+                    )}
+                    <figcaption>
+                      <span className="status-chip">
+                        {item.status} · {item.approval} · stage v{item.targetRevision}
+                      </span>
+                      {item.status === 'COMPLETED' && item.approval === 'CANDIDATE' && (
+                        <div className="actions">
+                          <button
+                            type="button"
+                            onClick={() => void reviewGenerated(item.id, 'APPROVED')}
+                          >
+                            Duyệt ảnh
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void reviewGenerated(item.id, 'REJECTED')}
+                          >
+                            Từ chối ảnh
+                          </button>
+                        </div>
+                      )}
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+              <div className="actions">
+                {stage.reviewStatus === 'DRAFT' && (
+                  <button type="button" onClick={() => void reviewStage(stage, 'APPROVED')}>
+                    Duyệt stage
+                  </button>
+                )}
+                {stage.reviewStatus === 'APPROVED' && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void generateStage(stage)}
+                  >
+                    Tạo ảnh stage
+                  </button>
+                )}
+                {stage.reviewStatus !== 'REJECTED' && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void reviewStage(stage, 'REJECTED')}
+                  >
+                    Từ chối stage
+                  </button>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
       <button type="button" onClick={() => void generatePrototype()} disabled={!profileRevision}>
         Tạo nguyên mẫu tự động
       </button>
@@ -3181,6 +3458,99 @@ function CharacterReferenceStrip({
     </div>
   );
 }
+function VisualReferenceCandidateStrip({
+  projectId,
+  targetKind,
+  targetEntityId,
+  enabled,
+  onChanged,
+}: {
+  projectId: string;
+  targetKind: 'LOCATION';
+  targetEntityId: string;
+  enabled: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [candidates, setCandidates] = useState<VisualReferenceGeneration[]>([]);
+  const load = async (): Promise<void> => {
+    try {
+      setCandidates(await visualReferenceApi.list(projectId, targetKind, targetEntityId));
+    } catch {
+      setCandidates([]);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [projectId, targetKind, targetEntityId]);
+  useEffect(() => {
+    if (!candidates.some((item) => item.status === 'PENDING' || item.status === 'RUNNING')) return;
+    const timer = window.setInterval(() => void load(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [projectId, targetKind, targetEntityId, candidates]);
+  const generate = async (): Promise<void> => {
+    try {
+      await visualReferenceApi.generate(projectId, targetKind, targetEntityId);
+      await load();
+    } catch (cause) {
+      window.alert(
+        cause instanceof Error ? cause.message : 'Không thể tạo ảnh tham chiếu địa điểm',
+      );
+    }
+  };
+  const review = async (generationId: string, approval: 'APPROVED' | 'REJECTED'): Promise<void> => {
+    try {
+      await visualReferenceApi.review(projectId, generationId, approval);
+      await load();
+      await onChanged();
+    } catch (cause) {
+      window.alert(
+        cause instanceof Error ? cause.message : 'Không thể duyệt ảnh tham chiếu địa điểm',
+      );
+    }
+  };
+  return (
+    <div className="visual-reference-strip">
+      <span className="field-label">Ảnh tham chiếu địa điểm</span>
+      <div className="reference-grid">
+        {candidates.map((item) => (
+          <figure
+            className={`reference-item approval-${item.approval.toLowerCase()}`}
+            key={item.id}
+          >
+            {item.assetId ? (
+              <img src={`${API_BASE}/api/assets/${item.assetId}`} alt="Ảnh tham chiếu địa điểm" />
+            ) : (
+              <div className="scene-image-empty">{item.status}</div>
+            )}
+            <figcaption>
+              <span className="status-chip">
+                {item.status} · {item.approval} · profile v{item.targetRevision}
+              </span>
+              {item.status === 'COMPLETED' && item.approval === 'CANDIDATE' && (
+                <div className="actions">
+                  <button type="button" onClick={() => void review(item.id, 'APPROVED')}>
+                    Duyệt
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void review(item.id, 'REJECTED')}
+                  >
+                    Từ chối
+                  </button>
+                </div>
+              )}
+            </figcaption>
+          </figure>
+        ))}
+        {candidates.length === 0 && <span className="muted">Chưa có ảnh tham chiếu.</span>}
+      </div>
+      <button type="button" onClick={() => void generate()} disabled={!enabled}>
+        Tạo ảnh địa điểm
+      </button>
+    </div>
+  );
+}
 
 function VisualProfileCard({
   title,
@@ -3190,6 +3560,8 @@ function VisualProfileCard({
   onApprove,
   characterProjectId,
   onRefreshed,
+  referenceProjectId,
+  referenceTargetKind,
 }: {
   title: string;
   candidates: Array<{ id: string; title: string; profile: VisualProfileRecord | null }>;
@@ -3198,6 +3570,8 @@ function VisualProfileCard({
   onApprove: (id: string, revision: number) => Promise<void>;
   characterProjectId?: string;
   onRefreshed?: () => Promise<void>;
+  referenceProjectId?: string;
+  referenceTargetKind?: 'LOCATION';
 }) {
   return (
     <div className="panel visual-profile-panel">
@@ -3221,13 +3595,14 @@ function VisualProfileCard({
             onApprove={onApprove}
             characterProjectId={characterProjectId}
             onRefreshed={onRefreshed}
+            referenceProjectId={referenceProjectId}
+            referenceTargetKind={referenceTargetKind}
           />
         ))
       )}
     </div>
   );
 }
-
 function VisualProfileEditor({
   id,
   title,
@@ -3237,6 +3612,8 @@ function VisualProfileEditor({
   onApprove,
   characterProjectId,
   onRefreshed,
+  referenceProjectId,
+  referenceTargetKind,
 }: {
   id: string;
   title: string;
@@ -3246,6 +3623,8 @@ function VisualProfileEditor({
   onApprove: (id: string, revision: number) => Promise<void>;
   characterProjectId?: string;
   onRefreshed?: () => Promise<void>;
+  referenceProjectId?: string;
+  referenceTargetKind?: 'LOCATION';
 }) {
   const [draft, setDraft] = useState(JSON.stringify(profile?.payload ?? {}, null, 2));
   const [instructions, setInstructions] = useState('');
@@ -3316,6 +3695,15 @@ function VisualProfileEditor({
           characterId={id}
           profileRevision={profile.revision}
           onChanged={() => void onRefreshed()}
+        />
+      )}
+      {referenceProjectId && referenceTargetKind === 'LOCATION' && profile && onRefreshed && (
+        <VisualReferenceCandidateStrip
+          projectId={referenceProjectId}
+          targetKind="LOCATION"
+          targetEntityId={id}
+          enabled={profile.status === 'APPROVED'}
+          onChanged={onRefreshed}
         />
       )}
     </article>
@@ -4169,6 +4557,10 @@ function ScenesWorkspace({
   const [draft, setDraft] = useState<SceneDto | null>(null);
   const [scenePackage, setScenePackage] = useState<VisualPromptPackageDto | null>(null);
   const [shotPlan, setShotPlan] = useState<ShotPlanDto | null>(null);
+  const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
+  const [shotImages, setShotImages] = useState<SceneImageGenerationDto[]>([]);
+  const [shotVideos, setShotVideos] = useState<SceneVideoGenerationDto[]>([]);
+  const [shotInstructions, setShotInstructions] = useState('');
   const [imageSettings, setImageSettings] = useState<ImageGenerationSettingsDto | null>(null);
   const [imageReadiness, setImageReadiness] = useState<ImageReadiness | null>(null);
   const [sceneImages, setSceneImages] = useState<SceneImageGenerationDto[]>([]);
@@ -4332,6 +4724,9 @@ function ScenesWorkspace({
       setDraft(null);
       setScenePackage(null);
       setShotPlan(null);
+      setSelectedShotId(null);
+      setShotImages([]);
+      setShotVideos([]);
       setSceneImages([]);
       setSelectedImageId(null);
       setAiMotion(null);
@@ -4351,6 +4746,15 @@ function ScenesWorkspace({
           setDraft(nextDraft);
           setScenePackage(nextPackage);
           setShotPlan(nextShotPlan);
+          setSelectedShotId((current) =>
+            nextShotPlan &&
+            current &&
+            nextShotPlan.candidate.shots.some((shot) => shot.id === current)
+              ? current
+              : (nextShotPlan?.candidate.shots[0]?.id ?? null),
+          );
+          setShotImages([]);
+          setShotVideos([]);
           setSceneImages(nextImages);
           setSelectedImageId((current) =>
             current && nextImages.some((image) => image.id === current)
@@ -4371,7 +4775,28 @@ function ScenesWorkspace({
         );
     }
   }, [projectId, selectedSceneId, sceneList]);
-
+  useEffect(() => {
+    const selectedShot = shotPlan?.candidate.shots.find((shot) => shot.id === selectedShotId);
+    if (!selectedSceneId || !selectedShot) {
+      setShotImages([]);
+      setShotVideos([]);
+      return;
+    }
+    let disposed = false;
+    void Promise.all([
+      shotImageApi.list(projectId, selectedSceneId, selectedShot.id).catch(() => []),
+      shotVideoApi
+        .state(projectId, selectedSceneId, selectedShot.id)
+        .catch(() => ({ current: null, generations: [] })),
+    ]).then(([nextImages, nextVideos]) => {
+      if (disposed) return;
+      setShotImages(nextImages);
+      setShotVideos(nextVideos.generations);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [projectId, selectedSceneId, selectedShotId, shotPlan?.id, shotPlan?.revision]);
   const generateShotPlan = async (): Promise<void> => {
     if (!draft) return;
     try {
@@ -4421,7 +4846,15 @@ function ScenesWorkspace({
           await loadScenes();
           if (selectedSceneId) {
             setSceneImages(await imageApi.list(projectId, selectedSceneId));
-            setShotPlan(await shotApi.current(projectId, selectedSceneId).catch(() => null));
+            const nextShotPlan = await shotApi
+              .current(projectId, selectedSceneId)
+              .catch(() => null);
+            setShotPlan(nextShotPlan);
+            if (selectedShotId) {
+              setShotImages(
+                await shotImageApi.list(projectId, selectedSceneId, selectedShotId).catch(() => []),
+              );
+            }
           }
           onChanged();
           const failed = jobs.find((job) => job.status === 'FAILED');
@@ -4439,6 +4872,178 @@ function ScenesWorkspace({
       window.clearInterval(timer);
     };
   }, [projectId, sceneJobIds, selectedSceneId]);
+  const generateShotImage = async (): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const result = await shotImageApi.generate(
+        projectId,
+        draft.id,
+        selectedShotId,
+        shotInstructions.trim(),
+      );
+      setShotImages((current) => [
+        result.generation,
+        ...current.filter((item) => item.id !== result.generation.id),
+      ]);
+      setSceneJobIds((current) => [...new Set([...current, result.jobId])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lên lịch tạo ảnh shot');
+    }
+  };
+  const regenerateShotImage = async (
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const result = await shotImageApi.regenerate(
+        projectId,
+        draft.id,
+        selectedShotId,
+        generationId,
+        mode,
+      );
+      setShotImages((current) => [
+        result.generation,
+        ...current.filter((item) => item.id !== result.generation.id),
+      ]);
+      setSceneJobIds((current) => [...new Set([...current, result.jobId])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo lại ảnh shot');
+    }
+  };
+  const acceptShotImage = async (generationId: string): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      await shotImageApi.accept(projectId, draft.id, selectedShotId, generationId);
+      setShotImages(await shotImageApi.list(projectId, draft.id, selectedShotId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chấp nhận ảnh shot');
+    }
+  };
+  const reviewShotImage = async (
+    generationId: string,
+    status: 'UNREVIEWED' | 'REJECTED',
+  ): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const saved = await shotImageApi.review(
+        projectId,
+        draft.id,
+        selectedShotId,
+        generationId,
+        status,
+      );
+      setShotImages((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá ảnh shot');
+    }
+  };
+  const selectCurrentShotImage = async (generationId: string): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      await shotImageApi.setCurrent(
+        projectId,
+        draft.id,
+        selectedShotId,
+        generationId,
+        draft.revision,
+      );
+      setShotImages(await shotImageApi.list(projectId, draft.id, selectedShotId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chọn ảnh shot hiện hành');
+    }
+  };
+  const uploadShotImage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!draft || !selectedShotId || !file) return;
+    try {
+      await shotImageApi.upload(projectId, draft.id, selectedShotId, file);
+      setShotImages(await shotImageApi.list(projectId, draft.id, selectedShotId));
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tải ảnh shot thủ công');
+    }
+  };
+  const generateShotVideo = async (): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const result = await shotVideoApi.generate(
+        projectId,
+        draft.id,
+        selectedShotId,
+        shotInstructions.trim(),
+      );
+      setShotVideos((current) => [
+        result.generation,
+        ...current.filter((item) => item.id !== result.generation.id),
+      ]);
+      setVideoJobIds((current) => [...new Set([...current, result.jobId])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lên lịch tạo video shot');
+    }
+  };
+  const regenerateShotVideo = async (
+    generationId: string,
+    mode: 'SAME_SEED' | 'NEW_SEED',
+  ): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const result = await shotVideoApi.regenerate(
+        projectId,
+        draft.id,
+        selectedShotId,
+        generationId,
+        mode,
+      );
+      setShotVideos((current) => [
+        result.generation,
+        ...current.filter((item) => item.id !== result.generation.id),
+      ]);
+      setVideoJobIds((current) => [...new Set([...current, result.jobId])]);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể tạo lại video shot');
+    }
+  };
+  const acceptShotVideo = async (generationId: string): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      await shotVideoApi.accept(projectId, draft.id, selectedShotId, generationId);
+      setShotVideos((await shotVideoApi.state(projectId, draft.id, selectedShotId)).generations);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chấp nhận video shot');
+    }
+  };
+  const reviewShotVideo = async (generationId: string): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      const saved = await shotVideoApi.review(
+        projectId,
+        draft.id,
+        selectedShotId,
+        generationId,
+        [],
+        '',
+      );
+      setShotVideos((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể lưu đánh giá video shot');
+    }
+  };
+  const selectCurrentShotVideo = async (generationId: string): Promise<void> => {
+    if (!draft || !selectedShotId) return;
+    try {
+      await shotVideoApi.setCurrent(projectId, draft.id, selectedShotId, generationId);
+      setShotVideos((await shotVideoApi.state(projectId, draft.id, selectedShotId)).generations);
+      onChanged();
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : 'Không thể chọn video shot hiện hành');
+    }
+  };
   useEffect(() => {
     if (!videoJobIds.length) return;
     let disposed = false;
@@ -4461,7 +5066,14 @@ function ScenesWorkspace({
                 ),
             ),
           );
-          if (selectedSceneId) setAiMotion(await videoApi.aiMotion(projectId, selectedSceneId));
+          if (selectedSceneId) {
+            setAiMotion(await videoApi.aiMotion(projectId, selectedSceneId));
+            if (selectedShotId) {
+              setShotVideos(
+                (await shotVideoApi.state(projectId, selectedSceneId, selectedShotId)).generations,
+              );
+            }
+          }
           onChanged();
           const failed = jobs.find((job) => job.status === 'FAILED');
           if (failed?.error) onError(failed.error);
@@ -4477,7 +5089,7 @@ function ScenesWorkspace({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [projectId, videoJobIds, selectedSceneId]);
+  }, [projectId, videoJobIds, selectedSceneId, selectedShotId]);
 
   const chapter = sceneChapters.find((item) => item.chapterId === selectedChapterId);
   const sceneJobBody = (): Record<string, unknown> => {
@@ -4497,6 +5109,15 @@ function ScenesWorkspace({
     setSceneFailedJob(null);
     setSceneJobIds((current) => [...new Set([...current, ...ids])]);
   };
+  const selectedShot = shotPlan?.candidate.shots.find((shot) => shot.id === selectedShotId) ?? null;
+  const displayedShotImage = shotImages.find((image) => image.isCurrent) ?? shotImages[0] ?? null;
+  const displayedShotVideo = shotVideos.find((video) => video.isCurrent) ?? shotVideos[0] ?? null;
+  const shotImageGenerationActive = shotImages.some((image) =>
+    ['PENDING', 'RUNNING'].includes(image.status),
+  );
+  const shotVideoGenerationActive =
+    videoJobIds.length > 0 ||
+    shotVideos.some((video) => ['PENDING', 'RUNNING'].includes(video.status));
   const retrySceneJob = async (): Promise<void> => {
     if (!sceneFailedJob) return;
     try {
@@ -5436,11 +6057,18 @@ function ScenesWorkspace({
                   <ol className="compact-list">
                     {shotPlan.candidate.shots.slice(0, 24).map((shot) => (
                       <li key={shot.id}>
-                        <strong>Shot {shot.ordinal}</strong>
-                        <span>
-                          {shot.primaryBeat} - {shot.staticIntent.framing} -{' '}
-                          {shot.plannedDurationMs} ms
-                        </span>
+                        <button
+                          type="button"
+                          className={`secondary${selectedShotId === shot.id ? ' active' : ''}`}
+                          aria-pressed={selectedShotId === shot.id}
+                          onClick={() => setSelectedShotId(shot.id)}
+                        >
+                          <strong>Shot {shot.ordinal}</strong>
+                          <span>
+                            {shot.primaryBeat} - {shot.staticIntent.framing} -{' '}
+                            {shot.plannedDurationMs} ms
+                          </span>
+                        </button>
                       </li>
                     ))}
                     {shotPlan.candidate.shots.length > 24 && (
@@ -5449,6 +6077,228 @@ function ScenesWorkspace({
                   </ol>
                 )}
               </section>
+              {selectedShot && (
+                <section
+                  className="scene-image-panel field-wide"
+                  aria-labelledby="shot-media-heading"
+                >
+                  <div className="section-head">
+                    <div>
+                      <span className="field-label" id="shot-media-heading">
+                        Media Shot {selectedShot.ordinal}
+                      </span>
+                      <p className="muted">
+                        Ảnh keyframe và video chuyển động dùng đúng Shot plan, package và lineage
+                        hiện hành.
+                      </p>
+                    </div>
+                    <div className="chip-row">
+                      <span className="status-chip">{selectedShot.importance}</span>
+                      {displayedShotImage && (
+                        <span className="status-chip">
+                          Ảnh: {displayedShotImage.automaticQualityStatus ?? 'NOT_RUN'}
+                        </span>
+                      )}
+                      {displayedShotVideo && (
+                        <span className="status-chip">
+                          Video: {displayedShotVideo.automaticQualityStatus ?? 'NOT_RUN'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="scene-image-compare">
+                    <div>
+                      <span className="field-label">Keyframe</span>
+                      {displayedShotImage?.assetUrl ? (
+                        <img
+                          className="scene-image-preview"
+                          src={`${API_BASE}${displayedShotImage.assetUrl}`}
+                          alt={`Keyframe Shot ${selectedShot.ordinal}`}
+                        />
+                      ) : (
+                        <div className="scene-image-empty">
+                          {shotImageGenerationActive
+                            ? 'Đang tạo keyframe...'
+                            : 'Shot chưa có keyframe.'}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <span className="field-label">Motion clip</span>
+                      {displayedShotVideo?.assetUrl ? (
+                        <video
+                          className="scene-image-preview"
+                          controls
+                          preload="metadata"
+                          src={`${API_BASE}${displayedShotVideo.assetUrl}`}
+                        />
+                      ) : (
+                        <div className="scene-image-empty">
+                          {shotVideoGenerationActive ? 'Đang tạo video...' : 'Shot chưa có video.'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="scene-image-meta">
+                    <span>
+                      Ảnh: {displayedShotImage?.reviewStatus ?? 'MISSING'} /{' '}
+                      {displayedShotImage?.freshness ?? 'MISSING'}
+                    </span>
+                    <span>
+                      Video: {displayedShotVideo?.reviewStatus ?? 'MISSING'} /{' '}
+                      {displayedShotVideo?.freshness ?? 'MISSING'}
+                    </span>
+                    {displayedShotVideo?.continuationSource && (
+                      <span>Tiếp nối: có frame lineage</span>
+                    )}
+                  </div>
+                  <label className="field field-wide">
+                    <span>Chỉ dẫn chuyển động cho Shot</span>
+                    <textarea
+                      maxLength={2000}
+                      value={shotInstructions}
+                      onChange={(event) => setShotInstructions(event.target.value)}
+                    />
+                  </label>
+                  <div className="actions">
+                    <button
+                      disabled={shotPlan?.reviewStatus !== 'APPROVED' || shotImageGenerationActive}
+                      onClick={() => void generateShotImage()}
+                    >
+                      Tạo keyframe Shot
+                    </button>
+                    <label className="button secondary upload-button">
+                      Thay keyframe thủ công
+                      <input
+                        hidden
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(event) => void uploadShotImage(event)}
+                      />
+                    </label>
+                    {displayedShotImage?.status === 'COMPLETED' &&
+                      displayedShotImage.source === 'GENERATED' && (
+                        <>
+                          <button
+                            type="button"
+                            className="secondary"
+                            disabled={shotImageGenerationActive}
+                            onClick={() =>
+                              void regenerateShotImage(displayedShotImage.id, 'SAME_SEED')
+                            }
+                          >
+                            Tạo lại keyframe
+                          </button>
+                        </>
+                      )}
+                    {displayedShotImage?.status === 'COMPLETED' && (
+                      <>
+                        {displayedShotImage.reviewStatus !== 'ACCEPTED' && (
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void acceptShotImage(displayedShotImage.id)}
+                          >
+                            Chấp nhận ảnh Shot
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void reviewShotImage(displayedShotImage.id, 'REJECTED')}
+                        >
+                          Từ chối ảnh Shot
+                        </button>
+                        {!displayedShotImage.isCurrent &&
+                          (displayedShotImage.automaticQualityStatus === 'PASSED' ||
+                            displayedShotImage.reviewStatus === 'ACCEPTED') && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => void selectCurrentShotImage(displayedShotImage.id)}
+                            >
+                              Chọn keyframe hiện hành
+                            </button>
+                          )}
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      disabled={
+                        !displayedShotImage?.productionReady ||
+                        shotPlan?.reviewStatus !== 'APPROVED'
+                      }
+                      onClick={() => void generateShotVideo()}
+                    >
+                      Tạo video Shot
+                    </button>
+                    {displayedShotVideo?.status === 'COMPLETED' && (
+                      <>
+                        <button
+                          type="button"
+                          className="secondary"
+                          disabled={shotVideoGenerationActive}
+                          onClick={() =>
+                            void regenerateShotVideo(displayedShotVideo.id, 'NEW_SEED')
+                          }
+                        >
+                          Tạo lại video Shot
+                        </button>
+                        {displayedShotVideo.reviewStatus !== 'ACCEPTED' && (
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => void acceptShotVideo(displayedShotVideo.id)}
+                          >
+                            Chấp nhận video Shot
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => void reviewShotVideo(displayedShotVideo.id)}
+                        >
+                          Từ chối video Shot
+                        </button>
+                        {!displayedShotVideo.isCurrent &&
+                          (displayedShotVideo.automaticQualityStatus === 'PASSED' ||
+                            displayedShotVideo.reviewStatus === 'ACCEPTED') && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => void selectCurrentShotVideo(displayedShotVideo.id)}
+                            >
+                              Chọn video hiện hành
+                            </button>
+                          )}
+                      </>
+                    )}
+                  </div>
+                  {shotImages.length > 0 && (
+                    <div className="candidate-grid" aria-label="Các keyframe của Shot">
+                      {shotImages.map((image) => (
+                        <article key={image.id} className="candidate-card">
+                          {image.assetUrl ? (
+                            <img
+                              className="candidate-thumb"
+                              src={`${API_BASE}${image.assetUrl}`}
+                              alt={`Keyframe Shot ${selectedShot.ordinal} v${image.revision}`}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="candidate-empty">{image.status}</div>
+                          )}
+                          <div className="candidate-meta">
+                            <span>v{image.revision}</span>
+                            <span>{image.reviewStatus}</span>
+                            {image.isCurrent && <strong>HIỆN HÀNH</strong>}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
               <label className="field">
                 <span>Đoạn trích nguồn (chỉ đọc)</span>
                 <pre className="source-excerpt">

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { imageCriticEvaluationSchema } from '@studio/shared';
 import type { Shot } from '@studio/shared';
-import { rankImageCandidates } from './media-critics.js';
+import { rankImageCandidates, temporalRetryGuidance } from './media-critics.js';
 import { automaticQualityAction, imageCandidateCount } from './quality-policy.js';
 
 const ids = {
@@ -105,9 +105,54 @@ describe('automatic media quality policy', () => {
     expect(failed.winnerGenerationId).toBeNull();
   });
 
+  it('applies the automatic score threshold before selecting a winner', () => {
+    const ranking = rankImageCandidates(
+      [{ generationId: ids.first, candidateIndex: 1, evaluation: evaluation(ids.first) }],
+      5,
+    );
+    expect(ranking.winnerGenerationId).toBeNull();
+    expect(ranking.entries[0]?.reason).toContain('threshold');
+  });
+
   it('never converts critic unavailability into a pass', () => {
     expect(automaticQualityAction('UNAVAILABLE', 'BLOCK')).toBe('BLOCK');
     expect(automaticQualityAction('UNAVAILABLE', 'MANUAL_REVIEW')).toBe('REVIEW');
     expect(automaticQualityAction('REJECTED', 'ALLOW_DEGRADED_WITH_REVIEW')).toBe('RETRY');
+  });
+  it('builds stable temporal retry guidance from every supported issue class', () => {
+    const first = temporalRetryGuidance(
+      [
+        'BACKGROUND_MORPHING',
+        'CLOTHING_DRIFT',
+        'EXTRA_PRIMARY_PERSON',
+        'FABRICATED_FACE',
+        'FLICKER',
+        'IDENTITY_DRIFT',
+        'MISSING_PRIMARY_PERSON',
+      ],
+      'keep it subtle',
+      'The source face is stable.',
+    );
+    const second = temporalRetryGuidance(
+      [
+        'MISSING_PRIMARY_PERSON',
+        'IDENTITY_DRIFT',
+        'FLICKER',
+        'FABRICATED_FACE',
+        'EXTRA_PRIMARY_PERSON',
+        'CLOTHING_DRIFT',
+        'BACKGROUND_MORPHING',
+      ],
+      'keep it subtle',
+      'The source face is stable.',
+    );
+    expect(first).toBe(second);
+    expect(first).toContain('Keep every required primary person visible.');
+    expect(first).toContain('Do not introduce additional primary people.');
+    expect(first).toContain('Do not generate faces for background figures or objects.');
+    expect(first).toContain('Keep clothing, accessories, and equipment unchanged.');
+    expect(first).toContain('Keep the background geometry stable.');
+    expect(first).toContain('Preserve the established character identity from the source frame.');
+    expect(first).toContain('The source face is stable.');
   });
 });

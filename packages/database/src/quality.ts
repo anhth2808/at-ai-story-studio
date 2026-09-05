@@ -87,12 +87,13 @@ export class MediaCriticEvaluationRepository {
   }
 
   private parseImage(row: Record<string, unknown>): ImageCriticEvaluation {
+    const { criticProvider, criticModel, criticVersion, ...rest } = row;
     return imageCriticEvaluationSchema.parse({
-      ...row,
+      ...rest,
       critic: {
-        provider: row.criticProvider,
-        model: row.criticModel,
-        version: row.criticVersion,
+        provider: criticProvider,
+        model: criticModel,
+        version: criticVersion,
       },
       scores: JSON.parse(row.scores as string),
       issues: JSON.parse(row.issues as string),

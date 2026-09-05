@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   SceneRepository,
   StoryRepository,
   ChapterRepository,
   WorkflowRepository,
+  VisualProfileRepository,
   type ClaimedStep,
   type DatabaseHandle,
   type ScenePersistenceInput,
@@ -43,30 +44,36 @@ import {
   validateScenePromptOutput,
   validateSceneRegenerationOutput,
 } from './scene-validation.js';
+import {
+  resolveFutureCharacterIdentity,
+  type FutureIdentityContextItem,
+  type FutureIdentityReference,
+} from './future-character-resolution.js';
 
 export type SceneEngineProgress = AiAgentProgress;
 const SCENE_GENERATION_DEADLINE_MS = 300_000;
-
-export type SceneEngineContext = {
-  database: DatabaseHandle;
-  agent: AiAgent;
-};
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Scene generation failed';
 }
 
+export type SceneEngineContext = {
+  database: DatabaseHandle;
+  agent: AiAgent;
+};
 export class SceneEngine {
   readonly story: StoryRepository;
   readonly chapters: ChapterRepository;
   readonly scenes: SceneRepository;
   readonly workflow: WorkflowRepository;
+  readonly visualProfiles: VisualProfileRepository;
 
   constructor(private readonly context: SceneEngineContext) {
     this.story = new StoryRepository(context.database);
     this.chapters = new ChapterRepository(context.database);
     this.scenes = new SceneRepository(context.database);
     this.workflow = new WorkflowRepository(context.database);
+    this.visualProfiles = new VisualProfileRepository(context.database);
   }
 
   async generateScenes(
@@ -129,8 +136,17 @@ export class SceneEngine {
           throw new AppError('STALE_INPUT', 'Chapter changed during scene planning', 409);
         const items = validateScenePlanningOutput(result.text, current.content.length);
         const blueprint = this.story.getBlueprint(projectId)?.blueprint ?? null;
+        const identityContext = this.futureIdentityContext(projectId, current.number);
         const scenes = items.map((item) =>
-          this.toPersistenceInput(item, projectId, prompt, blueprint, style),
+          this.toPersistenceInput(
+            item,
+            projectId,
+            prompt,
+            blueprint,
+            style,
+            undefined,
+            identityContext,
+          ),
         );
         const committedMetadata = this.metadataWithContext(metadata, context);
         return this.scenes.saveGeneratedPlan({
@@ -212,6 +228,7 @@ export class SceneEngine {
           scene,
         );
         const blueprint = this.story.getBlueprint(projectId)?.blueprint ?? null;
+        const identityContext = this.futureIdentityContext(projectId, context.chapter.number);
         const persistence = this.toPersistenceInput(
           item,
           projectId,
@@ -219,6 +236,7 @@ export class SceneEngine {
           blueprint,
           style,
           scene,
+          identityContext,
         );
         persistence.continuityNotes = [
           item.continuityNotes,
@@ -606,6 +624,83 @@ export class SceneEngine {
         409,
       );
   }
+  private futureIdentityContext(
+    projectId: Id,
+    currentChapterNumber: number,
+  ): FutureIdentityContextItem[] {
+    const bounded = (value: string): string => value.trim().slice(0, 4_000);
+    const planWindows = this.story.getPlanWindows(projectId).flatMap((window) =>
+      window.items
+        .filter((item) => item.chapterNumber > currentChapterNumber)
+        .map((item) => ({
+          source: 'PLAN_WINDOW' as const,
+          reference: `plan-window:${window.window.id}:${item.chapterNumber}`,
+          text: bounded(
+            `${item.title}. ${item.summary}. ${item.purpose}. ${item.turningPoints.join('. ')}`,
+          ),
+          characterIds: item.characterIds,
+        })),
+    );
+    const futureChapters = this.context.database.sqlite
+      .prepare(
+        `SELECT id,number,title,revision,substr(content,1,4000) as content
+         FROM chapters WHERE project_id=? AND number>? ORDER BY number LIMIT 12`,
+      )
+      .all(projectId, currentChapterNumber) as Array<{
+      id: Id;
+      number: number;
+      title: string;
+      revision: number;
+      content: string;
+    }>;
+    const futureChapterIds = new Set(futureChapters.map((chapter) => chapter.id));
+    const summaries = this.story
+      .getSummaries(projectId, 200, 0)
+      .filter((summary) => futureChapterIds.has(summary.chapterId))
+      .map((summary) => ({
+        source: 'CHAPTER_SUMMARY' as const,
+        reference: `chapter-summary:${summary.chapterId}:${summary.revision}`,
+        text: bounded(
+          [
+            summary.summary.recap,
+            ...summary.summary.keyFacts,
+            ...summary.summary.newInformation,
+            ...summary.summary.characterStateChanges.map((change) => change.change),
+          ].join('. '),
+        ),
+        characterIds: summary.summary.characterStateChanges.map((change) => change.characterId),
+      }));
+    return [
+      ...planWindows.slice(0, 12),
+      ...summaries.slice(0, 12),
+      ...futureChapters.map((chapter) => ({
+        source: 'FUTURE_CHAPTER' as const,
+        reference: `chapter:${chapter.id}:${chapter.revision}`,
+        text: bounded(`${chapter.title}. ${chapter.content}`),
+      })),
+    ];
+  }
+
+  private futureIdentityReferences(
+    projectId: Id,
+    blueprint: StoryBlueprint | null,
+  ): Record<string, FutureIdentityReference> {
+    if (!blueprint) return {};
+    return Object.fromEntries(
+      blueprint.characters.map((character) => {
+        const profile = this.visualProfiles.getCharacter(projectId, character.id);
+        return [
+          character.id,
+          {
+            voiceId: character.voiceId,
+            referenceAssetIds:
+              profile?.status === 'APPROVED' ? profile.payload.referenceAssetIds : [],
+          },
+        ];
+      }),
+    );
+  }
+
   private toPersistenceInput(
     item: ScenePlanItem,
     projectId: Id,
@@ -613,9 +708,42 @@ export class SceneEngine {
     blueprint: StoryBlueprint | null,
     style: VisualStyleSettingsDto | null,
     currentScene?: SceneDto,
+    identityContext: FutureIdentityContextItem[] = [],
   ): ScenePersistenceInput {
     const resolved = resolveSceneCharacters(item, blueprint);
     const location = this.scenes.resolveLocation(projectId, item.location);
+    const references = this.futureIdentityReferences(projectId, blueprint);
+    const characters = resolved.characters.map((character) => {
+      if (character.characterId !== null) return { ...character, identityResolution: null };
+      const identityResolution = resolveFutureCharacterIdentity({
+        alias: character.displayName,
+        blueprint,
+        context: identityContext,
+        references,
+      });
+      if (identityResolution.status === 'RESOLVED' && identityResolution.characterId) {
+        const canonical = blueprint?.characters.find(
+          (candidate) => candidate.id === identityResolution.characterId,
+        );
+        return {
+          ...character,
+          characterId: identityResolution.characterId,
+          resolutionStatus: 'RESOLVED' as const,
+          dependencyFingerprint: canonical
+            ? createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+            : null,
+          identityResolution,
+        };
+      }
+      return { ...character, identityResolution };
+    });
+    const resolvedAliases = new Set(
+      characters.flatMap((character) =>
+        character.identityResolution?.status === 'RESOLVED'
+          ? [character.identityResolution.alias]
+          : [],
+      ),
+    );
     const unresolvedReferences = [...resolved.unresolvedReferences];
     if (
       location.ambiguousIds.length ||
@@ -623,10 +751,39 @@ export class SceneEngine {
       (item.location && !location.locationId)
     )
       unresolvedReferences.push(`location:${item.location ?? ''}`);
-    const uniqueReferences = [...new Set(unresolvedReferences)];
+    const uniqueReferences = [
+      ...new Set(
+        unresolvedReferences.filter(
+          (reference) => !resolvedAliases.has(reference) && !resolvedAliases.has(reference.trim()),
+        ),
+      ),
+    ];
+    const identityByAlias = new Map(
+      characters.flatMap((character) =>
+        character.identityResolution?.status === 'RESOLVED' && character.characterId
+          ? [
+              [
+                character.displayName.normalize('NFKC').toLocaleLowerCase('en-US'),
+                character.characterId,
+              ] as const,
+            ]
+          : [],
+      ),
+    );
+    const composition = {
+      ...item.composition,
+      characterPositions: item.composition.characterPositions.map((position) => ({
+        ...position,
+        characterId:
+          position.characterId ??
+          identityByAlias.get(position.displayName.normalize('NFKC').toLocaleLowerCase('en-US')) ??
+          null,
+      })),
+    };
     return {
       ...item,
-      characters: resolved.characters,
+      composition,
+      characters,
       locationId: location.locationId,
       unresolvedReferences: uniqueReferences,
       styleRevisionId: style?.id ?? null,

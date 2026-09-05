@@ -164,7 +164,11 @@ function profilePreset(key: ProductionProfileKey): ProductionProfileSettings {
       generateMetadataDraft: true,
     });
   }
-  return defaultProductionProfileSettings;
+  return productionProfileSettingsSchema.parse({
+    ...defaultProductionProfileSettings,
+    requireImageApproval: false,
+    requireQualityReview: false,
+  });
 }
 
 function projectIsActive(database: DatabaseHandle, projectId: Id): void {

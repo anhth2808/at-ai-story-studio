@@ -63,8 +63,11 @@ export class VisualReferenceService {
 
   schedule(projectId: Id, targetKind: VisualReferenceTargetKind, targetEntityId: string) {
     const style = this.scenes.getVisualStyle(projectId);
+    let persistedTargetEntityId = targetEntityId;
     let targetRevision: number;
     let conditioningProfileRevision: number | null = null;
+    let conditioningCharacterId: string | null = null;
+    let appearanceStageId: string | null = null;
     let sourcePrototypeAssetId: Id | null = null;
     let sourcePrototypeSha256: string | null = null;
     let compiled: { prompt: string; inputFingerprint: string };
@@ -78,15 +81,19 @@ export class VisualReferenceService {
         );
       targetRevision = profile.revision;
       conditioningProfileRevision = profile.revision;
+      conditioningCharacterId = targetEntityId;
       compiled = compileCharacterPrototypePrompt(profile, style);
     } else if (targetKind === 'CHARACTER_STAGE') {
-      const stage = this.stages.get(projectId, targetEntityId);
+      const stage =
+        this.stages.get(projectId, targetEntityId) ??
+        this.stages.getCurrent(projectId, targetEntityId);
       if (!stage || !stage.isCurrent || stage.reviewStatus !== 'APPROVED')
         throw new AppError(
           'INVALID_REFERENCE',
           'An approved current appearance stage is required',
           409,
         );
+      persistedTargetEntityId = stage.stableId;
       const profile = this.profiles.getCharacter(
         projectId,
         stage.characterId,
@@ -112,6 +119,8 @@ export class VisualReferenceService {
         );
       targetRevision = stage.revision;
       conditioningProfileRevision = stage.profileRevision;
+      conditioningCharacterId = stage.characterId;
+      appearanceStageId = stage.stableId;
       sourcePrototypeAssetId = prototype.assetId;
       sourcePrototypeSha256 = prototype.assetSha256;
       compiled = compileAppearanceStagePrompt(
@@ -176,12 +185,13 @@ export class VisualReferenceService {
         generationTimeoutMs: settings.generationTimeoutMs,
       },
       conditioning:
-        sourcePrototypeAssetId && sourcePrototypeSha256 && sourceAsset
+        sourcePrototypeAssetId && sourcePrototypeSha256 && sourceAsset && conditioningCharacterId
           ? {
               mode: 'REFERENCE_CONDITIONED',
               characters: [
                 {
-                  characterId: targetEntityId,
+                  characterId: conditioningCharacterId,
+                  appearanceStageId,
                   referenceAssetId: sourcePrototypeAssetId,
                   referenceSha256: sourcePrototypeSha256,
                   referencePath: sourceAsset.path.replaceAll('\\', '/'),
@@ -196,7 +206,7 @@ export class VisualReferenceService {
     const generation = this.generations.create({
       projectId,
       targetKind,
-      targetEntityId,
+      targetEntityId: persistedTargetEntityId,
       targetRevision,
       sourcePrototypeAssetId,
       sourcePrototypeSha256,
@@ -258,6 +268,17 @@ export class VisualReferenceService {
       stagingPath = null;
       const file = await sha256File(destination);
       const assetId = randomUUID();
+      const stage =
+        generation.targetKind === 'CHARACTER_STAGE'
+          ? (this.stages.get(generation.projectId, generation.targetEntityId) ??
+            this.stages.getCurrent(generation.projectId, generation.targetEntityId))
+          : null;
+      const conditioningCharacterId =
+        generation.targetKind === 'CHARACTER_STAGE'
+          ? (stage?.characterId ?? null)
+          : generation.targetKind === 'CHARACTER_PROTOTYPE'
+            ? generation.targetEntityId
+            : null;
       this.assets.register({
         id: assetId,
         projectId: generation.projectId,
@@ -272,15 +293,21 @@ export class VisualReferenceService {
         mediaType: validated.mediaType,
         bytes: file.bytes,
         sha256: file.hash,
-        sourceEntityId: generation.targetEntityId,
+        sourceEntityId: conditioningCharacterId ?? generation.targetEntityId,
         sourceStepId: step.id,
         inputFingerprint: generation.inputFingerprint,
         metadata: {
           approval: 'CANDIDATE',
           targetKind: generation.targetKind,
           targetRevision: generation.targetRevision,
-          sourcePrototypeAssetId: generation.sourcePrototypeAssetId,
-          sourcePrototypeSha256: generation.sourcePrototypeSha256,
+          characterId: conditioningCharacterId,
+          appearanceStageId: stage?.stableId ?? null,
+          appearanceStageRevision: stage?.revision ?? null,
+          profileRevision: stage?.profileRevision ?? null,
+          prototypeAssetId: generation.sourcePrototypeAssetId,
+          prototypeSha256: generation.sourcePrototypeSha256,
+          stageReferenceAssetId: generation.targetKind === 'CHARACTER_STAGE' ? assetId : null,
+          stageReferenceSha256: generation.targetKind === 'CHARACTER_STAGE' ? file.hash : null,
           provider: output.provider,
           providerJobId: output.providerJobId,
           seed: output.seed,
@@ -305,7 +332,13 @@ export class VisualReferenceService {
   }
 
   list(projectId: Id, kind: VisualReferenceTargetKind, entityId: string, limit = 50) {
-    return this.generations.list(projectId, kind, entityId, limit);
+    const targetEntityId =
+      kind === 'CHARACTER_STAGE'
+        ? (this.stages.get(projectId, entityId)?.stableId ??
+          this.stages.getCurrent(projectId, entityId)?.stableId ??
+          entityId)
+        : entityId;
+    return this.generations.list(projectId, kind, targetEntityId, limit);
   }
 
   review(

@@ -242,6 +242,8 @@ export const ltxVideoFrameCountSchema = z
   .refine((value) => (value - 1) % 8 === 0, {
     message: 'Frame count must satisfy 8k+1 for the LTX latent geometry',
   });
+
+const anyVideoFrameCountSchema = z.number().int().min(9).max(1_001);
 export const videoDimensionSchema = z
   .number()
   .int()
@@ -360,6 +362,7 @@ export const videoGenerationRequestSchema = z
     projectId: idSchema,
     sceneId: z.string().trim().min(1).max(120),
     sceneRevisionId: idSchema,
+    shotPlanId: idSchema.nullable().optional(),
     shotId: z.string().trim().min(1).max(120).nullable().optional(),
     backend: videoBackendSchema.optional(),
     continuationSource: continuationSourceSchema.nullable().optional(),
@@ -378,12 +381,25 @@ export const videoGenerationRequestSchema = z
     negativePrompt: boundedString(3_000).nullable(),
     width: videoDimensionSchema,
     height: videoDimensionSchema,
-    frameCount: videoFrameCountSchema,
+    frameCount: anyVideoFrameCountSchema,
     fps: videoOutputFpsSchema,
     seed: safeSeed,
     providerSettings: videoProviderSettingsBaseSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const valid = (
+      value.providerSettings.backend === 'LTX2_19B_DISTILLED'
+        ? ltxVideoFrameCountSchema
+        : videoFrameCountSchema
+    ).safeParse(value.frameCount).success;
+    if (!valid)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['frameCount'],
+        message: 'Frame count is invalid for the selected video backend',
+      });
+  });
 
 export type VideoGenerationResult = z.infer<typeof videoGenerationResultSchema>;
 export const videoGenerationResultSchema = z
@@ -395,7 +411,7 @@ export const videoGenerationResultSchema = z
     width: videoDimensionSchema,
     height: videoDimensionSchema,
     fps: videoOutputFpsSchema,
-    frameCount: videoFrameCountSchema,
+    frameCount: anyVideoFrameCountSchema,
     durationMs: z.number().int().nonnegative(),
     clipDurationMs: z.number().int().positive(),
     videos: z
@@ -412,7 +428,18 @@ export const videoGenerationResultSchema = z
     metadata: z.record(z.unknown()).default({}),
     warnings: z.array(boundedString(500)).max(20).default([]),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const valid = (
+      value.backend === 'LTX2_19B_DISTILLED' ? ltxVideoFrameCountSchema : videoFrameCountSchema
+    ).safeParse(value.frameCount).success;
+    if (!valid)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['frameCount'],
+        message: 'Frame count is invalid for the selected video backend',
+      });
+  });
 
 export const videoReadinessSchema = z
   .object({
@@ -458,6 +485,8 @@ export const sceneVideoGenerationDtoSchema = z
     projectId: idSchema,
     sceneId: z.string().trim().min(1).max(120),
     sceneRevisionId: idSchema,
+    shotPlanId: idSchema.nullable().optional(),
+    shotId: z.string().trim().min(1).max(120).nullable().optional(),
     revision: z.number().int().positive(),
     provider: videoProviderSchema.nullable(),
     status: sceneVideoGenerationStatusSchema,
@@ -476,7 +505,7 @@ export const sceneVideoGenerationDtoSchema = z
     // permissive (validated again at normalization).
     actualWidth: z.number().int().min(16).max(16_384).nullable(),
     actualHeight: z.number().int().min(16).max(16_384).nullable(),
-    frameCount: videoFrameCountSchema.nullable(),
+    frameCount: anyVideoFrameCountSchema.nullable(),
     fps: videoOutputFpsSchema.nullable(),
     providerJobId: idSchema.nullable(),
     workflowTemplate: videoWorkflowTemplateSchema.nullable(),

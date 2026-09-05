@@ -48,9 +48,9 @@ function migrateThrough0015(database: DatabaseHandle): void {
 }
 
 describe('production pipeline migration', () => {
-  it('migrates a fresh database through 0016', () => {
+  it('migrates a fresh database through the current schema', () => {
     const database = createDatabase(':memory:');
-    expect(migrateDatabase(database)).toBe('0016_perceptual_quality');
+    expect(migrateDatabase(database)).toBe('0017_future_character_identity');
     expect(
       database.sqlite
         .prepare(

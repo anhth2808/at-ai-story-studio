@@ -128,7 +128,6 @@ function renderCharacterFragment(
       ]
     : [canonical?.appearance ?? ''];
   const sceneParts = [
-    character.roleInScene,
     character.visualState.variantKey
       ? `variant: ${variant?.description ?? character.visualState.variantKey}`
       : '',
@@ -694,6 +693,9 @@ export function buildVisualPromptPackage(input: VisualPromptBuildInput): VisualP
 }
 export type ShotVisualPromptBuildInput = VisualPromptBuildInput & {
   shot: Shot;
+  shotPlanId?: string | null;
+  shotPlanRevision?: number | null;
+  shotRevision?: number | null;
   referenceBindings: ReferenceBinding[];
 };
 
@@ -812,8 +814,11 @@ export function buildShotVisualPromptPackage(
   );
   const payload = visualPromptPackagePayloadSchema.parse({
     ...result.package,
+    shotPlanId: input.shotPlanId ?? null,
+    shotPlanRevision: input.shotPlanRevision ?? null,
     shotId: input.shot.id,
-    shotRevision: 1,
+    shotRevision: input.shotRevision ?? 1,
+    shotOrdinal: input.shot.ordinal,
     visibleCharacterIds: input.shot.visibleCharacterIds,
     offscreenCharacterIds: input.shot.offscreenCharacterIds,
     staticIntent: input.shot.staticIntent,

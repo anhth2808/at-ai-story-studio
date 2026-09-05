@@ -351,7 +351,12 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
         signal,
       );
       if (!system || typeof system !== 'object')
-        return this.parseReadiness(checkedAt, 'ERROR', 'ComfyUI system_stats is invalid');
+        return this.parseReadiness(
+          settings.backend,
+          checkedAt,
+          'ERROR',
+          'ComfyUI system_stats is invalid',
+        );
       const objectInfo = await this.loadObjectInfo(settings, signal);
       const requiredNodes = ltx ? LTX2_REQUIRED_NODE_CLASSES : REQUIRED_NATIVE_NODE_CLASSES;
       const missingNodes = requiredNodes.filter(
@@ -402,6 +407,7 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
       )
         return videoReadinessSchema.parse({
           provider: 'COMFYUI',
+          backend: settings.backend,
           status: 'INSUFFICIENT_CONFIGURATION',
           message: 'Configured sampler or scheduler is not offered by this ComfyUI server',
           checkedAt,
@@ -440,24 +446,26 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
             : error.code === 'CONFIGURATION_ERROR'
               ? 'ERROR'
               : 'COMFYUI_UNAVAILABLE';
-        return this.parseReadiness(checkedAt, status, error.message);
+        return this.parseReadiness(settings.backend, checkedAt, status, error.message);
       }
       return videoReadinessSchema.parse({
         provider: 'COMFYUI',
+        backend: settings.backend,
         status: 'COMFYUI_UNAVAILABLE',
         message: error instanceof Error ? error.message.slice(0, 1_000) : 'ComfyUI is unreachable',
         checkedAt,
       });
     }
   }
-
   private parseReadiness(
+    backend: VideoProviderSettings['backend'],
     checkedAt: string,
     status: VideoReadiness['status'],
     message: string,
   ): VideoReadiness {
     return videoReadinessSchema.parse({
       provider: 'COMFYUI',
+      backend,
       status,
       message: message.slice(0, 1_000),
       checkedAt,
@@ -523,6 +531,7 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     );
     return videoGenerationResultSchema.parse({
       provider: 'COMFYUI',
+      backend: parsedRequest.providerSettings.backend,
       providerJobId: parsedRequest.providerJobId,
       seed: parsedRequest.seed,
       width: parsedRequest.width,
@@ -855,7 +864,11 @@ export class ComfyUiVideoProvider implements VideoGenerationProvider {
     const payload = await this.json(settings, '/object_info', settings.connectionTimeoutMs, signal);
     if (!payload || typeof payload !== 'object') return {};
     const objectInfo = { ...(payload as Record<string, unknown>) };
-    for (const classType of REQUIRED_NATIVE_NODE_CLASSES) {
+    const required =
+      settings.backend === 'LTX2_19B_DISTILLED'
+        ? LTX2_REQUIRED_NODE_CLASSES
+        : REQUIRED_NATIVE_NODE_CLASSES;
+    for (const classType of required) {
       if (classType in objectInfo) continue;
       try {
         const nodePayload = await this.json(

@@ -6,6 +6,10 @@ import { describe, expect, it } from 'vitest';
 import {
   createDatabase,
   migrateDatabase,
+  ImageGenerationSettingsRepository,
+  SceneImageGenerationRepository,
+  ShotPlanRepository,
+  TimelineRepository,
   WorkflowRepository,
   type DatabaseHandle,
 } from '@studio/database';
@@ -14,11 +18,13 @@ import {
   AppError,
   videoGenerationResultSchema,
   videoReadinessSchema,
+  type ShotPlanCandidate,
   type VideoGenerationRequest,
   type VideoGenerationResult,
   type VideoProviderSettings,
   type VideoReadiness,
 } from '@studio/shared';
+import type { AiAgent, AiAgentResult } from './omp-agent.js';
 import type { StudioContext } from './index.js';
 import { SceneVideoService } from './video-service.js';
 import type { VideoGenerationProvider } from './comfyui-video.js';
@@ -29,6 +35,14 @@ const planId = '33333333-3333-4333-8333-333333333333';
 const sceneId = '44444444-4444-4444-8444-444444444444';
 const sceneStableId = 'scene-stable-1';
 const imageSha = 'a'.repeat(64);
+const state = {
+  characters: [],
+  objects: [],
+  cameraAxis: '',
+  locationId: null,
+  sourceShotId: null,
+  fingerprint: 'd'.repeat(64),
+};
 
 async function setup(): Promise<{
   context: StudioContext;
@@ -138,7 +152,8 @@ async function setup(): Promise<{
     '-an',
     clipFixture,
   ]);
-  // A current accepted scene image asset.
+  // A current accepted scene image asset and its manual generation lineage.
+  const imageAssetId = randomUUID();
   database.sqlite
     .prepare(
       `INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,
@@ -146,7 +161,7 @@ async function setup(): Promise<{
        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
-      randomUUID(),
+      imageAssetId,
       projectId,
       'SCENE_IMAGE',
       `scene:${sceneStableId}:image`,
@@ -159,6 +174,28 @@ async function setup(): Promise<{
       'image-fingerprint',
       JSON.stringify({ width: 1024, height: 576 }),
       1,
+      '2026-01-01',
+      '2026-01-01',
+    );
+  database.sqlite
+    .prepare(
+      `INSERT INTO scene_image_generations(
+        id,project_id,scene_stable_id,scene_revision_id,revision,source,status,review_status,
+        is_current,input_fingerprint,asset_id,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      randomUUID(),
+      projectId,
+      sceneStableId,
+      sceneId,
+      1,
+      'MANUAL',
+      'COMPLETED',
+      'ACCEPTED',
+      1,
+      'image-generation-fingerprint',
+      imageAssetId,
       '2026-01-01',
       '2026-01-01',
     );
@@ -203,14 +240,45 @@ class FakeVideoProvider implements VideoGenerationProvider {
   async cancel(): Promise<void> {}
 }
 
+class TemporalCriticAgent implements AiAgent {
+  calls = 0;
+
+  async generate(request: Parameters<AiAgent['generate']>[0]): Promise<AiAgentResult> {
+    this.calls += 1;
+    return {
+      operation: request.operation,
+      text: JSON.stringify({
+        status: 'REJECTED',
+        issues: ['IDENTITY_DRIFT', 'FLICKER'],
+        confidence: 0.9,
+        explanation: 'The subject drifts between sampled frames.',
+        guidance: 'Keep the camera move restrained.',
+      }),
+      provider: 'fixture',
+      model: 'fixture-critic',
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      durationMs: 1,
+    };
+  }
+}
+class UnavailableTemporalCritic implements AiAgent {
+  async generate(): Promise<AiAgentResult> {
+    throw new Error('critic offline');
+  }
+}
+
 async function configuredService(
   database: DatabaseHandle,
   context: StudioContext,
   clipFixture: string,
+  criticAgent?: AiAgent,
 ) {
   const service = new SceneVideoService(
     context,
     new FakeVideoProvider(clipFixture, context.workspace.staging),
+    criticAgent,
   );
   service.setMotionSource(projectId, sceneId, 'AI_VIDEO');
   const settings = service.getSettings(projectId);
@@ -234,30 +302,13 @@ function bindImageGeneration(
   database: DatabaseHandle,
   reviewStatus: 'UNREVIEWED' | 'ACCEPTED' | 'REJECTED',
 ): void {
-  const asset = database.sqlite
-    .prepare('SELECT id FROM assets WHERE project_id=? AND role=? AND is_current=1')
-    .get(projectId, `scene:${sceneStableId}:image`) as { id: string };
   database.sqlite
     .prepare(
-      `INSERT INTO scene_image_generations(id,project_id,scene_stable_id,scene_revision_id,revision,
-        source,status,review_status,is_current,input_fingerprint,asset_id,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `UPDATE scene_image_generations
+       SET review_status=?,is_current=1,status='COMPLETED',updated_at=?
+       WHERE project_id=? AND scene_stable_id=? AND shot_stable_id IS NULL`,
     )
-    .run(
-      randomUUID(),
-      projectId,
-      sceneStableId,
-      sceneId,
-      1,
-      'MANUAL',
-      'COMPLETED',
-      reviewStatus,
-      1,
-      'gen-fingerprint',
-      asset.id,
-      '2026-01-01',
-      '2026-01-01',
-    );
+    .run(reviewStatus, '2026-01-01', projectId, sceneStableId);
 }
 
 function requireImageApproval(database: DatabaseHandle, required: boolean): void {
@@ -269,6 +320,154 @@ function requireImageApproval(database: DatabaseHandle, required: boolean): void
     .run(randomUUID(), projectId, required ? 1 : 0, 'img-fingerprint', '2026-01-01', '2026-01-01');
 }
 
+function continuationShot(
+  id: string,
+  beatId: string,
+  ordinal: number,
+  cameraMotion: 'STATIC' | 'PUSH_IN',
+  continuation: ShotPlanCandidate['shots'][number]['continuation'],
+): ShotPlanCandidate['shots'][number] {
+  return {
+    id,
+    beatId,
+    ordinal,
+    sourceRange: { startOffset: (ordinal - 1) * 7, endOffset: ordinal * 7 },
+    primaryBeat: 'ACTION',
+    eventKinds: ['ACTION'],
+    eventCount: 1,
+    importance: 'MEDIUM',
+    hero: false,
+    identitySensitive: false,
+    dialogueMode: 'NONE',
+    dialogueText: '',
+    speakerCharacterId: null,
+    visualCarrier: '',
+    offscreenRationale: '',
+    visibleCharacterIds: [],
+    offscreenCharacterIds: [],
+    staticIntent: {
+      subject: 'A river',
+      action: 'flows',
+      pose: '',
+      expression: '',
+      relationship: '',
+      importantObjectIds: [],
+      framing: 'MEDIUM',
+      angle: 'Eye level',
+      composition: 'Centered',
+      lighting: 'Dawn',
+      colorMood: 'Blue',
+      atmosphere: 'Quiet',
+    },
+    dynamicIntent: {
+      subjectMotion: 'the river flows',
+      cameraMotion,
+      cameraSpeed: cameraMotion === 'STATIC' ? 'NONE' : 'SLOW',
+      environmentMotion: 'water moves',
+      emotionalTiming: '',
+      speakingMotion: '',
+      stabilityConstraints: ['Keep the frame stable'],
+    },
+    initialState: state,
+    finalState: state,
+    continuation,
+    plannedDurationMs: 2_000,
+    variationIntent: 'NORMAL',
+  };
+}
+
+const continuationCandidate: ShotPlanCandidate = {
+  beats: [
+    {
+      id: 'beat-1',
+      ordinal: 1,
+      sourceRange: { startOffset: 0, endOffset: 7 },
+      kind: 'ACTION',
+      meaning: 'The river flows',
+      importance: 'MEDIUM',
+      turningPoint: false,
+      timingGroupKey: 'river',
+    },
+    {
+      id: 'beat-2',
+      ordinal: 2,
+      sourceRange: { startOffset: 7, endOffset: 14 },
+      kind: 'ACTION',
+      meaning: 'The river continues',
+      importance: 'MEDIUM',
+      turningPoint: false,
+      timingGroupKey: 'river',
+    },
+  ],
+  shots: [
+    continuationShot('shot-1', 'beat-1', 1, 'STATIC', {
+      mode: 'NEW_KEYFRAME',
+      eligible: false,
+      reason: 'First Shot',
+      version: 'continuation-v1',
+    }),
+    continuationShot('shot-2', 'beat-2', 2, 'PUSH_IN', {
+      mode: 'CONTINUE_PREVIOUS',
+      eligible: true,
+      reason: 'Retains the established frame',
+      version: 'continuation-v1',
+    }),
+  ],
+};
+
+function bindShotImage(
+  database: DatabaseHandle,
+  shotPlanId: string,
+  shotId: string,
+  sha256: string,
+  revision: number,
+): string {
+  const settings = new ImageGenerationSettingsRepository(database).getOrCreate(projectId);
+  const packageId = randomUUID();
+  const packageFingerprint = `${shotId}-package`;
+  database.sqlite
+    .prepare(
+      `INSERT INTO visual_prompt_packages(
+        id,project_id,scene_revision_id,shot_plan_id,shot_stable_id,revision,status,payload,
+        consistency_status,consistency_issues,input_fingerprint,prompt_template_version,
+        row_version,is_current,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      packageId,
+      projectId,
+      sceneId,
+      shotPlanId,
+      shotId,
+      revision,
+      'CURRENT',
+      '{}',
+      'PASS',
+      '[]',
+      packageFingerprint,
+      'shot-test-v1',
+      1,
+      1,
+      '2026-01-01',
+      '2026-01-01',
+    );
+  return new SceneImageGenerationRepository(database).commitManual({
+    projectId,
+    sceneStableId,
+    sceneRevisionId: sceneId,
+    shotPlanId,
+    shotStableId: shotId,
+    visualPromptPackageId: packageId,
+    packageFingerprint,
+    settingsFingerprint: settings.inputFingerprint,
+    assetPath: `projects/${projectId}/images/shots/${shotId}/manual.png`,
+    mediaType: 'image/png',
+    bytes: 10,
+    sha256,
+    width: 64,
+    height: 64,
+  }).assetId!;
+}
 describe('SceneVideoService', () => {
   it('refuses to schedule a Ken Burns scene', async () => {
     const { context, database, clipFixture } = await setup();
@@ -481,6 +680,183 @@ describe('SceneVideoService', () => {
     expect(() => service.schedule(projectId, sceneId, {})).toThrowError(
       'A current accepted scene image is required before AI video generation',
     );
+    database.sqlite.close();
+  });
+  it('extracts and persists exact prior Shot frame lineage before continuation generation', async () => {
+    const { context, database, clipFixture } = await setup();
+    const plan = new ShotPlanRepository(database).saveCurrent({
+      stableId: 'shot-plan-scene-1',
+      projectId,
+      chapterId,
+      sceneId: sceneStableId,
+      sceneRevisionId: sceneId,
+      templateVersion: 'shot-director-v1',
+      schemaVersion: 'shot-plan-v1',
+      inputFingerprint: 'shot-plan-fingerprint',
+      candidate: continuationCandidate,
+    });
+    database.sqlite
+      .prepare("UPDATE shot_plans SET review_status='APPROVED' WHERE id=?")
+      .run(plan.id);
+    const firstImageAssetId = bindShotImage(database, plan.id, 'shot-1', 'b'.repeat(64), 1);
+    bindShotImage(database, plan.id, 'shot-2', 'c'.repeat(64), 2);
+    new TimelineRepository(database).createSceneTiming({
+      projectId,
+      chapterId,
+      chapterRevision: 1,
+      audioAssetId: firstImageAssetId,
+      mode: 'MANUAL',
+      durationMs: 4_000,
+      minimumSceneDurationMs: 1_000,
+      items: [
+        {
+          sceneId,
+          sceneRevision: 1,
+          sourceRange: { start: 0, end: 14 },
+          rawStartMs: 0,
+          rawEndMs: 4_000,
+          startMs: 0,
+          endMs: 4_000,
+          durationMs: 4_000,
+          warning: null,
+        },
+      ],
+      warnings: [],
+      inputFingerprint: 'shot-timing-fingerprint',
+    });
+    const service = await configuredService(database, context, clipFixture);
+    const workflow = new WorkflowRepository(database);
+
+    const first = service.scheduleShot(projectId, sceneId, 'shot-1');
+    const firstStep = workflow.claim('video-worker')!;
+    expect(firstStep.type).toBe('GENERATE_AI_SHOT_VIDEO');
+    await service.executeStep(firstStep, 'video-worker');
+    workflow.complete(firstStep);
+    const accepted = service.acceptShot(projectId, sceneId, 'shot-1', first.generation.id, {});
+    expect(accepted.assetId).toBeTruthy();
+
+    const second = service.scheduleShot(projectId, sceneId, 'shot-2');
+    expect(second.generation.continuationSource).toMatchObject({
+      sourceShotId: 'shot-1',
+      sourceVideoAssetId: accepted.assetId,
+      frameSha256: '0'.repeat(64),
+      framePosition: 1,
+      extractorVersion: 'ffmpeg-final-frame-v1',
+    });
+    const extractionStep = workflow.claim('video-worker')!;
+    expect(extractionStep.type).toBe('EXTRACT_SHOT_CONTINUATION_FRAME');
+    await service.executeContinuationStep(extractionStep);
+    workflow.complete(extractionStep);
+
+    const extracted = service.getShotGeneration(projectId, sceneId, 'shot-2', second.generation.id);
+    const continuation = extracted.continuationSource!;
+    expect(continuation).toMatchObject({
+      sourceShotId: 'shot-1',
+      sourceVideoAssetId: accepted.assetId,
+      framePosition: 1,
+      extractorVersion: 'ffmpeg-final-frame-v1',
+    });
+    expect(continuation.frameSha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect(continuation.frameSha256).not.toBe('0'.repeat(64));
+    const frame = database.sqlite
+      .prepare('SELECT status,is_current,source_entity_id,metadata FROM assets WHERE id=?')
+      .get(continuation.frameAssetId) as {
+      status: string;
+      is_current: number;
+      source_entity_id: string;
+      metadata: string;
+    };
+    expect(frame).toMatchObject({
+      status: 'READY',
+      is_current: 1,
+      source_entity_id: first.generation.id,
+    });
+    expect(JSON.parse(frame.metadata)).toMatchObject({
+      sourceShotId: 'shot-1',
+      sourceVideoAssetId: accepted.assetId,
+      sourceVideoSha256: expect.any(String),
+      framePosition: 1,
+      extractorVersion: 'ffmpeg-final-frame-v1',
+    });
+
+    const generationStep = workflow.claim('video-worker')!;
+    expect(generationStep.type).toBe('GENERATE_AI_SHOT_VIDEO');
+    await service.executeStep(generationStep, 'video-worker');
+    workflow.complete(generationStep);
+    const completed = service.getShotGeneration(projectId, sceneId, 'shot-2', second.generation.id);
+    expect(completed.metadata.request).toMatchObject({
+      continuationSource: {
+        frameAssetId: continuation.frameAssetId,
+        frameSha256: continuation.frameSha256,
+      },
+    });
+    database.sqlite.close();
+  });
+  it('persists critic infrastructure failure as unavailable quality', async () => {
+    const { context, database, clipFixture } = await setup();
+    const service = await configuredService(
+      database,
+      context,
+      clipFixture,
+      new UnavailableTemporalCritic(),
+    );
+    const workflow = new WorkflowRepository(database);
+    const scheduled = service.schedule(projectId, sceneId, {});
+    const step = workflow.claim('video-worker')!;
+    await service.executeStep(step, 'video-worker');
+    workflow.complete(step);
+
+    expect(service.getGeneration(projectId, sceneId, scheduled.generation.id)).toMatchObject({
+      status: 'COMPLETED',
+      automaticQualityStatus: 'UNAVAILABLE',
+      criticEvaluationId: expect.any(String),
+      isCurrent: false,
+    });
+    expect(workflow.claim('video-worker')).toBeNull();
+    database.sqlite.close();
+  });
+  it('records temporal rejection guidance and stops at the retry limit', async () => {
+    const { context, database, clipFixture } = await setup();
+    const critic = new TemporalCriticAgent();
+    const service = await configuredService(database, context, clipFixture, critic);
+    const workflow = new WorkflowRepository(database);
+    const first = service.schedule(projectId, sceneId, {});
+    let step = workflow.claim('video-worker')!;
+    await service.executeStep(step, 'video-worker');
+    workflow.complete(step);
+
+    const firstCompleted = service.getGeneration(projectId, sceneId, first.generation.id);
+    expect(firstCompleted).toMatchObject({
+      status: 'COMPLETED',
+      automaticQualityStatus: 'REJECTED',
+      criticEvaluationId: expect.any(String),
+      isCurrent: false,
+    });
+    let generations = service.listGenerations(projectId, sceneId);
+    expect(generations).toHaveLength(2);
+    expect((generations[0]!.metadata as Record<string, unknown>).qualityRetry).toMatchObject({
+      sourceGenerationId: first.generation.id,
+      issues: ['IDENTITY_DRIFT', 'FLICKER'],
+    });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      step = workflow.claim('video-worker')!;
+      await service.executeStep(step, 'video-worker');
+      workflow.complete(step);
+      generations = service.listGenerations(projectId, sceneId);
+    }
+    expect(critic.calls).toBe(3);
+    expect(generations).toHaveLength(3);
+    expect(
+      generations.filter((generation) => generation.automaticQualityStatus === 'REJECTED'),
+    ).toHaveLength(2);
+    const exhausted = generations.find(
+      (generation) => generation.automaticQualityStatus === 'MANUAL_REVIEW_REQUIRED',
+    );
+    expect(exhausted).toBeDefined();
+    expect(exhausted?.reviewNotes).toContain('retry limit exhausted');
+    expect(generations.every((generation) => !generation.isCurrent)).toBe(true);
+    expect(workflow.claim('video-worker')).toBeNull();
     database.sqlite.close();
   });
 });

@@ -13,9 +13,122 @@ import {
   type VisualReferenceTargetKind,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
+import { invalidateAssetDependents } from './repositories.js';
 
 const now = (): string => new Date().toISOString();
 const limit = (value: number): number => Math.max(1, Math.min(100, value));
+
+function invalidatePromptPackageDescendants(
+  database: DatabaseHandle,
+  projectId: Id,
+  predicate: string,
+  parameters: unknown[],
+): void {
+  const stamp = now();
+  const packages = database.sqlite
+    .prepare(
+      `SELECT p.id
+       FROM visual_prompt_packages p
+       WHERE p.project_id=? AND p.is_current=1 AND ${predicate}`,
+    )
+    .all(projectId, ...parameters) as Array<{ id: Id }>;
+  const packageIds = [...new Set(packages.map((row) => row.id))];
+  if (packageIds.length === 0) return;
+  const packagePlaceholders = packageIds.map(() => '?').join(',');
+  database.sqlite
+    .prepare(
+      `UPDATE visual_prompt_packages SET status='STALE',is_current=0,updated_at=?
+       WHERE project_id=? AND id IN (${packagePlaceholders})`,
+    )
+    .run(stamp, projectId, ...packageIds);
+  const images = database.sqlite
+    .prepare(
+      `SELECT id,asset_id as assetId
+       FROM scene_image_generations
+       WHERE project_id=? AND visual_prompt_package_id IN (${packagePlaceholders})`,
+    )
+    .all(projectId, ...packageIds) as Array<{ id: Id; assetId: Id | null }>;
+  const imageIds = images.map((row) => row.id);
+  const imageAssetIds = images.flatMap((row) => (row.assetId ? [row.assetId] : []));
+  if (imageIds.length > 0) {
+    const imagePlaceholders = imageIds.map(() => '?').join(',');
+    const staleMessage = 'Visual reference dependency changed';
+    database.sqlite
+      .prepare(
+        `UPDATE scene_image_generations
+         SET status=CASE WHEN status IN ('PENDING','RUNNING') THEN 'CANCELLED' ELSE status END,
+             error_code=CASE WHEN status IN ('PENDING','RUNNING') THEN 'STALE_INPUT' ELSE error_code END,
+             error=CASE WHEN status IN ('PENDING','RUNNING') THEN ? ELSE error END,
+             is_current=0,updated_at=?
+         WHERE project_id=? AND id IN (${imagePlaceholders})`,
+      )
+      .run(staleMessage, stamp, projectId, ...imageIds);
+    database.sqlite
+      .prepare(
+        `UPDATE workflow_steps SET status='INVALIDATED',error=?,cancellation_requested_at=?,
+          lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+         WHERE entity_id IN (${imagePlaceholders})
+           AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run(staleMessage, stamp, stamp, ...imageIds);
+    database.sqlite
+      .prepare(
+        `UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL
+         WHERE step_id IN (
+           SELECT id FROM workflow_steps WHERE entity_id IN (${imagePlaceholders})
+         ) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run(staleMessage, ...imageIds);
+  }
+  if (imageAssetIds.length === 0) return;
+  const assetPlaceholders = imageAssetIds.map(() => '?').join(',');
+  const videos = database.sqlite
+    .prepare(
+      `SELECT id
+       FROM scene_video_generations
+       WHERE project_id=? AND source_image_asset_id IN (${assetPlaceholders})`,
+    )
+    .all(projectId, ...imageAssetIds) as Array<{ id: Id }>;
+  const videoIds = videos.map((row) => row.id);
+  if (videoIds.length > 0) {
+    const videoPlaceholders = videoIds.map(() => '?').join(',');
+    const staleMessage = 'Visual reference dependency changed';
+    database.sqlite
+      .prepare(
+        `UPDATE scene_video_generations
+         SET status=CASE WHEN status IN ('PENDING','RUNNING') THEN 'CANCELLED' ELSE status END,
+             error_code=CASE WHEN status IN ('PENDING','RUNNING') THEN 'STALE_INPUT' ELSE error_code END,
+             error=CASE WHEN status IN ('PENDING','RUNNING') THEN ? ELSE error END,
+             is_current=0,updated_at=?
+         WHERE project_id=? AND id IN (${videoPlaceholders})`,
+      )
+      .run(staleMessage, stamp, projectId, ...videoIds);
+    database.sqlite
+      .prepare(
+        `UPDATE workflow_steps SET status='INVALIDATED',error=?,cancellation_requested_at=?,
+          lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+         WHERE entity_id IN (${videoPlaceholders})
+           AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run(staleMessage, stamp, stamp, ...videoIds);
+    database.sqlite
+      .prepare(
+        `UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL
+         WHERE step_id IN (
+           SELECT id FROM workflow_steps WHERE entity_id IN (${videoPlaceholders})
+         ) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run(staleMessage, ...videoIds);
+  }
+  database.sqlite
+    .prepare(
+      `UPDATE assets SET is_current=0,updated_at=?
+       WHERE project_id=? AND id IN (${assetPlaceholders})`,
+    )
+    .run(stamp, projectId, ...imageAssetIds);
+  for (const assetId of imageAssetIds)
+    invalidateAssetDependents(database, projectId, assetId, stamp);
+}
 
 type StageRow = {
   id: string;
@@ -99,6 +212,25 @@ export class AppearanceStageRepository {
     const id = randomUUID();
     const timestamp = now();
     this.database.sqlite.transaction(() => {
+      if (current)
+        invalidatePromptPackageDescendants(
+          this.database,
+          input.projectId,
+          `EXISTS (
+             SELECT 1 FROM json_each(p.payload, '$.referenceBindings')
+             WHERE json_extract(value,'$.stageId')=? AND json_extract(value,'$.revision')=?
+           )`,
+          [input.stableId, current.revision],
+        );
+      if (current)
+        this.database.sqlite
+          .prepare(
+            `UPDATE visual_reference_generations
+             SET is_current=0,updated_at=?
+             WHERE project_id=? AND target_kind='CHARACTER_STAGE'
+               AND target_entity_id=? AND target_revision=? AND is_current=1`,
+          )
+          .run(timestamp, input.projectId, input.stableId, current.revision);
       if (current)
         this.database.sqlite
           .prepare('UPDATE character_appearance_stages SET is_current=0,updated_at=? WHERE id=?')
@@ -358,27 +490,15 @@ export class VisualReferenceGenerationRepository {
               'UPDATE visual_reference_generations SET is_current=0,updated_at=? WHERE project_id=? AND source_prototype_asset_id=? AND is_current=1',
             )
             .run(now(), current.projectId, prior.assetId);
-        this.database.sqlite
-          .prepare(
-            `UPDATE visual_prompt_packages SET status='STALE',is_current=0,updated_at=?
-             WHERE project_id=? AND is_current=1 AND EXISTS (
-               SELECT 1 FROM json_each(reference_bindings) WHERE json_extract(value,'$.assetId')=?
-             )`,
-          )
-          .run(now(), current.projectId, prior.assetId);
-        this.database.sqlite
-          .prepare(
-            `UPDATE scene_image_generations SET is_current=0,updated_at=?
-             WHERE project_id=? AND visual_prompt_package_id IN (
-               SELECT id FROM visual_prompt_packages WHERE project_id=? AND status='STALE'
-             )`,
-          )
-          .run(now(), current.projectId, current.projectId);
-        this.database.sqlite
-          .prepare(
-            'UPDATE scene_video_generations SET is_current=0,updated_at=? WHERE project_id=? AND source_image_asset_id=?',
-          )
-          .run(now(), current.projectId, prior.assetId);
+        invalidatePromptPackageDescendants(
+          this.database,
+          current.projectId,
+          `EXISTS (
+             SELECT 1 FROM json_each(p.payload, '$.referenceBindings')
+             WHERE json_extract(value,'$.assetId')=?
+           )`,
+          [prior.assetId],
+        );
       }
     })();
     return this.get(id)!;

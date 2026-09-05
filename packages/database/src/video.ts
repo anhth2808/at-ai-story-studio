@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
+  continuationSourceSchema,
   sceneVideoGenerationDtoSchema,
   sceneVideoReviewUpdateSchema,
   videoGenerationSettingsSchema,
@@ -17,14 +18,18 @@ import {
   type VideoGenerationSettingsUpdate,
 } from '@studio/shared';
 import type { DatabaseHandle } from './db.js';
-import { AssetRepository, invalidateAssetDependents, type StepLeaseGuard } from './repositories.js';
+import {
+  AssetRepository,
+  invalidateAssetDependents,
+  type CurrentAsset,
+  type StepLeaseGuard,
+} from './repositories.js';
 
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value ?? {});
 const safeError = (value: string): string => value.slice(0, 2_000);
 
 export const VIDEO_MAPPING_VERSION = 'image-to-video-v1-mapping-1';
-
 function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -82,8 +87,8 @@ function assertSafePath(path: string): void {
     throw new AppError('UNSAFE_PATH', 'Asset path must be workspace-relative', 400);
 }
 
-export function sceneVideoRole(sceneStableId: string): string {
-  return `scene:${sceneStableId}:ai-motion`;
+export function sceneVideoRole(sceneStableId: string, shotStableId: string | null = null): string {
+  return shotStableId ? `shot:${shotStableId}:video` : `scene:${sceneStableId}:ai-motion`;
 }
 
 const PLAN_COLUMNS = `id,project_id as projectId,chapter_id as chapterId,scene_stable_id as sceneId,
@@ -167,6 +172,62 @@ const SETTINGS_COLUMNS = `id,project_id as projectId,provider,base_url as baseUr
   seed_mode as seedMode,fixed_seed as fixedSeed,require_motion_approval as requireMotionApproval,
   row_version as rowVersion,created_at as createdAt,updated_at as updatedAt`;
 
+function invalidateVideoSettingsDependents(
+  database: DatabaseHandle,
+  projectId: Id,
+  stamp: string,
+): void {
+  const assets = database.sqlite
+    .prepare(
+      `SELECT DISTINCT a.id
+       FROM assets a
+       JOIN scene_video_generations g ON g.asset_id=a.id
+       WHERE g.project_id=? AND g.is_current=1 AND a.is_current=1`,
+    )
+    .all(projectId) as Array<{ id: Id }>;
+  database.sqlite
+    .prepare(
+      `UPDATE scene_video_generations
+       SET is_current=0,
+           status=CASE WHEN status IN ('PENDING','RUNNING') THEN 'CANCELLED' ELSE status END,
+           error_code=CASE WHEN status IN ('PENDING','RUNNING') THEN 'STALE_INPUT' ELSE error_code END,
+           error=CASE WHEN status IN ('PENDING','RUNNING') THEN ? ELSE error END,
+           updated_at=?
+       WHERE project_id=? AND (is_current=1 OR status IN ('PENDING','RUNNING'))`,
+    )
+    .run('Video generation settings changed', stamp, projectId);
+  database.sqlite
+    .prepare(
+      `UPDATE workflow_steps
+       SET status='INVALIDATED',error=?,cancellation_requested_at=?,
+           lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+       WHERE type IN ('GENERATE_AI_SCENE_VIDEO','GENERATE_AI_SHOT_VIDEO','EXTRACT_SHOT_CONTINUATION_FRAME')
+         AND json_extract(payload,'$.projectId')=?
+         AND status IN ('PENDING','RUNNING')`,
+    )
+    .run('Video generation settings changed', stamp, stamp, projectId);
+  database.sqlite
+    .prepare(
+      `UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL
+       WHERE step_id IN (
+         SELECT id FROM workflow_steps
+         WHERE type IN ('GENERATE_AI_SCENE_VIDEO','GENERATE_AI_SHOT_VIDEO','EXTRACT_SHOT_CONTINUATION_FRAME')
+           AND json_extract(payload,'$.projectId')=?
+       ) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+    )
+    .run('Video generation settings changed', projectId);
+  if (assets.length) {
+    const placeholders = assets.map(() => '?').join(',');
+    database.sqlite
+      .prepare(
+        `UPDATE assets SET is_current=0,updated_at=?
+         WHERE project_id=? AND id IN (${placeholders})`,
+      )
+      .run(stamp, projectId, ...assets.map((asset) => asset.id));
+  }
+  for (const asset of assets) invalidateAssetDependents(database, projectId, asset.id, stamp);
+}
+
 export class VideoGenerationSettingsRepository {
   constructor(private readonly database: DatabaseHandle) {}
 
@@ -233,44 +294,48 @@ export class VideoGenerationSettingsRepository {
     if (expected !== undefined && expected !== current.rowVersion)
       throw new AppError('CONFLICT', 'Video generation settings changed; reload and retry', 409);
     const settings = videoGenerationSettingsSchema.parse(settingsInput);
-    const result = this.database.sqlite
-      .prepare(
-        `UPDATE video_generation_settings SET provider=?,base_url=?,backend=?,workflow_template=?,diffusion_model=?,
-          text_encoder=?,vae_name=?,ltx_checkpoint=?,ltx_text_encoder=?,ltx_vae_name=?,ltx_fps=?,
-          sampler=?,scheduler=?,steps=?,guidance=?,shift=?,preset=?,
-          connection_timeout_ms=?,generation_timeout_ms=?,seed_mode=?,fixed_seed=?,
-          require_motion_approval=?,row_version=row_version+1,updated_at=?
-         WHERE project_id=? AND row_version=?`,
-      )
-      .run(
-        settings.provider,
-        settings.baseUrl,
-        settings.backend,
-        settings.workflowTemplate,
-        settings.diffusionModel,
-        settings.textEncoder,
-        settings.vaeName,
-        settings.ltxCheckpoint,
-        settings.ltxTextEncoder,
-        settings.ltxVaeName,
-        settings.ltxFps,
-        settings.sampler,
-        settings.scheduler,
-        settings.steps,
-        settings.guidance,
-        settings.shift,
-        settings.preset,
-        settings.connectionTimeoutMs,
-        settings.generationTimeoutMs,
-        settings.seedMode,
-        settings.fixedSeed,
-        settings.requireMotionApproval ? 1 : 0,
-        now(),
-        projectId,
-        current.rowVersion,
-      );
-    if (result.changes !== 1)
-      throw new AppError('CONFLICT', 'Video generation settings changed; reload and retry', 409);
+    const stamp = now();
+    this.database.sqlite.transaction(() => {
+      const result = this.database.sqlite
+        .prepare(
+          `UPDATE video_generation_settings SET provider=?,base_url=?,backend=?,workflow_template=?,diffusion_model=?,
+            text_encoder=?,vae_name=?,ltx_checkpoint=?,ltx_text_encoder=?,ltx_vae_name=?,ltx_fps=?,
+            sampler=?,scheduler=?,steps=?,guidance=?,shift=?,preset=?,
+            connection_timeout_ms=?,generation_timeout_ms=?,seed_mode=?,fixed_seed=?,
+            require_motion_approval=?,row_version=row_version+1,updated_at=?
+           WHERE project_id=? AND row_version=?`,
+        )
+        .run(
+          settings.provider,
+          settings.baseUrl,
+          settings.backend,
+          settings.workflowTemplate,
+          settings.diffusionModel,
+          settings.textEncoder,
+          settings.vaeName,
+          settings.ltxCheckpoint,
+          settings.ltxTextEncoder,
+          settings.ltxVaeName,
+          settings.ltxFps,
+          settings.sampler,
+          settings.scheduler,
+          settings.steps,
+          settings.guidance,
+          settings.shift,
+          settings.preset,
+          settings.connectionTimeoutMs,
+          settings.generationTimeoutMs,
+          settings.seedMode,
+          settings.fixedSeed,
+          settings.requireMotionApproval ? 1 : 0,
+          stamp,
+          projectId,
+          current.rowVersion,
+        );
+      if (result.changes !== 1)
+        throw new AppError('CONFLICT', 'Video generation settings changed; reload and retry', 409);
+      invalidateVideoSettingsDependents(this.database, projectId, stamp);
+    })();
     return this.get(projectId)!;
   }
 }
@@ -453,6 +518,9 @@ export type CreateSceneVideoGenerationInput = {
   chapterId: Id;
   sceneStableId: string;
   sceneRevisionId: Id;
+  shotPlanId?: Id | null;
+  shotStableId?: string | null;
+  continuationSource?: Record<string, unknown> | null;
   aiMotionPlanRevisionId: Id | null;
   provider: string | null;
   backend: VideoBackend;
@@ -493,14 +561,16 @@ export type GeneratedVideoCommitInput = {
   generationDurationMs: number;
   metadata?: Record<string, unknown>;
 };
-
 const generationSelect = `SELECT g.id,g.project_id as projectId,g.chapter_id as chapterId,
-  g.scene_stable_id as sceneStableId,g.scene_revision_id as sceneRevisionId,g.revision,g.provider,g.status,
+  g.scene_stable_id as sceneStableId,g.scene_revision_id as sceneRevisionId,
+  g.shot_plan_id as shotPlanId,g.shot_stable_id as shotId,g.revision,g.provider,g.status,
   g.review_status as reviewStatus,g.is_current as isCurrent,g.requested_seed as requestedSeed,
   g.actual_seed as actualSeed,g.requested_width as requestedWidth,g.requested_height as requestedHeight,
   g.actual_width as actualWidth,g.actual_height as actualHeight,g.frame_count as frameCount,
   g.fps,g.provider_job_id as providerJobId,g.workflow_template as workflowTemplate,
-  g.backend as backend,g.input_fingerprint as inputFingerprint,g.source_image_asset_id as sourceImageAssetId,
+  g.backend as backend,g.automatic_quality_status as automaticQualityStatus,
+  g.critic_evaluation_id as criticEvaluationId,g.continuation_source as continuationSource,
+  g.input_fingerprint as inputFingerprint,g.source_image_asset_id as sourceImageAssetId,
   g.source_image_sha256 as sourceImageSha256,g.attempt,g.asset_id as assetId,
   g.clip_duration_ms as clipDurationMs,g.generation_duration_ms as generationDurationMs,
   g.error_code as errorCode,g.error,g.generation_instructions as generationInstructions,
@@ -515,6 +585,8 @@ type GenerationRow = {
   sceneId: string;
   sceneStableId: string;
   sceneRevisionId: Id;
+  shotPlanId: Id | null;
+  shotId: string | null;
   revision: number;
   provider: string | null;
   status: string;
@@ -531,6 +603,9 @@ type GenerationRow = {
   providerJobId: string | null;
   workflowTemplate: string | null;
   backend: VideoBackend;
+  automaticQualityStatus: string;
+  criticEvaluationId: Id | null;
+  continuationSource: string | null;
   inputFingerprint: string;
   sourceImageAssetId: Id | null;
   sourceImageSha256: string | null;
@@ -549,19 +624,22 @@ type GenerationRow = {
   completedAt: string | null;
   updatedAt: string;
 };
-
 type GenerationCommitRow = {
   motionPlanFingerprint: string | null;
   settingsFingerprint: string | null;
   inputFingerprint: string;
   status: string;
   metadata: string;
+  shotPlanId: Id | null;
+  shotId: string | null;
+  continuationSource: string | null;
 };
 
 type CurrentSelectionRow = {
   sceneRevisionId: Id;
   assetId: Id | null;
   status: string;
+  automaticQualityStatus: string;
   reviewStatus: string;
   assetStatus: string | null;
 };
@@ -580,14 +658,25 @@ export class SceneVideoGenerationRepository {
       invalidateAssetDependents(this.database, projectId, asset.id, stamp);
   }
 
-  // Same canonical downstream Scene-image gate as
-  // AssetRepository.currentRenderableSceneImage: a rejected or
-  // approval-blocked current image cannot feed AI video generation.
-  currentSourceImageSha(projectId: Id, sceneStableId: string): string | null {
-    const asset = new AssetRepository(this.database).currentRenderableSceneImage(
-      projectId,
-      sceneStableId,
-    );
+  // Same canonical downstream image gate as AssetRepository:
+  // rejected, stale, or failed-QC images cannot feed video generation.
+  currentSourceImageSha(
+    projectId: Id,
+    sceneStableId: string,
+    shotStableId: string | null = null,
+    requireApproval?: boolean,
+  ): string | null {
+    const asset =
+      shotStableId === null
+        ? new AssetRepository(this.database).currentRenderableSceneImage(projectId, sceneStableId, {
+            requireApproval,
+          })
+        : new AssetRepository(this.database).currentRenderableShotImage(
+            projectId,
+            sceneStableId,
+            shotStableId,
+            { requireApproval },
+          );
     return asset?.sha256 ?? null;
   }
 
@@ -598,15 +687,109 @@ export class SceneVideoGenerationRepository {
     return row ? this.parseGeneration(row) : null;
   }
 
-  getCurrent(projectId: Id, sceneStableId: string): SceneVideoGenerationDto | null {
+  getCurrent(
+    projectId: Id,
+    sceneStableId: string,
+    shotStableId: string | null = null,
+  ): SceneVideoGenerationDto | null {
     const row = this.database.sqlite
       .prepare(
-        `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1`,
+        `${generationSelect}
+         WHERE g.project_id=? AND g.scene_stable_id=? AND g.is_current=1
+           AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)`,
       )
-      .get(projectId, sceneStableId) as GenerationRow | undefined;
+      .get(projectId, sceneStableId, shotStableId, shotStableId) as GenerationRow | undefined;
     return row ? this.parseGeneration(row) : null;
   }
-
+  currentRenderableSceneVideo(
+    projectId: Id,
+    sceneStableId: string,
+    options: { requireApproval?: boolean; requireQualityPass?: boolean } = {},
+  ): { generation: SceneVideoGenerationDto; asset: CurrentAsset } | null {
+    const generation = this.getCurrent(projectId, sceneStableId);
+    if (
+      !generation ||
+      (options.requireQualityPass !== false &&
+        generation.automaticQualityStatus !== 'PASSED' &&
+        generation.reviewStatus !== 'ACCEPTED') ||
+      generation.status !== 'COMPLETED' ||
+      generation.freshness !== 'CURRENT' ||
+      !generation.assetId
+    )
+      return null;
+    const currentScene = this.database.sqlite
+      .prepare(
+        "SELECT 1 FROM scene_revisions WHERE project_id=? AND id=? AND stable_id=? AND status='CURRENT' AND is_current=1",
+      )
+      .get(projectId, generation.sceneRevisionId, sceneStableId);
+    if (!currentScene) return null;
+    const asset = new AssetRepository(this.database).current(
+      projectId,
+      sceneVideoRole(sceneStableId),
+    );
+    if (
+      !asset ||
+      asset.id !== generation.assetId ||
+      asset.type !== 'AI_SCENE_VIDEO' ||
+      asset.inputFingerprint !== generation.inputFingerprint
+    )
+      return null;
+    const settings = this.database.sqlite
+      .prepare(
+        'SELECT require_motion_approval as requireApproval FROM video_generation_settings WHERE project_id=?',
+      )
+      .get(projectId) as { requireApproval: number } | undefined;
+    const requireApproval = options.requireApproval ?? Boolean(settings?.requireApproval);
+    if (requireApproval && generation.reviewStatus !== 'ACCEPTED') return null;
+    return { generation, asset };
+  }
+  currentRenderableShotVideo(
+    projectId: Id,
+    sceneStableId: string,
+    shotStableId: string,
+    options: { requireApproval?: boolean; requireQualityPass?: boolean } = {},
+  ): { generation: SceneVideoGenerationDto; asset: CurrentAsset } | null {
+    const generation = this.getCurrent(projectId, sceneStableId, shotStableId);
+    if (
+      !generation ||
+      (options.requireQualityPass !== false &&
+        generation.automaticQualityStatus !== 'PASSED' &&
+        generation.reviewStatus !== 'ACCEPTED') ||
+      !generation.assetId
+    )
+      return null;
+    const currentScene = this.database.sqlite
+      .prepare(
+        "SELECT 1 FROM scene_revisions WHERE project_id=? AND id=? AND stable_id=? AND status='CURRENT' AND is_current=1",
+      )
+      .get(projectId, generation.sceneRevisionId, sceneStableId);
+    if (!currentScene) return null;
+    const currentShotPlan = this.database.sqlite
+      .prepare(
+        "SELECT id FROM shot_plans WHERE project_id=? AND scene_revision_id=? AND is_current=1 AND status='CURRENT' AND review_status='APPROVED'",
+      )
+      .get(projectId, generation.sceneRevisionId) as { id: Id } | undefined;
+    if (!currentShotPlan || currentShotPlan.id !== generation.shotPlanId) return null;
+    const asset = new AssetRepository(this.database).current(
+      projectId,
+      sceneVideoRole(sceneStableId, shotStableId),
+    );
+    if (
+      !asset ||
+      asset.id !== generation.assetId ||
+      asset.type !== 'AI_SHOT_VIDEO' ||
+      asset.inputFingerprint !== generation.inputFingerprint
+    )
+      return null;
+    const settings = this.database.sqlite
+      .prepare(
+        'SELECT require_motion_approval as requireApproval FROM video_generation_settings WHERE project_id=?',
+      )
+      .get(projectId) as { requireApproval: number } | undefined;
+    const requireApproval = options.requireApproval ?? Boolean(settings?.requireApproval);
+    if (requireApproval && generation.reviewStatus !== 'ACCEPTED') return null;
+    return { generation, asset };
+  }
   getByProviderJobId(projectId: Id, providerJobId: Id): SceneVideoGenerationDto | null {
     const row = this.database.sqlite
       .prepare(`${generationSelect} WHERE g.project_id=? AND g.provider_job_id=?`)
@@ -614,43 +797,60 @@ export class SceneVideoGenerationRepository {
     return row ? this.parseGeneration(row) : null;
   }
 
-  list(projectId: Id, sceneStableId: string, limit = 50, offset = 0): SceneVideoGenerationDto[] {
+  list(
+    projectId: Id,
+    sceneStableId: string,
+    limit = 50,
+    offset = 0,
+    shotStableId: string | null = null,
+  ): SceneVideoGenerationDto[] {
     const rows = this.database.sqlite
       .prepare(
-        `${generationSelect} WHERE g.project_id=? AND g.scene_stable_id=? ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
+        `${generationSelect}
+         WHERE g.project_id=? AND g.scene_stable_id=?
+           AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)
+         ORDER BY g.revision DESC LIMIT ? OFFSET ?`,
       )
       .all(
         projectId,
         sceneStableId,
+        shotStableId,
+        shotStableId,
         Math.max(1, Math.min(100, limit)),
         Math.max(0, offset),
       ) as GenerationRow[];
     return rows.map((row) => this.parseGeneration(row));
   }
 
-  // Reuse lookup: any completed generation with the identical raw
-  // fingerprint is reusable, regardless of which revision is current.
+  // Reuse lookup: an identical raw generation remains reusable even after
+  // its source revision is no longer current.
   findCompletedByFingerprint(
     projectId: Id,
     sceneStableId: string,
     inputFingerprint: string,
+    shotStableId: string | null = null,
   ): SceneVideoGenerationDto | null {
     const row = this.database.sqlite
       .prepare(
         `${generationSelect}
          WHERE g.project_id=? AND g.scene_stable_id=? AND g.input_fingerprint=? AND g.status='COMPLETED'
+           AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)
          ORDER BY g.revision DESC LIMIT 1`,
       )
-      .get(projectId, sceneStableId, inputFingerprint) as GenerationRow | undefined;
+      .get(projectId, sceneStableId, inputFingerprint, shotStableId, shotStableId) as
+      GenerationRow | undefined;
     return row ? this.parseGeneration(row) : null;
   }
 
-  nextRevision(projectId: Id, sceneStableId: string): number {
+  nextRevision(projectId: Id, sceneStableId: string, shotStableId: string | null = null): number {
     const row = this.database.sqlite
       .prepare(
-        'SELECT COALESCE(MAX(revision),0) as revision FROM scene_video_generations WHERE project_id=? AND scene_stable_id=?',
+        `SELECT COALESCE(MAX(revision),0) as revision
+         FROM scene_video_generations
+         WHERE project_id=? AND scene_stable_id=?
+           AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
       )
-      .get(projectId, sceneStableId) as { revision: number };
+      .get(projectId, sceneStableId, shotStableId, shotStableId) as { revision: number };
     return row.revision + 1;
   }
 
@@ -660,22 +860,35 @@ export class SceneVideoGenerationRepository {
       .get(input.sceneRevisionId, input.projectId) as { stableId: string } | undefined;
     if (!scene || scene.stableId !== input.sceneStableId)
       throw new AppError('NOT_FOUND', 'Scene revision not found', 404);
+    const shotStableId = input.shotStableId ?? null;
+    const shotPlanId = input.shotPlanId ?? null;
+    if ((shotStableId === null) !== (shotPlanId === null))
+      throw new AppError('INVALID_INPUT', 'Shot video lineage is incomplete', 400);
+    if (shotStableId !== null && input.continuationSource)
+      continuationSourceSchema.parse(input.continuationSource);
     if (!input.provider || !input.providerJobId)
       throw new AppError('INVALID_INPUT', 'Generated video fields are incomplete', 400);
-    const imageSha = this.currentSourceImageSha(input.projectId, input.sceneStableId);
+    const imageSha = this.currentSourceImageSha(input.projectId, input.sceneStableId, shotStableId);
     if (!imageSha || imageSha !== input.sourceImageSha256)
-      throw new AppError('STALE_INPUT', 'Scene image is not the current accepted image', 409);
+      throw new AppError(
+        'STALE_INPUT',
+        shotStableId
+          ? 'Shot image is not the current quality-approved image'
+          : 'Scene image is not the current accepted image',
+        409,
+      );
     const id = randomUUID();
     const stamp = now();
     this.database.sqlite
       .prepare(
         `INSERT INTO scene_video_generations(
-          id,project_id,chapter_id,scene_stable_id,scene_revision_id,ai_motion_plan_revision_id,revision,
-          provider,backend,status,review_status,is_current,requested_seed,requested_width,requested_height,
-          frame_count,fps,provider_job_id,workflow_template,model_settings,request_snapshot,
-          motion_plan_fingerprint,settings_fingerprint,input_fingerprint,source_image_asset_id,
-          source_image_sha256,attempt,generation_instructions,metadata,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          id,project_id,chapter_id,scene_stable_id,scene_revision_id,shot_plan_id,shot_stable_id,
+          ai_motion_plan_revision_id,revision,provider,backend,status,review_status,is_current,
+          requested_seed,requested_width,requested_height,frame_count,fps,provider_job_id,
+          workflow_template,model_settings,request_snapshot,motion_plan_fingerprint,settings_fingerprint,
+          input_fingerprint,source_image_asset_id,source_image_sha256,attempt,generation_instructions,
+          metadata,continuation_source,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -683,8 +896,10 @@ export class SceneVideoGenerationRepository {
         input.chapterId,
         input.sceneStableId,
         input.sceneRevisionId,
+        shotPlanId,
+        shotStableId,
         input.aiMotionPlanRevisionId,
-        this.nextRevision(input.projectId, input.sceneStableId),
+        this.nextRevision(input.projectId, input.sceneStableId, shotStableId),
         input.provider,
         input.backend,
         input.status ?? 'PENDING',
@@ -707,10 +922,43 @@ export class SceneVideoGenerationRepository {
         0,
         input.generationInstructions,
         json(input.metadata ?? {}),
+        input.continuationSource ? json(input.continuationSource) : null,
         stamp,
         stamp,
       );
     return this.get(input.projectId, id)!;
+  }
+  updateContinuationSource(projectId: Id, generationId: Id, source: Record<string, unknown>): void {
+    const parsed = continuationSourceSchema.parse(source);
+    const row = this.database.sqlite
+      .prepare(
+        `SELECT metadata FROM scene_video_generations
+         WHERE project_id=? AND id=? AND shot_stable_id IS NOT NULL`,
+      )
+      .get(projectId, generationId) as { metadata: string } | undefined;
+    if (!row) throw new AppError('NOT_FOUND', 'Scene video generation not found', 404);
+    const frame = this.database.sqlite
+      .prepare('SELECT path FROM assets WHERE id=? AND project_id=? AND type=?')
+      .get(parsed.frameAssetId, projectId, 'SHOT_CONTINUATION_FRAME') as
+      { path: string } | undefined;
+    if (!frame) throw new AppError('NOT_FOUND', 'Continuation frame asset not found', 404);
+    const metadata = parseRecord(row.metadata);
+    const request =
+      metadata.request && typeof metadata.request === 'object' && !Array.isArray(metadata.request)
+        ? { ...(metadata.request as Record<string, unknown>) }
+        : null;
+    if (request) {
+      request.sourceImagePath = frame.path;
+      request.continuationSource = parsed;
+      metadata.request = request;
+    }
+    const result = this.database.sqlite
+      .prepare(
+        'UPDATE scene_video_generations SET continuation_source=?,metadata=?,updated_at=? WHERE project_id=? AND id=?',
+      )
+      .run(json(parsed), json(metadata), now(), projectId, generationId);
+    if (result.changes !== 1)
+      throw new AppError('NOT_FOUND', 'Scene video generation not found', 404);
   }
 
   linkWorkflowStep(projectId: Id, generationId: Id, workflowStepId: Id): void {
@@ -759,45 +1007,59 @@ export class SceneVideoGenerationRepository {
       .run(safeError(message), now(), projectId, generationId);
   }
 
-  // A completed output is fresh only when the source image, the motion plan,
-  // and the provider settings all still match their current rows.
+  // A completed output is fresh only when its current source image, motion
+  // plan, and (for shot work) Shot plan still match. Settings changes retire
+  // current video outputs before this reusable-raw check runs.
   private freshnessInputs(
     projectId: Id,
     sceneStableId: string,
     sceneRevisionId: Id,
+    shotStableId: string | null,
     row: {
       sourceImageSha256: string | null;
       motionPlanFingerprint: string | null;
-      settingsFingerprint: string | null;
+      shotPlanFingerprint: string | null;
     },
+    requireImageApproval?: boolean,
   ): { fresh: boolean; requireApproval: boolean } {
     const settingsRow = this.database.sqlite
       .prepare(`SELECT ${SETTINGS_COLUMNS} FROM video_generation_settings WHERE project_id=?`)
       .get(projectId) as VideoSettingsRow | undefined;
-    const settings = settingsRow
-      ? {
-          inputFingerprint: videoSettingsFingerprint(parseSettings(settingsRow)),
-          requireMotionApproval: settingsRow.requireMotionApproval,
-        }
-      : undefined;
     const plan = this.database.sqlite
       .prepare(
-        'SELECT input_fingerprint as inputFingerprint FROM ai_motion_plan_revisions WHERE project_id=? AND scene_revision_id=? AND is_current=1',
+        `SELECT input_fingerprint as inputFingerprint
+         FROM ai_motion_plan_revisions
+         WHERE project_id=? AND scene_revision_id=? AND is_current=1`,
       )
       .get(projectId, sceneRevisionId) as { inputFingerprint: string } | undefined;
-    const imageSha = this.currentSourceImageSha(projectId, sceneStableId);
-    // Freshness is CONTENT staleness only: source image and motion plan.
-    // Generation settings (preset, sampler, timeouts) shape future requests;
-    // they must not retroactively stale existing raw clips (raw reuse rule).
+    const shotPlan = shotStableId
+      ? (this.database.sqlite
+          .prepare(
+            `SELECT input_fingerprint as inputFingerprint
+             FROM shot_plans
+             WHERE project_id=? AND scene_revision_id=? AND is_current=1`,
+          )
+          .get(projectId, sceneRevisionId) as { inputFingerprint: string } | undefined)
+      : undefined;
+    const imageSha = this.currentSourceImageSha(
+      projectId,
+      sceneStableId,
+      shotStableId,
+      requireImageApproval,
+    );
     const fresh = Boolean(
       row.sourceImageSha256 &&
       imageSha &&
       row.sourceImageSha256 === imageSha &&
       row.motionPlanFingerprint &&
       plan &&
-      row.motionPlanFingerprint === plan.inputFingerprint,
+      row.motionPlanFingerprint === plan.inputFingerprint &&
+      (shotStableId === null ||
+        (row.shotPlanFingerprint &&
+          shotPlan &&
+          row.shotPlanFingerprint === shotPlan.inputFingerprint)),
     );
-    return { fresh, requireApproval: Boolean(settings?.requireMotionApproval) };
+    return { fresh, requireApproval: Boolean(settingsRow?.requireMotionApproval) };
   }
 
   private freshnessForGeneration(
@@ -807,20 +1069,37 @@ export class SceneVideoGenerationRepository {
   ): { fresh: boolean; requireApproval: boolean } {
     const row = this.database.sqlite
       .prepare(
-        `SELECT scene_revision_id as sceneRevisionId,source_image_sha256 as sourceImageSha256,
-          motion_plan_fingerprint as motionPlanFingerprint,settings_fingerprint as settingsFingerprint
+        `SELECT scene_revision_id as sceneRevisionId,shot_stable_id as shotStableId,
+          source_image_sha256 as sourceImageSha256,motion_plan_fingerprint as motionPlanFingerprint,
+          metadata
          FROM scene_video_generations WHERE project_id=? AND id=?`,
       )
       .get(projectId, generationId) as
       | {
           sceneRevisionId: Id;
+          shotStableId: string | null;
           sourceImageSha256: string | null;
           motionPlanFingerprint: string | null;
-          settingsFingerprint: string | null;
+          metadata: string;
         }
       | undefined;
     if (!row) return { fresh: false, requireApproval: true };
-    return this.freshnessInputs(projectId, sceneStableId, row.sceneRevisionId, row);
+    const metadata = parseRecord(row.metadata);
+    return this.freshnessInputs(
+      projectId,
+      sceneStableId,
+      row.sceneRevisionId,
+      row.shotStableId,
+      {
+        sourceImageSha256: row.sourceImageSha256,
+        motionPlanFingerprint: row.motionPlanFingerprint,
+        shotPlanFingerprint:
+          typeof metadata.shotPlanFingerprint === 'string' ? metadata.shotPlanFingerprint : null,
+      },
+      typeof metadata.requireImageApproval === 'boolean'
+        ? metadata.requireImageApproval
+        : undefined,
+    );
   }
 
   commitGenerated(input: GeneratedVideoCommitInput, guard: StepLeaseGuard): boolean {
@@ -834,7 +1113,9 @@ export class SceneVideoGenerationRepository {
       if (!active) return false;
       const generation = this.database.sqlite
         .prepare(
-          `SELECT motion_plan_fingerprint as motionPlanFingerprint,
+          `SELECT shot_plan_id as shotPlanId,shot_stable_id as shotId,
+            continuation_source as continuationSource,
+            motion_plan_fingerprint as motionPlanFingerprint,
             settings_fingerprint as settingsFingerprint,input_fingerprint as inputFingerprint,status,metadata
            FROM scene_video_generations
            WHERE id=? AND project_id=? AND scene_stable_id=? AND scene_revision_id=?`,
@@ -847,25 +1128,38 @@ export class SceneVideoGenerationRepository {
           'SELECT source_image_asset_id as assetId,source_image_sha256 as sha256 FROM scene_video_generations WHERE id=?',
         )
         .get(input.generationId) as { assetId: Id | null; sha256: string | null } | undefined;
+      const generationMetadata = parseRecord(generation.metadata);
+      const continuationSource = generation.continuationSource
+        ? continuationSourceSchema.parse(JSON.parse(generation.continuationSource))
+        : null;
       const { fresh, requireApproval } = this.freshnessInputs(
         input.projectId,
         input.sceneStableId,
         input.sceneRevisionId,
+        generation.shotId,
         {
           sourceImageSha256: sourceImage?.sha256 ?? null,
           motionPlanFingerprint: generation.motionPlanFingerprint,
-          settingsFingerprint: generation.settingsFingerprint,
+          shotPlanFingerprint:
+            typeof generationMetadata.shotPlanFingerprint === 'string'
+              ? generationMetadata.shotPlanFingerprint
+              : null,
         },
+        typeof generationMetadata.requireImageApproval === 'boolean'
+          ? generationMetadata.requireImageApproval
+          : undefined,
       );
       const existingCurrent = this.database.sqlite
         .prepare(
-          'SELECT 1 FROM scene_video_generations WHERE project_id=? AND scene_stable_id=? AND is_current=1',
+          `SELECT 1 FROM scene_video_generations
+           WHERE project_id=? AND scene_stable_id=? AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .get(input.projectId, input.sceneStableId);
-      const autoSelect = fresh && !existingCurrent && !requireApproval;
+        .get(input.projectId, input.sceneStableId, generation.shotId, generation.shotId);
+      const autoSelect = !generation.shotId && fresh && !existingCurrent && !requireApproval;
       const stamp = now();
       const assetId = randomUUID();
-      const role = sceneVideoRole(input.sceneStableId);
+      const role = sceneVideoRole(input.sceneStableId, generation.shotId);
       this.database.sqlite
         .prepare(
           `INSERT INTO assets(id,project_id,type,role,status,path,media_type,bytes,sha256,source_entity_id,
@@ -875,7 +1169,7 @@ export class SceneVideoGenerationRepository {
         .run(
           assetId,
           input.projectId,
-          'AI_SCENE_VIDEO',
+          generation.shotId ? 'AI_SHOT_VIDEO' : 'AI_SCENE_VIDEO',
           role,
           'READY',
           input.assetPath,
@@ -888,6 +1182,8 @@ export class SceneVideoGenerationRepository {
           json({
             ...parseRecord(generation.metadata),
             ...(input.metadata ?? {}),
+            shotPlanId: generation.shotPlanId,
+            shotId: generation.shotId,
             width: input.width,
             height: input.height,
             seed: input.seed,
@@ -905,6 +1201,17 @@ export class SceneVideoGenerationRepository {
             'INSERT OR IGNORE INTO asset_dependencies(asset_id,depends_on_asset_id,role,source_hash) VALUES(?,?,?,?)',
           )
           .run(assetId, sourceImage.assetId, 'AI_MOTION_SOURCE_IMAGE', sourceImage.sha256 ?? '');
+      if (continuationSource)
+        this.database.sqlite
+          .prepare(
+            'INSERT OR IGNORE INTO asset_dependencies(asset_id,depends_on_asset_id,role,source_hash) VALUES(?,?,?,?)',
+          )
+          .run(
+            assetId,
+            continuationSource.frameAssetId,
+            'CONTINUATION_FRAME',
+            continuationSource.frameSha256,
+          );
       this.database.sqlite
         .prepare(
           `UPDATE scene_video_generations SET status='COMPLETED',actual_seed=?,actual_width=?,actual_height=?,
@@ -957,16 +1264,25 @@ export class SceneVideoGenerationRepository {
     return this.get(projectId, generationId)!;
   }
 
-  setCurrent(projectId: Id, sceneStableId: string, generationId: Id): SceneVideoGenerationDto {
+  setCurrent(
+    projectId: Id,
+    sceneStableId: string,
+    generationId: Id,
+    shotStableId: string | null = null,
+    requireApprovalOverride?: boolean,
+  ): SceneVideoGenerationDto {
     return this.database.sqlite.transaction(() => {
       const target = this.database.sqlite
         .prepare(
           `SELECT g.scene_revision_id as sceneRevisionId,g.asset_id as assetId,g.status,
-            g.review_status as reviewStatus,a.status as assetStatus
+            g.automatic_quality_status as automaticQualityStatus,g.review_status as reviewStatus,
+            a.status as assetStatus
            FROM scene_video_generations g LEFT JOIN assets a ON a.id=g.asset_id
-           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?`,
+           WHERE g.project_id=? AND g.scene_stable_id=? AND g.id=?
+             AND ((? IS NULL AND g.shot_stable_id IS NULL) OR g.shot_stable_id=?)`,
         )
-        .get(projectId, sceneStableId, generationId) as CurrentSelectionRow | undefined;
+        .get(projectId, sceneStableId, generationId, shotStableId, shotStableId) as
+        CurrentSelectionRow | undefined;
       if (
         !target ||
         target.status !== 'COMPLETED' ||
@@ -974,22 +1290,32 @@ export class SceneVideoGenerationRepository {
         target.assetStatus !== 'READY'
       )
         throw new AppError('INVALID_INPUT', 'Only a completed valid video can be set current', 409);
-      const { fresh, requireApproval } = this.freshnessForGeneration(
+      const { fresh, requireApproval: configuredRequireApproval } = this.freshnessForGeneration(
         projectId,
         sceneStableId,
         generationId,
       );
+      const requireApproval = requireApprovalOverride ?? configuredRequireApproval;
       if (!fresh)
         throw new AppError('STALE_INPUT', 'Video generation does not match current inputs', 409);
-      if (requireApproval && target.reviewStatus !== 'ACCEPTED')
-        throw new AppError('INVALID_INPUT', 'Video generation requires review acceptance', 409);
+      if (
+        (target.automaticQualityStatus !== 'PASSED' && target.reviewStatus !== 'ACCEPTED') ||
+        (requireApproval && target.reviewStatus !== 'ACCEPTED')
+      )
+        throw new AppError(
+          'INVALID_INPUT',
+          'Video generation requires automatic quality or explicit review acceptance',
+          409,
+        );
       const stamp = now();
-      const role = sceneVideoRole(sceneStableId);
+      const role = sceneVideoRole(sceneStableId, shotStableId);
       this.database.sqlite
         .prepare(
-          'UPDATE scene_video_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_stable_id=?',
+          `UPDATE scene_video_generations SET is_current=0,updated_at=?
+           WHERE project_id=? AND scene_stable_id=?
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
         )
-        .run(stamp, projectId, sceneStableId);
+        .run(stamp, projectId, sceneStableId, shotStableId, shotStableId);
       this.retireCurrentRoleAsset(projectId, role, stamp);
       this.database.sqlite
         .prepare(
@@ -1000,6 +1326,36 @@ export class SceneVideoGenerationRepository {
         .prepare('UPDATE assets SET is_current=1,updated_at=? WHERE id=? AND project_id=?')
         .run(stamp, target.assetId, projectId);
       return this.get(projectId, generationId)!;
+    })();
+  }
+  clearCurrent(
+    projectId: Id,
+    sceneStableId: string,
+    generationId: Id,
+    shotStableId: string | null = null,
+  ): void {
+    this.database.sqlite.transaction(() => {
+      const row = this.database.sqlite
+        .prepare(
+          `SELECT asset_id as assetId FROM scene_video_generations
+           WHERE project_id=? AND scene_stable_id=? AND id=? AND is_current=1
+             AND ((? IS NULL AND shot_stable_id IS NULL) OR shot_stable_id=?)`,
+        )
+        .get(projectId, sceneStableId, generationId, shotStableId, shotStableId) as
+        { assetId: Id | null } | undefined;
+      if (!row) return;
+      const stamp = now();
+      this.database.sqlite
+        .prepare(
+          'UPDATE scene_video_generations SET is_current=0,updated_at=? WHERE project_id=? AND id=?',
+        )
+        .run(stamp, projectId, generationId);
+      if (row.assetId) {
+        this.database.sqlite
+          .prepare('UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND id=?')
+          .run(stamp, projectId, row.assetId);
+        invalidateAssetDependents(this.database, projectId, row.assetId, stamp);
+      }
     })();
   }
 
@@ -1024,15 +1380,13 @@ export class SceneVideoGenerationRepository {
       row.id,
     );
     const freshness: 'CURRENT' | 'STALE' = fresh ? 'CURRENT' : 'STALE';
-    const blockers: string[] = [];
-    if (row.status !== 'COMPLETED') blockers.push('GENERATION_NOT_COMPLETED');
-    if (freshness === 'STALE') blockers.push('VISUALLY_STALE');
-    if (!row.isCurrent) blockers.push('NOT_CURRENT');
-    if (requireApproval && row.reviewStatus !== 'ACCEPTED') blockers.push('APPROVAL_REQUIRED');
     const rest: Record<string, unknown> = { ...row };
     delete rest.chapterId;
     delete rest.sceneStableId;
     rest.sceneId = row.sceneStableId;
+    rest.continuationSource = row.continuationSource
+      ? continuationSourceSchema.parse(JSON.parse(row.continuationSource))
+      : null;
     return sceneVideoGenerationDtoSchema.parse({
       ...rest,
       isCurrent: Boolean(row.isCurrent),
@@ -1040,6 +1394,9 @@ export class SceneVideoGenerationRepository {
       reviewIssues: JSON.parse(row.reviewIssues) as string[],
       metadata: parseRecord(row.metadata),
       assetUrl: row.assetId ? `/api/assets/${row.assetId}` : null,
+      ...(requireApproval && row.reviewStatus !== 'ACCEPTED'
+        ? { reviewNotes: row.reviewNotes }
+        : {}),
     });
   }
 }

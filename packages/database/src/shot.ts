@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { AppError, shotPlanCandidateSchema, shotPlanDtoSchema } from '@studio/shared';
+import { invalidateAssetDependents } from './repositories.js';
 import type {
   Id,
   ShotPlanCandidate,
@@ -117,14 +118,88 @@ export class ShotPlanRepository {
 
     return this.database.sqlite.transaction(() => {
       const current = this.database.sqlite
-        .prepare('SELECT revision FROM shot_plans WHERE scene_revision_id=? AND is_current=1')
-        .get(input.sceneRevisionId) as { revision: number } | undefined;
+        .prepare('SELECT id,revision FROM shot_plans WHERE scene_revision_id=? AND is_current=1')
+        .get(input.sceneRevisionId) as { id: Id; revision: number } | undefined;
       const revision = (current?.revision ?? 0) + 1;
       if (input.expectedRevision !== undefined && input.expectedRevision !== current?.revision) {
         throw new AppError('CONFLICT', 'Shot plan revision conflict', 409);
       }
       const timestamp = now();
       const id = randomUUID();
+      const priorAssets = this.database.sqlite
+        .prepare(
+          `SELECT DISTINCT a.id
+           FROM assets a
+           LEFT JOIN scene_image_generations ig ON ig.asset_id=a.id
+           LEFT JOIN scene_video_generations vg ON vg.asset_id=a.id
+           WHERE a.project_id=? AND a.is_current=1 AND (
+             (ig.scene_revision_id=? AND ig.shot_stable_id IS NOT NULL) OR
+             (vg.scene_revision_id=? AND vg.shot_stable_id IS NOT NULL) OR
+             (a.type='SHOT_CONTINUATION_FRAME' AND a.source_entity_id IN (
+               SELECT id FROM scene_video_generations
+               WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL
+             ))
+           )`,
+        )
+        .all(
+          input.projectId,
+          input.sceneRevisionId,
+          input.sceneRevisionId,
+          input.projectId,
+          input.sceneRevisionId,
+        ) as Array<{
+        id: Id;
+      }>;
+      for (const asset of priorAssets)
+        invalidateAssetDependents(this.database, input.projectId, asset.id, timestamp);
+      this.database.sqlite
+        .prepare(
+          "UPDATE visual_prompt_packages SET status='STALE',is_current=0,updated_at=? WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL AND is_current=1",
+        )
+        .run(timestamp, input.projectId, input.sceneRevisionId);
+      this.database.sqlite
+        .prepare(
+          'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL AND is_current=1',
+        )
+        .run(timestamp, input.projectId, input.sceneRevisionId);
+      this.database.sqlite
+        .prepare(
+          'UPDATE scene_video_generations SET is_current=0,updated_at=? WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL AND is_current=1',
+        )
+        .run(timestamp, input.projectId, input.sceneRevisionId);
+      this.database.sqlite
+        .prepare(
+          "UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND id IN (SELECT id FROM assets WHERE project_id=? AND is_current=1 AND (type='SHOT_IMAGE' OR type='AI_SHOT_VIDEO' OR type='SHOT_CONTINUATION_FRAME') AND (source_entity_id IN (SELECT id FROM scene_image_generations WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL) OR source_entity_id IN (SELECT id FROM scene_video_generations WHERE project_id=? AND scene_revision_id=? AND shot_stable_id IS NOT NULL)))",
+        )
+        .run(
+          timestamp,
+          input.projectId,
+          input.projectId,
+          input.projectId,
+          input.sceneRevisionId,
+          input.projectId,
+          input.sceneRevisionId,
+        );
+      const invalidatedTypes = [
+        'BUILD_VISUAL_PROMPT',
+        'GENERATE_SHOT_IMAGE',
+        'EXTRACT_SHOT_CONTINUATION_FRAME',
+        'GENERATE_AI_SHOT_VIDEO',
+      ];
+      const placeholders = invalidatedTypes.map(() => '?').join(',');
+      this.database.sqlite
+        .prepare(
+          `UPDATE workflow_steps SET status='INVALIDATED',error=?,cancellation_requested_at=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+           WHERE entity_id=? AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING')`,
+        )
+        .run('Shot plan changed', timestamp, timestamp, input.sceneRevisionId, ...invalidatedTypes);
+      this.database.sqlite
+        .prepare(
+          `UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL WHERE step_id IN (
+             SELECT id FROM workflow_steps WHERE entity_id=? AND type IN (${placeholders})
+           ) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+        )
+        .run('Shot plan changed', input.sceneRevisionId, ...invalidatedTypes);
       this.database.sqlite
         .prepare(
           "UPDATE shot_plans SET is_current=0,status='STALE',updated_at=? WHERE scene_revision_id=? AND is_current=1",
@@ -254,12 +329,25 @@ export class ShotPlanRepository {
   }
 
   review(projectId: Id, id: Id, request: ShotPlanReviewRequest): ShotPlanDto {
-    const result = this.database.sqlite
-      .prepare(
-        `UPDATE shot_plans SET review_status=?,review_notes=?,row_version=row_version+1,updated_at=?
-         WHERE project_id=? AND id=? AND is_current=1 AND row_version=?`,
-      )
-      .run(request.status, request.notes, now(), projectId, id, request.expectedRowVersion);
+    const result = this.database.sqlite.transaction(() => {
+      const result = this.database.sqlite
+        .prepare(
+          `UPDATE shot_plans SET review_status=?,review_notes=?,row_version=row_version+1,updated_at=?
+           WHERE project_id=? AND id=? AND is_current=1 AND row_version=?`,
+        )
+        .run(request.status, request.notes, now(), projectId, id, request.expectedRowVersion);
+      if (result.changes !== 1)
+        throw new AppError('CONFLICT', 'Shot plan changed; reload and retry', 409);
+      if (request.status === 'REJECTED') {
+        const plan = this.database.sqlite
+          .prepare(
+            'SELECT scene_revision_id as sceneRevisionId FROM shot_plans WHERE project_id=? AND id=?',
+          )
+          .get(projectId, id) as { sceneRevisionId: Id } | undefined;
+        if (plan) this.invalidatePlanDescendants(projectId, id, plan.sceneRevisionId, now());
+      }
+      return result;
+    })();
     if (result.changes !== 1)
       throw new AppError('CONFLICT', 'Shot plan changed; reload and retry', 409);
     return this.getById(projectId, id)!;
@@ -321,5 +409,80 @@ export class ShotPlanRepository {
       },
       issues: JSON.parse(row.issues) as unknown,
     });
+  }
+  private invalidatePlanDescendants(
+    projectId: Id,
+    planId: Id,
+    sceneRevisionId: Id,
+    stamp: string,
+  ): void {
+    const assets = this.database.sqlite
+      .prepare(
+        `SELECT DISTINCT a.id
+         FROM assets a
+         LEFT JOIN scene_image_generations ig ON ig.asset_id=a.id
+         LEFT JOIN scene_video_generations vg ON vg.asset_id=a.id
+         WHERE a.project_id=? AND a.is_current=1 AND (
+           ig.shot_plan_id=? OR
+           vg.shot_plan_id=? OR
+           (a.type='SHOT_CONTINUATION_FRAME' AND a.source_entity_id IN (
+             SELECT id FROM scene_video_generations WHERE project_id=? AND shot_plan_id=?
+           ))
+         )`,
+      )
+      .all(projectId, planId, planId, projectId, planId) as Array<{ id: Id }>;
+    for (const asset of assets)
+      invalidateAssetDependents(this.database, projectId, asset.id, stamp);
+    this.database.sqlite
+      .prepare(
+        "UPDATE visual_prompt_packages SET status='STALE',is_current=0,updated_at=? WHERE project_id=? AND shot_plan_id=? AND is_current=1",
+      )
+      .run(stamp, projectId, planId);
+    this.database.sqlite
+      .prepare(
+        'UPDATE scene_image_generations SET is_current=0,updated_at=? WHERE project_id=? AND shot_plan_id=? AND is_current=1',
+      )
+      .run(stamp, projectId, planId);
+    this.database.sqlite
+      .prepare(
+        'UPDATE scene_video_generations SET is_current=0,updated_at=? WHERE project_id=? AND shot_plan_id=? AND is_current=1',
+      )
+      .run(stamp, projectId, planId);
+    this.database.sqlite
+      .prepare(
+        `UPDATE assets SET is_current=0,updated_at=? WHERE project_id=? AND id IN (
+           SELECT a.id FROM assets a
+           LEFT JOIN scene_image_generations ig ON ig.asset_id=a.id
+           LEFT JOIN scene_video_generations vg ON vg.asset_id=a.id
+           WHERE a.project_id=? AND a.is_current=1 AND (
+             ig.shot_plan_id=? OR vg.shot_plan_id=? OR
+             (a.type='SHOT_CONTINUATION_FRAME' AND a.source_entity_id IN (
+               SELECT id FROM scene_video_generations WHERE project_id=? AND shot_plan_id=?
+             ))
+           )
+         )`,
+      )
+      .run(stamp, projectId, projectId, planId, planId, projectId, planId);
+    const types = [
+      'BUILD_VISUAL_PROMPT',
+      'GENERATE_SHOT_IMAGE',
+      'EXTRACT_SHOT_CONTINUATION_FRAME',
+      'GENERATE_AI_SHOT_VIDEO',
+    ];
+    const placeholders = types.map(() => '?').join(',');
+    this.database.sqlite
+      .prepare(
+        `UPDATE workflow_steps SET status='INVALIDATED',error=?,cancellation_requested_at=?,
+           lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+         WHERE entity_id=? AND type IN (${placeholders}) AND status IN ('PENDING','RUNNING')`,
+      )
+      .run('Shot plan rejected', stamp, stamp, sceneRevisionId, ...types);
+    this.database.sqlite
+      .prepare(
+        `UPDATE jobs SET status='INVALIDATED',error=?,completed_at=NULL WHERE step_id IN (
+           SELECT id FROM workflow_steps WHERE entity_id=? AND type IN (${placeholders})
+         ) AND status IN ('PENDING','RUNNING','COMPLETED','FAILED')`,
+      )
+      .run('Shot plan rejected', sceneRevisionId, ...types);
   }
 }

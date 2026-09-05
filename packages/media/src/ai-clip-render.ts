@@ -47,7 +47,6 @@ function validateManagedPath(value: string, name: string): void {
 
 function validateInput(input: AiSceneClipRenderInput): void {
   if (!input.rawClipPath) invalid('rawClipPath is required');
-  if (!input.sourceImagePath) invalid('sourceImagePath is required');
   // Inputs are resolved by the caller via safeWorkspacePath; only the output
   // must stay a managed workspace-relative path.
   validateManagedPath(input.outputPath, 'outputPath');
@@ -55,10 +54,12 @@ function validateInput(input: AiSceneClipRenderInput): void {
     invalid('rawClipDurationMs must be positive');
   if (!Number.isFinite(input.sceneDurationMs) || input.sceneDurationMs <= 0)
     invalid('sceneDurationMs must be positive');
-  if (!Number.isFinite(input.sourceWidth) || input.sourceWidth < 16)
-    invalid('sourceWidth is invalid');
-  if (!Number.isFinite(input.sourceHeight) || input.sourceHeight < 16)
-    invalid('sourceHeight is invalid');
+  const composing = input.rawClipDurationMs < input.sceneDurationMs;
+  if (composing && !input.sourceImagePath) invalid('sourceImagePath is required for composition');
+  if (composing && (!Number.isFinite(input.sourceWidth) || input.sourceWidth < 16))
+    invalid('sourceWidth is invalid for composition');
+  if (composing && (!Number.isFinite(input.sourceHeight) || input.sourceHeight < 16))
+    invalid('sourceHeight is invalid for composition');
   const quality: QualityProfile | undefined = QUALITY_PROFILES[input.profile.qualityPreset];
   if (!quality) invalid('qualityPreset is invalid');
   if (
@@ -75,7 +76,6 @@ function validateInput(input: AiSceneClipRenderInput): void {
     invalid('crossfadeMs must not be negative');
   if (input.crossfadeMs > AI_CLIP_CROSSFADE_MAX_MS)
     invalid(`crossfadeMs must not exceed ${AI_CLIP_CROSSFADE_MAX_MS}`);
-  const composing = input.rawClipDurationMs < input.sceneDurationMs;
   if (composing && input.crossfadeMs < 1)
     invalid('AI_THEN_KEN_BURNS composition requires a positive crossfade');
   if (

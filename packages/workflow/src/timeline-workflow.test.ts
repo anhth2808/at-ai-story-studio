@@ -275,8 +275,9 @@ async function setupFixture(): Promise<{
         hash(`${chapter.id}:tts:1`),
       );
     for (const scene of scenes) {
+      const imageId = randomUUID();
       await registerFile(workspace, assets, {
-        id: randomUUID(),
+        id: imageId,
         projectId: project.id,
         type: 'SCENE_IMAGE',
         role: `scene:${scene.stableId}:image`,
@@ -285,6 +286,29 @@ async function setupFixture(): Promise<{
         metadata: { width: 640, height: 360 },
         sourceEntityId: scene.id,
       });
+      database.sqlite
+        .prepare(
+          `INSERT INTO scene_image_generations(
+            id,project_id,scene_stable_id,scene_revision_id,revision,source,status,review_status,
+            is_current,automatic_quality_status,input_fingerprint,asset_id,created_at,updated_at
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          randomUUID(),
+          project.id,
+          scene.stableId,
+          scene.id,
+          1,
+          'MANUAL',
+          'COMPLETED',
+          'ACCEPTED',
+          1,
+          'DEGRADED_ACCEPTED',
+          hash(`${chapter.id}:${scene.stableId}:image`),
+          imageId,
+          '2026-01-01',
+          '2026-01-01',
+        );
     }
     chapters.push({ id: chapter.id, scenes });
   }
@@ -429,8 +453,9 @@ describe('timeline workflow integration', () => {
     ).not.toBeNull();
 
     const changedScene = fixture.chapters[1]!.scenes[0]!;
+    const replacementImageId = randomUUID();
     await registerFile(fixture.workspace, assets, {
-      id: randomUUID(),
+      id: replacementImageId,
       projectId: fixture.projectId,
       type: 'SCENE_IMAGE',
       role: `scene:${changedScene.stableId}:image`,
@@ -439,6 +464,35 @@ describe('timeline workflow integration', () => {
       metadata: { width: 640, height: 360 },
       sourceEntityId: changedScene.id,
     });
+    fixture.database.sqlite
+      .prepare(
+        `UPDATE scene_image_generations SET is_current=0,updated_at=?
+         WHERE project_id=? AND scene_stable_id=? AND is_current=1`,
+      )
+      .run('2026-01-01', fixture.projectId, changedScene.stableId);
+    fixture.database.sqlite
+      .prepare(
+        `INSERT INTO scene_image_generations(
+          id,project_id,scene_stable_id,scene_revision_id,revision,source,status,review_status,
+          is_current,automatic_quality_status,input_fingerprint,asset_id,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        randomUUID(),
+        fixture.projectId,
+        changedScene.stableId,
+        changedScene.id,
+        2,
+        'MANUAL',
+        'COMPLETED',
+        'ACCEPTED',
+        1,
+        'DEGRADED_ACCEPTED',
+        hash(`${fixture.projectId}:${changedScene.stableId}:replacement`),
+        replacementImageId,
+        '2026-01-01',
+        '2026-01-01',
+      );
     expect(assets.current(fixture.projectId, `scene:${changedScene.stableId}:video`)).toBeNull();
     expect(assets.current(fixture.projectId, `chapter:${fixture.chapters[0]!.id}:video`)?.id).toBe(
       chapterOneBefore?.id,
@@ -943,6 +997,9 @@ describe('timeline workflow integration', () => {
         metadata: { clipDurationMs: 5_000, fps: 24, frameCount: 121, seed: 42 },
         sourceEntityId: scene.id,
       });
+      database.sqlite
+        .prepare('UPDATE assets SET input_fingerprint=? WHERE id=?')
+        .run(fingerprintSeed, assetId);
       database.sqlite
         .prepare(
           `INSERT INTO scene_video_generations(id,project_id,chapter_id,scene_stable_id,scene_revision_id,

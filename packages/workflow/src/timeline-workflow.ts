@@ -2,12 +2,14 @@ import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { safeWorkspacePath } from '@studio/media';
 import {
+  AssetRepository,
   ChapterRepository,
   ProjectRepository,
   RenderJobRepository,
   SceneRepository,
   SceneMotionSourceRepository,
   SceneVideoGenerationRepository,
+  ShotPlanRepository,
   TimelineRepository,
   WorkflowRepository,
   sceneVideoRole,
@@ -43,6 +45,7 @@ import {
   type SceneTimingItem,
   type SceneTimingUpdate,
   type RenderScope,
+  type ShotPlanDto,
   type WorkflowStatus,
 } from '@studio/shared';
 import type { FfmpegTools, WorkspacePaths } from '@studio/media';
@@ -52,6 +55,14 @@ import { createDefaultMotionPlan } from './motion-plan.js';
 type AiClipSource = {
   clipSource: 'KEN_BURNS' | 'AI_VIDEO' | 'HYBRID';
   raw: { path: string; sha256: string; durationMs: number; fingerprint: string } | null;
+  shotClips: Array<{
+    shotId: string;
+    path: string;
+    sha256: string;
+    durationMs: number;
+    fingerprint: string;
+  }>;
+  shotPlanActive: boolean;
 };
 
 export type TimelineWorkflowContext = {
@@ -170,6 +181,20 @@ export const renderSceneClipPayloadSchema = z
     clipSource: z.enum(['KEN_BURNS', 'AI_VIDEO', 'HYBRID']).default('KEN_BURNS'),
     rawClipPath: renderAssetPathSchema.nullable().default(null),
     rawClipDurationMs: z.number().positive().nullable().default(null),
+    shotClips: z
+      .array(
+        z
+          .object({
+            shotId: z.string().trim().min(1).max(120),
+            path: renderAssetPathSchema,
+            sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            durationMs: z.number().int().positive(),
+            fingerprint: z.string().min(1).max(128),
+          })
+          .strict(),
+      )
+      .max(200)
+      .default([]),
     crossfadeMs: z.number().int().min(0).max(AI_CLIP_CROSSFADE_MAX_MS).default(0),
   })
   .strict();
@@ -291,10 +316,10 @@ function durationFromMetadata(asset: AssetDetails): number | null {
   const value = asset.metadata.durationMs;
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
-
 export class TimelineWorkflowService {
   readonly timeline: TimelineRepository;
   readonly renderJobs: RenderJobRepository;
+  private readonly assets: AssetRepository;
 
   constructor(
     private readonly context: TimelineWorkflowContext,
@@ -304,9 +329,11 @@ export class TimelineWorkflowService {
     private readonly workflow = new WorkflowRepository(context.database),
     private readonly sceneVideos = new SceneVideoGenerationRepository(context.database),
     private readonly motionSources = new SceneMotionSourceRepository(context.database),
+    private readonly shotPlans = new ShotPlanRepository(context.database),
   ) {
     this.timeline = new TimelineRepository(context.database);
     this.renderJobs = new RenderJobRepository(context.database);
+    this.assets = new AssetRepository(context.database);
   }
 
   getChapterTimeline(projectId: Id, chapterId: Id): ChapterTimeline | null {
@@ -341,11 +368,19 @@ export class TimelineWorkflowService {
           blockers,
         };
       }
-      const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+      const aiSource = this.aiClipSource(projectId, scene.stableId, scene.id);
+      const shotDurationMs =
+        aiSource?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+      const shotMediaCoversScene = Boolean(
+        aiSource?.shotPlanActive && shotDurationMs >= timingItem.durationMs,
+      );
+      const image = this.currentRenderableSceneImage(projectId, scene.stableId);
       const fallback = image
         ? null
         : this.fallbackAsset(projectId, scene.stableId, config.fallbackPolicy);
-      const visualAvailable = Boolean(image || fallback || config.fallbackPolicy === 'BLACK');
+      const visualAvailable = Boolean(
+        image || fallback || config.fallbackPolicy === 'BLACK' || shotMediaCoversScene,
+      );
       const clip = this.currentAsset(projectId, `scene:${scene.stableId}:video`);
       const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
       const expectedClipFingerprint =
@@ -364,6 +399,8 @@ export class TimelineWorkflowService {
         expectedClipFingerprint && clip?.inputFingerprint === expectedClipFingerprint ? clip : null;
       if (!visualAvailable) blockers.push('SCENE_IMAGE_REQUIRED');
       if (!motion) blockers.push('MOTION_PLAN_REQUIRED');
+      if (aiSource && !aiSource.raw && aiSource.shotClips.length === 0)
+        blockers.push(aiSource.shotPlanActive ? 'SHOT_VIDEO_REQUIRED' : 'AI_MOTION_REQUIRED');
       if (!currentClip) blockers.push('SCENE_CLIP_REQUIRED');
       return {
         sceneId: scene.id,
@@ -394,11 +431,19 @@ export class TimelineWorkflowService {
     const sceneFingerprints = scenes.map((scene) => {
       const timingItem = timing.items.find((item) => item.sceneId === scene.id);
       const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
-      const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+      const aiSource = this.aiClipSource(projectId, scene.stableId, scene.id);
+      const shotDurationMs =
+        aiSource?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+      const shotMediaCoversScene = Boolean(
+        aiSource?.shotPlanActive && timingItem && shotDurationMs >= timingItem.durationMs,
+      );
+      const image = this.currentRenderableSceneImage(projectId, scene.stableId);
       const fallback = image
         ? null
         : this.fallbackAsset(projectId, scene.stableId, config.fallbackPolicy);
-      const visualAvailable = Boolean(image || fallback || config.fallbackPolicy === 'BLACK');
+      const visualAvailable = Boolean(
+        image || fallback || config.fallbackPolicy === 'BLACK' || shotMediaCoversScene,
+      );
       return timingItem && motion && visualAvailable
         ? this.sceneClipFingerprint(
             scene,
@@ -829,14 +874,26 @@ export class TimelineWorkflowService {
         sceneTotal += 1;
         const timingItem = timing?.items.find((item) => item.sceneId === scene.id);
         const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
-        const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+        const aiClip = this.aiClipSource(projectId, scene.stableId, scene.id);
+        const shotDurationMs =
+          aiClip?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+        const shotMediaCoversScene = Boolean(
+          aiClip?.shotPlanActive && timingItem && shotDurationMs >= timingItem.durationMs,
+        );
+        const image = this.currentRenderableSceneImage(projectId, scene.stableId);
         const fallback = image
           ? null
           : this.fallbackAsset(projectId, scene.stableId, parsedRequest.fallbackPolicy);
         const visualAvailable = Boolean(
-          image || fallback || parsedRequest.fallbackPolicy === 'BLACK',
+          image || fallback || parsedRequest.fallbackPolicy === 'BLACK' || shotMediaCoversScene,
         );
-        if (!timingItem || !motion || !visualAvailable) {
+        const hasUsableAi = Boolean(aiClip?.raw || aiClip?.shotClips.length);
+        const aiBlocked = Boolean(
+          aiClip &&
+          !hasUsableAi &&
+          (aiClip.shotPlanActive || parsedRequest.fallbackPolicy === 'FAIL'),
+        );
+        if (!timingItem || !motion || !visualAvailable || aiBlocked) {
           sceneBlocked += 1;
           chapterSceneBlocked += 1;
           if (!timingItem)
@@ -860,6 +917,15 @@ export class TimelineWorkflowService {
               entityId: scene.id,
               retryable: true,
             });
+          if (aiBlocked)
+            blockers.push({
+              code: aiClip?.shotPlanActive ? 'SHOT_VIDEO_REQUIRED' : 'AI_MOTION_REQUIRED',
+              message: aiClip?.shotPlanActive
+                ? `Scene ${scene.sceneNumber} requires accepted Shot video for every planned Shot`
+                : `Scene ${scene.sceneNumber} requires accepted AI motion or a non-FAIL fallback`,
+              entityId: scene.id,
+              retryable: true,
+            });
           continue;
         }
         const sceneFingerprint = this.sceneClipFingerprint(
@@ -874,21 +940,10 @@ export class TimelineWorkflowService {
         const clip = this.currentAsset(projectId, `scene:${scene.stableId}:video`);
         if (clip?.inputFingerprint === sceneFingerprint) sceneReusable += 1;
         sceneFingerprints.push(sceneFingerprint);
-        const aiClip = this.aiClipSource(projectId, scene.stableId);
         if (aiClip) {
           aiSelected += 1;
-          if (!aiClip.raw) {
-            aiMissing += 1;
-            if (parsedRequest.fallbackPolicy === 'FAIL')
-              blockers.push({
-                code: 'AI_MOTION_REQUIRED',
-                message: `Scene ${scene.sceneNumber} requires accepted AI motion or a non-FAIL fallback`,
-                entityId: scene.id,
-                retryable: true,
-              });
-          } else if (clip?.inputFingerprint !== sceneFingerprint) {
-            aiToNormalize += 1;
-          }
+          if (!hasUsableAi) aiMissing += 1;
+          else if (clip?.inputFingerprint !== sceneFingerprint) aiToNormalize += 1;
         }
       }
       if (timing) expectedDurationMs += timing.durationMs;
@@ -1050,12 +1105,23 @@ export class TimelineWorkflowService {
         for (const scene of this.scenes.listScenes(chapter.id)) {
           const timingItem = timing.items.find((item) => item.sceneId === scene.id);
           const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
-          const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+          const aiSource = this.aiRenderSource(
+            projectId,
+            scene.stableId,
+            parsedRequest.fallbackPolicy,
+            scene.id,
+          );
+          const shotDurationMs =
+            aiSource?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+          const shotMediaCoversScene = Boolean(
+            aiSource?.shotPlanActive && timingItem && shotDurationMs >= timingItem.durationMs,
+          );
+          const image = this.currentRenderableSceneImage(projectId, scene.stableId);
           const fallback = image
             ? null
             : this.fallbackAsset(projectId, scene.stableId, parsedRequest.fallbackPolicy);
           const visualAvailable = Boolean(
-            image || fallback || parsedRequest.fallbackPolicy === 'BLACK',
+            image || fallback || parsedRequest.fallbackPolicy === 'BLACK' || shotMediaCoversScene,
           );
           if (!timingItem || !motion || !visualAvailable)
             throw new AppError(
@@ -1063,15 +1129,13 @@ export class TimelineWorkflowService {
               `Scene ${scene.sceneNumber} is missing timeline inputs`,
               409,
             );
-          const aiSource = this.aiRenderSource(
-            projectId,
-            scene.stableId,
-            parsedRequest.fallbackPolicy,
-          );
-          if (aiSource && !aiSource.raw)
+          const hasUsableAi = Boolean(aiSource?.raw || aiSource?.shotClips.length);
+          if (aiSource && !hasUsableAi)
             throw new AppError(
               'RENDER_BLOCKED',
-              `Scene ${scene.sceneNumber} is missing accepted AI motion`,
+              aiSource.shotPlanActive
+                ? `Scene ${scene.sceneNumber} is missing accepted Shot video`
+                : `Scene ${scene.sceneNumber} is missing accepted AI motion`,
               409,
             );
           const effectiveImage = image ?? fallback;
@@ -1121,6 +1185,7 @@ export class TimelineWorkflowService {
             clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
             rawClipPath: aiSource?.raw?.path ?? null,
             rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
+            shotClips: aiSource?.shotClips ?? [],
             crossfadeMs: aiSource?.raw
               ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
               : 0,
@@ -1299,11 +1364,29 @@ export class TimelineWorkflowService {
     const timing = this.timeline.getCurrentSceneTiming(scene.chapterId);
     const timingItem = timing?.items.find((item) => item.sceneId === scene.id);
     const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
-    const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+    const aiClip = this.aiClipSource(projectId, scene.stableId, scene.id);
+    const shotDurationMs =
+      aiClip?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+    const shotMediaCoversScene = Boolean(
+      aiClip?.shotPlanActive && timingItem && shotDurationMs >= timingItem.durationMs,
+    );
+    const image = this.currentRenderableSceneImage(projectId, scene.stableId);
     const fallback = image
       ? null
       : this.fallbackAsset(projectId, scene.stableId, request.fallbackPolicy);
-    const visualAvailable = Boolean(image || fallback || request.fallbackPolicy === 'BLACK');
+    const visualAvailable = Boolean(
+      image || fallback || request.fallbackPolicy === 'BLACK' || shotMediaCoversScene,
+    );
+    if (aiClip && !aiClip.raw && aiClip.shotClips.length === 0) {
+      blockers.push({
+        code: aiClip.shotPlanActive ? 'SHOT_VIDEO_REQUIRED' : 'AI_MOTION_REQUIRED',
+        message: aiClip.shotPlanActive
+          ? `Scene ${scene.sceneNumber} requires accepted Shot video for every planned Shot`
+          : `Scene ${scene.sceneNumber} requires accepted AI motion or a non-FAIL fallback`,
+        entityId: scene.id,
+        retryable: true,
+      });
+    }
     if (!timingItem)
       blockers.push({
         code: 'SCENE_TIMING_REQUIRED',
@@ -1357,14 +1440,15 @@ export class TimelineWorkflowService {
       chapters: { total: 0, reusable: 0, required: 0, blocked: 0 },
       project: { required: false, reusable: false, fingerprint: null },
       ai: (() => {
-        const aiClip = scene ? this.aiClipSource(projectId, scene.stableId) : null;
+        const aiClip = scene ? this.aiClipSource(projectId, scene.stableId, scene.id) : null;
+        const hasUsableAi = Boolean(aiClip?.raw || aiClip?.shotClips.length);
         const unit = aiClip ? this.sceneVideos.recentGenerationDurationMs(projectId) : null;
         return {
           scenesSelected: aiClip ? 1 : 0,
-          missingMotion: aiClip && !aiClip.raw ? 1 : 0,
-          clipsToNormalize: aiClip && aiClip.raw && !reusable ? 1 : 0,
-          estimatedGenerations: aiClip && !aiClip.raw ? 1 : 0,
-          estimatedGenerationMs: aiClip && !aiClip.raw ? (unit ? unit : null) : 0,
+          missingMotion: aiClip && !hasUsableAi ? 1 : 0,
+          clipsToNormalize: aiClip && hasUsableAi && !reusable ? 1 : 0,
+          estimatedGenerations: aiClip && !hasUsableAi ? 1 : 0,
+          estimatedGenerationMs: aiClip && !hasUsableAi ? (unit ? unit : null) : 0,
         };
       })(),
       expectedDurationMs: timingItem?.durationMs ?? null,
@@ -1385,7 +1469,18 @@ export class TimelineWorkflowService {
     const timing = this.timeline.getCurrentSceneTiming(scene.chapterId);
     const timingItem = timing?.items.find((item) => item.sceneId === scene.id);
     const motion = this.timeline.getCurrentMotionPlan(scene.stableId, scene.id);
-    const image = this.currentAsset(projectId, `scene:${scene.stableId}:image`);
+    const aiSource = this.aiRenderSource(
+      projectId,
+      scene.stableId,
+      request.fallbackPolicy,
+      scene.id,
+    );
+    const shotDurationMs =
+      aiSource?.shotClips.reduce((total, clip) => total + clip.durationMs, 0) ?? 0;
+    const shotMediaCoversScene = Boolean(
+      aiSource?.shotPlanActive && timingItem && shotDurationMs >= timingItem.durationMs,
+    );
+    const image = this.currentRenderableSceneImage(projectId, scene.stableId);
     const fallback = image
       ? null
       : this.fallbackAsset(projectId, scene.stableId, request.fallbackPolicy);
@@ -1393,7 +1488,7 @@ export class TimelineWorkflowService {
       !timing ||
       !timingItem ||
       !motion ||
-      (!image && !fallback && request.fallbackPolicy !== 'BLACK')
+      (!image && !fallback && request.fallbackPolicy !== 'BLACK' && !shotMediaCoversScene)
     )
       throw new AppError('RENDER_BLOCKED', JSON.stringify(plan.blockers), 409);
     const effectiveImage = image ?? fallback;
@@ -1407,14 +1502,16 @@ export class TimelineWorkflowService {
         `Scene ${scene.sceneNumber} image dimensions are missing`,
         409,
       );
-    const config = this.config(projectId, request);
-    const aiSource = this.aiRenderSource(projectId, scene.stableId, request.fallbackPolicy);
-    if (aiSource && !aiSource.raw)
+    const hasUsableAi = Boolean(aiSource?.raw || aiSource?.shotClips.length);
+    if (aiSource && !hasUsableAi)
       throw new AppError(
         'RENDER_BLOCKED',
-        `Scene ${scene.sceneNumber} is missing accepted AI motion`,
+        aiSource.shotPlanActive
+          ? `Scene ${scene.sceneNumber} is missing accepted Shot video`
+          : `Scene ${scene.sceneNumber} is missing accepted AI motion`,
         409,
       );
+    const config = this.config(projectId, request);
     const sceneFingerprint = this.sceneClipFingerprint(
       scene,
       timingItem,
@@ -1448,6 +1545,7 @@ export class TimelineWorkflowService {
       clipSource: aiSource?.clipSource ?? 'KEN_BURNS',
       rawClipPath: aiSource?.raw?.path ?? null,
       rawClipDurationMs: aiSource?.raw?.durationMs ?? null,
+      shotClips: aiSource?.shotClips ?? [],
       crossfadeMs: aiSource?.raw
         ? resolveAiCrossfadeMs(aiSource.raw.durationMs, timingItem.durationMs)
         : 0,
@@ -1640,6 +1738,12 @@ export class TimelineWorkflowService {
     if (!row) return null;
     return { ...row, metadata: parseMetadata(row.metadata) };
   }
+  private currentRenderableSceneImage(projectId: Id, sceneStableId: string): AssetDetails | null {
+    const renderable = this.assets.currentRenderableSceneImage(projectId, sceneStableId);
+    if (!renderable) return null;
+    const details = this.currentAsset(projectId, `scene:${sceneStableId}:image`);
+    return details && details.sha256 === renderable.sha256 ? details : null;
+  }
 
   private async audioDuration(asset: AssetDetails): Promise<number> {
     const metadataDuration = durationFromMetadata(asset);
@@ -1669,7 +1773,7 @@ export class TimelineWorkflowService {
   ): string {
     // AI sources change the fingerprint inputs; Ken Burns output must stay
     // byte-identical to the Prompt #12 fingerprint so existing caches hold.
-    const aiSource = this.aiRenderSource(scene.projectId, scene.stableId, fallbackPolicy);
+    const aiSource = this.aiRenderSource(scene.projectId, scene.stableId, fallbackPolicy, scene.id);
     if (!aiSource)
       return fingerprint({
         compilerVersion: RENDER_COMPILER_VERSIONS.scene,
@@ -1707,6 +1811,16 @@ export class TimelineWorkflowService {
       motion: motion.inputFingerprint,
       image: image?.sha256 ?? null,
       raw: aiSource.raw?.fingerprint ?? null,
+      ...(aiSource.shotPlanActive
+        ? {
+            shotClips: aiSource.shotClips.map((clip) => ({
+              shotId: clip.shotId,
+              sha256: clip.sha256,
+              durationMs: clip.durationMs,
+              fingerprint: clip.fingerprint,
+            })),
+          }
+        : {}),
       fallbackPolicy,
       fallbackAsset: fallbackAsset?.sha256 ?? null,
       profile: {
@@ -1722,32 +1836,82 @@ export class TimelineWorkflowService {
     });
   }
 
+  private shotClipSources(
+    projectId: Id,
+    sceneStableId: string,
+    sceneRevisionId?: Id,
+  ): Pick<AiClipSource, 'shotClips' | 'shotPlanActive'> {
+    if (!sceneRevisionId) return { shotClips: [], shotPlanActive: false };
+    const plan: ShotPlanDto | null = this.shotPlans.getCurrent(projectId, sceneRevisionId);
+    if (!plan || plan.reviewStatus !== 'APPROVED') return { shotClips: [], shotPlanActive: false };
+    const shotClips = plan.candidate.shots
+      .slice()
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map((shot) => {
+        const renderable = this.sceneVideos.currentRenderableShotVideo(
+          projectId,
+          sceneStableId,
+          shot.id,
+        );
+        const generation = renderable?.generation;
+        const asset = renderable?.asset ?? null;
+        const durationMs = generation?.clipDurationMs;
+        return generation && asset && typeof durationMs === 'number' && durationMs > 0
+          ? {
+              shotId: shot.id,
+              path: asset.path,
+              sha256: asset.sha256,
+              durationMs,
+              fingerprint: generation.inputFingerprint,
+            }
+          : null;
+      });
+    return {
+      shotClips: shotClips.every((clip): clip is NonNullable<typeof clip> => clip !== null)
+        ? shotClips
+        : [],
+      shotPlanActive: true,
+    };
+  }
+
   // Raw AI motion availability for a Scene. null means Ken Burns (the
   // default): no AI request exists for this Scene.
-  private aiClipSource(projectId: Id, sceneStableId: string): AiClipSource | null {
+  private aiClipSource(
+    projectId: Id,
+    sceneStableId: string,
+    sceneRevisionId?: Id,
+  ): AiClipSource | null {
+    const shotSource = this.shotClipSources(projectId, sceneStableId, sceneRevisionId);
+    if (shotSource.shotPlanActive)
+      return {
+        clipSource: 'AI_VIDEO',
+        raw: null,
+        ...shotSource,
+      };
     const clipSource = this.motionSources.get(projectId, sceneStableId);
     if (clipSource === 'KEN_BURNS') return null;
-    const generation = this.sceneVideos.getCurrent(projectId, sceneStableId);
+    const renderable = this.sceneVideos.currentRenderableSceneVideo(projectId, sceneStableId);
+    if (!renderable) return { clipSource, raw: null, shotClips: [], shotPlanActive: false };
+    const rawAsset = this.currentAsset(projectId, sceneVideoRole(sceneStableId));
+    const rawDuration = rawAsset?.metadata.clipDurationMs;
     if (
-      !generation ||
-      generation.status !== 'COMPLETED' ||
-      generation.freshness !== 'CURRENT' ||
-      generation.reviewStatus !== 'ACCEPTED' ||
-      !generation.assetId
+      !rawAsset ||
+      rawAsset.id !== renderable.asset.id ||
+      typeof rawDuration !== 'number' ||
+      rawDuration <= 0
     )
-      return { clipSource, raw: null };
-    const asset = this.currentAsset(projectId, sceneVideoRole(sceneStableId));
-    const rawDuration = asset?.metadata.clipDurationMs;
-    if (!asset || typeof rawDuration !== 'number' || rawDuration <= 0)
-      return { clipSource, raw: null };
+      return { clipSource, raw: null, shotClips: [], shotPlanActive: false };
+    const asset = rawAsset;
     return {
       clipSource,
       raw: {
         path: asset.path,
         sha256: asset.sha256,
         durationMs: rawDuration,
-        fingerprint: generation.inputFingerprint,
+        fingerprint: renderable.generation.inputFingerprint,
       },
+      shotClips: [],
+      shotPlanActive: false,
     };
   }
 
@@ -1762,10 +1926,7 @@ export class TimelineWorkflowService {
         ('MISSING' as 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'MISSING'),
       reviewStatus: generation?.reviewStatus ?? ('UNREVIEWED' as const),
       hasAcceptedClip: Boolean(
-        generation &&
-        generation.status === 'COMPLETED' &&
-        generation.reviewStatus === 'ACCEPTED' &&
-        generation.freshness === 'CURRENT',
+        this.sceneVideos.currentRenderableSceneVideo(projectId, sceneStableId),
       ),
     };
   }
@@ -1776,9 +1937,17 @@ export class TimelineWorkflowService {
     projectId: Id,
     sceneStableId: string,
     fallbackPolicy: RenderFallbackPolicy,
+    sceneRevisionId?: Id,
   ): AiClipSource | null {
-    const source = this.aiClipSource(projectId, sceneStableId);
-    if (source && !source.raw && fallbackPolicy !== 'FAIL') return null;
+    const source = this.aiClipSource(projectId, sceneStableId, sceneRevisionId);
+    if (
+      source &&
+      !source.raw &&
+      source.shotClips.length === 0 &&
+      !source.shotPlanActive &&
+      fallbackPolicy !== 'FAIL'
+    )
+      return null;
     return source;
   }
 

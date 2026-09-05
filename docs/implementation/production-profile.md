@@ -6,11 +6,11 @@ revision they started with, so later edits do not silently change a run.
 
 ## Presets
 
-| Key             | Intent                           | Default gates and policy                                                                                 |
-| --------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `MANUAL_REVIEW` | Human-controlled production      | story, continuity, references, images, quality review, and provider gates remain explicit                |
-| `BALANCED`      | Default first-working-video path | image approval and continuity/quality review stay on; bounded batches and Ken Burns fallback are enabled |
-| `AUTO`          | Fewer review stops               | bounded automatic progression where inputs are valid; hard resource and safety limits still apply        |
+| Key             | Intent                           | Default gates and policy                                                                                                                            |
+| --------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MANUAL_REVIEW` | Human-controlled production      | automatic critics and human approval gates remain explicit; story, continuity, references, and providers stay required                              |
+| `BALANCED`      | Default first-working-video path | automatic critics remain required; clear passes proceed, while uncertainty/exhaustion escalates; bounded batches and Ken Burns fallback are enabled |
+| `AUTO`          | Fewer review stops               | automatic critics and strict resource/reference gates remain required; clear passes proceed without a human quality gate                            |
 
 The repository lazily creates each requested preset and uses an idempotent
 project/profile key. Repeated reads do not create duplicate revisions.
@@ -30,8 +30,8 @@ Settings validate and cap:
 - publication metadata and thumbnail requirements
 
 The default `BALANCED` profile uses chapter batch size 5, image batch size 8,
-one image candidate, two image regeneration attempts, high-priority AI motion,
-maximum 12 AI motion scenes, Ken Burns fallback, standard render quality,
+two bounded image candidates, two image regeneration attempts, high-priority AI
+motion, maximum 12 AI motion scenes, Ken Burns fallback, standard render quality,
 current subtitles, automatic technical retry, three stage attempts, a 2 GB
 free-space guard, required metadata, and an optional thumbnail.
 

@@ -1104,6 +1104,7 @@ export const sceneCharacters = sqliteTable(
     roleInScene: text('role_in_scene').notNull().default(''),
     visualState: text('visual_state').notNull().default('{}'),
     dependencyFingerprint: text('dependency_fingerprint'),
+    identityResolution: text('identity_resolution'),
     createdAt: text('created_at').notNull(),
   },
   (table) => ({

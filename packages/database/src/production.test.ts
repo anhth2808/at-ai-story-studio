@@ -78,6 +78,23 @@ describe('production repositories', () => {
     );
     close(database);
   });
+  it('materializes quality gates for every production profile', () => {
+    const database = setup();
+    const profiles = new ProductionProfileRepository(database);
+    for (const key of ['MANUAL_REVIEW', 'BALANCED', 'AUTO'] as const) {
+      const settings = profiles.getOrCreate(projectId, key).settings;
+      expect(settings.imageQualityGate).toBe('REQUIRED');
+      expect(settings.videoQualityGate).toBe('REQUIRED');
+    }
+    expect(profiles.getOrCreate(projectId, 'MANUAL_REVIEW').settings.requireImageApproval).toBe(
+      true,
+    );
+    expect(profiles.getOrCreate(projectId, 'BALANCED').settings.requireImageApproval).toBe(false);
+    expect(profiles.getOrCreate(projectId, 'BALANCED').settings.requireQualityReview).toBe(false);
+    expect(profiles.getOrCreate(projectId, 'AUTO').settings.requireImageApproval).toBe(false);
+    expect(profiles.getOrCreate(projectId, 'AUTO').settings.requireQualityReview).toBe(false);
+    close(database);
+  });
 
   it('rejects invalid scopes before creating workflow or run rows', () => {
     const database = setup();

@@ -18,6 +18,7 @@ import {
   type ImageProviderSettings,
 } from '@studio/shared';
 import { StudioService, type StudioContext } from './index.js';
+import { type AiAgent, type AiAgentRequest, type AiAgentResult } from './omp-agent.js';
 import { createImageGenerationService } from './image-service.js';
 import { ImageProviderError, type ImageProvider } from './comfyui.js';
 
@@ -169,6 +170,29 @@ class FixtureProvider implements ImageProvider {
   }
 
   async cancel(): Promise<void> {}
+}
+
+class RejectingImageCritic implements AiAgent {
+  async generate(request: AiAgentRequest): Promise<AiAgentResult> {
+    return {
+      operation: request.operation,
+      text: JSON.stringify({
+        status: 'REJECTED',
+        scores: { IDENTITY: 2, OVERALL: 2 },
+        issues: ['WRONG_FACE'],
+        hardFailure: true,
+        confidence: 1,
+        explanation: 'The candidate does not preserve the approved face.',
+        guidance: '',
+      }),
+      provider: 'test',
+      model: 'critic',
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      durationMs: 1,
+    };
+  }
 }
 
 function configure(service: ReturnType<typeof createImageGenerationService>): void {
@@ -367,7 +391,7 @@ describe('ImageGenerationService', () => {
       code: 'STALE_INPUT',
     });
     const staleGeneration = images.getGeneration(projectId, sceneId, inFlight.generation.id);
-    expect(staleGeneration.status).toBe('FAILED');
+    expect(staleGeneration.status).toBe('CANCELLED');
     expect(staleGeneration.isCurrent).toBe(false);
     expect(staleGeneration.assetId).toBeNull();
     database.sqlite.close();
@@ -387,6 +411,7 @@ describe('ImageGenerationService', () => {
     expect(all).toHaveLength(4);
     const seeds = new Set(all.map((image) => image.requestedSeed));
     expect(seeds.size).toBe(4);
+
     const metadata = scheduled.generation.metadata as {
       candidateSetId: string;
       candidateIndex: number;
@@ -413,6 +438,46 @@ describe('ImageGenerationService', () => {
     expect(
       images.listGenerations(projectId, sceneId).filter((image) => image.isCurrent),
     ).toHaveLength(1);
+    database.sqlite.close();
+  });
+  it('retries every rejected candidate as a bounded deterministic batch', async () => {
+    const { context, database, fixture } = await setup();
+    const studio = new StudioService(context);
+    studio.visual.buildPromptPackage({ projectId, sceneId });
+    const images = createImageGenerationService(
+      context,
+      new FixtureProvider(fixture, context.workspace.staging),
+      new RejectingImageCritic(),
+    );
+    configure(images);
+    images.schedule(projectId, sceneId, { candidateCount: 2 });
+    const workflow = new WorkflowRepository(database);
+    let step = workflow.claim('image-worker');
+    while (step) {
+      await images.executeStep(step, 'image-worker');
+      workflow.complete(step);
+      step = workflow.claim('image-worker');
+    }
+    const sets = database.sqlite
+      .prepare(
+        'SELECT requested_count as requestedCount, generation_instructions as instructions, metadata FROM scene_image_candidate_sets ORDER BY created_at',
+      )
+      .all() as Array<{ requestedCount: number; instructions: string; metadata: string }>;
+    expect(sets).toHaveLength(3);
+    expect(sets.every((set) => set.requestedCount === 2)).toBe(true);
+    expect(
+      sets.map((set) => (JSON.parse(set.metadata) as { retryCount: number }).retryCount),
+    ).toEqual([0, 1, 2]);
+    expect(images.listGenerations(projectId, sceneId)).toHaveLength(6);
+    expect(images.listGenerations(projectId, sceneId).every((image) => !image.isCurrent)).toBe(
+      true,
+    );
+    expect(
+      images
+        .listGenerations(projectId, sceneId)
+        .filter((image) => image.automaticQualityStatus === 'MANUAL_REVIEW_REQUIRED'),
+    ).toHaveLength(2);
+    expect(sets[1]!.instructions).toContain('Preserve the exact approved face identity.');
     database.sqlite.close();
   });
 

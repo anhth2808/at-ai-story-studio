@@ -80,6 +80,9 @@ describe('visual reference policy', () => {
       name: 'Cold weather',
     });
     expect(inferAppearanceStage('She feels cold and afraid in the hospital corridor.')).toBeNull();
+    expect(inferAppearanceStage('The air is freezing before dawn.')).toBeNull();
+    expect(inferAppearanceStage('She puts on before leaving.')).toBeNull();
+    expect(inferAppearanceStage('The actor is wearing a smile.')).toBeNull();
     expect(inferAppearanceStage('The room becomes dark and rainy.')).toBeNull();
   });
 

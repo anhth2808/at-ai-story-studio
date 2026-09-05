@@ -269,30 +269,79 @@ Automatic image and video critics are structured evaluator boundaries, not a
 substitute for human approval. They require an OMP model with multimodal
 support; unavailable or malformed evaluations remain explicit `UNAVAILABLE`
 and do not pass quality gates. The temporal implementation extracts bounded
-first, middle, and final samples plus the source keyframe. Semantic retry
-exhaustion and full Shot-level acceptance remain follow-up work.
+first, middle, and final samples plus the source keyframe, persists deterministic
+issue guidance, and bounds semantic retries. A real single-Shot FLUX, Wan, and
+LTX smoke completed with automatic image and temporal critic verdicts; the
+release-scale three-Chapter production remains unverified.
 
 The local LTX smoke completed against the existing ComfyUI graph without model
-downloads or global mutation. It used checkpoint
-`ltx-2-19b-distilled-fp8.safetensors`, 704x384, 9 frames, 25 FPS, H.264 MP4,
-and centralized decoded-duration measurement of 360 ms. Automatic temporal
-critic evaluation was not part of this direct provider smoke.
+downloads or global mutation. The controlled comparison reused the same
+accepted FLUX keyframe and exact Character plus Location references for both
+backends. Wan produced 704x384, 97 frames, 24 FPS, H.264 MP4 in 97,094 ms;
+LTX produced 704x384, 97 frames, 25 FPS, H.264 MP4 in 109,012 ms. Both clips
+passed automatic temporal QC. Human perceptual comparison was not executed.
+
+No backend-local early-quality hook is installed for the approved LTX topology.
+This is intentionally `DEFERRED`; full-output temporal QC remains the only
+quality gate and the application does not modify ComfyUI globally.
 
 ## Prompt #15 release evidence
 
-| Gate                                         | Result  | Evidence                                                                                      |
-| -------------------------------------------- | ------- | --------------------------------------------------------------------------------------------- |
-| Shared contracts and migrations              | PASS    | Full Vitest: 62 files, 251 tests; typecheck and build passed                                  |
-| Shot Director and visual-only compiler       | PASS    | Focused Vitest: 10 files, 34 tests; deterministic prompt and bounded OMP tests passed         |
-| Image candidate policy and persistence       | PASS    | Candidate policy, immutable ranking, critic-state, and repository tests passed                |
-| Wan/LTX backend isolation                    | PASS    | Backend tests passed; LTX direct ComfyUI smoke completed with the documented graph            |
-| TTS decoded duration and silence checks      | PASS    | Focused TTS/media tests passed; padded MP3 measured decoded duration and silence              |
-| Browser quality surfaces                     | PASS    | Desktop screenshot and 375px viewport inspection; mobile `scrollWidth=360`, `clientWidth=360` |
-| Real FLUX reference/critic smoke             | NOT_RUN | No end-to-end prototype, stage, Location, and critic run recorded                             |
-| Real Wan regression smoke                    | NOT_RUN | No post-abstraction Wan run recorded                                                          |
-| Real three-Chapter production/restart/reuse  | NOT_RUN | Release-scale run remains unexecuted                                                          |
-| Automatic temporal critic on real LTX output | NOT_RUN | Direct LTX provider smoke did not invoke the OMP critic                                       |
-| YouTube publication                          | BLOCKED | Explicitly out of scope; `READY_FOR_YOUTUBE_PUBLISH=NO`                                       |
+| Gate                                         | Result   | Evidence                                                                                                                 |
+| -------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Shared contracts and migrations              | PASS     | Full Vitest: 65 files, 267 tests; full typecheck and build passed                                                        |
+| Shot Director and visual-only compiler       | PASS     | Full workflow suite covers bounded OMP, deterministic prompt, Shot, and continuity behavior                              |
+| Image candidate policy and persistence       | PASS     | Full workflow/database suites cover candidate policy, immutable ranking, critic state, retries, and gates                |
+| Wan/LTX backend isolation                    | PASS     | Backend tests passed; controlled ComfyUI Wan and LTX runs used application-owned descriptors and no raw graphs           |
+| TTS decoded duration and silence checks      | PASS     | Full suite covers decoded duration, silence anomalies, segment retry, and sibling reuse                                  |
+| Browser quality surfaces                     | PASS     | Desktop screenshot and 375px viewport inspection; mobile `scrollWidth=375`, `clientWidth=375`                            |
+| Backend-local early temporal hook            | DEFERRED | LTX topology has no installed hook; full-output temporal QC remains active                                               |
+| Real FLUX reference/critic smoke             | PASS     | ComfyUI FLUX.2 Klein: prototype, stage, Location, two exact Shot candidates; both image critics PASSED and winner ranked |
+| Real Wan regression smoke                    | PASS     | Wan 2.2 TI2V-5B: generation `f2742cbd-b4b2-4e48-9f51-280bdf371aa9`, temporal critic PASSED                               |
+| Real LTX reference/critic smoke              | PASS     | LTX-2 19B distilled: generation `8722f672-e100-4106-8555-9ec030fd371b`, temporal critic PASSED                           |
+| Controlled Wan/LTX comparison                | PASS     | Same accepted keyframe and references; both clips passed automatic QC; human perceptual comparison NOT EXECUTED          |
+| Real three-Chapter production/restart/reuse  | NOT_RUN  | Release-scale run remains unexecuted                                                                                     |
+| Automatic temporal critic on real LTX output | PASS     | Controlled LTX run persisted evaluation `becbf165-9c0a-493d-9724-4aeaea1cc4b2` with `PASSED`                             |
+| YouTube publication                          | BLOCKED  | Explicitly out of scope; `READY_FOR_YOUTUBE_PUBLISH=NO`                                                                  |
+
+Single-Shot provider record:
+
+- Project `994e1a5c-e5c8-4f56-b921-c7012f384867`, Scene revision
+  `4c630bad-adb2-408d-b3b8-19251518d3fb`, Shot
+  `55b86335-e06d-4dca-8705-d0d838090990`, package
+  `e565ec7d-7d02-42d0-a79b-da8fed1cb9c0`.
+- FLUX.2 Klein references used seed `15015`: prototype hash
+  `4f1828de62133fa014918381df508b5a8dec7211457eb51d20eaa007e6092b13`,
+  stage hash
+  `70b1d2bba22a52d2397abd25fb28e612dfa8d63517d196987f1cea216e6a93b1`,
+  Location hash
+  `69a5b62724c6462aaef3de2cdc5f62969e4499d22f7f367ed4a9625e49c17c9f`.
+- Shot candidates used seeds `15015` and `15016`, durations `35,985 ms` and
+  `30,789 ms`, hashes
+  `563789cd953930e6c01bae6b5fc354cf35dfa71c23efd6763667758997db5ea0` and
+  `174863c0a7814af38c2840cda11988ae0d510b482134e949b2584ec7eaa0001a`;
+  candidate 2 won with weighted score `4.333333`.
+- Wan used seed `15015`, hash
+  `ae5f3077f82daa8c972ba1b01edcb82795676c2a4b4fd4088e4cc703e43ffbb6`,
+  338,078 bytes, 4,042 ms decoded duration, and 97,094 ms generation time.
+- LTX used seed `15015`, hash
+  `02ed444ed89499b7121810740bd435ce8302a64c152bae4583861d2f1383e154`,
+  221,670 bytes, 3,880 ms decoded duration, and 109,012 ms generation time.
+
+Verification commands:
+
+- Focused: `pnpm --filter @studio/database build && pnpm exec vitest run
+packages/workflow/src/media-critics.test.ts
+packages/workflow/src/visual-reference-service.test.ts
+packages/workflow/src/production-planning.test.ts
+packages/workflow/src/production-orchestrator.test.ts
+packages/workflow/src/video-service.test.ts
+packages/database/src/image.test.ts
+packages/database/src/production.test.ts
+packages/database/src/visual-reference.test.ts` - 8 files, 46 tests passed.
+- Full: `pnpm test` - 65 files, 267 tests passed.
+- Static: `pnpm typecheck`, `pnpm build`, `pnpm lint`, `pnpm format:check`.
+- Spec: `openspec validate perceptual-quality-director-pipeline --strict`.
 
 `PROMPT_15_HARDENED=YES`
 `READY_FOR_QUALITY_E2E=NO`

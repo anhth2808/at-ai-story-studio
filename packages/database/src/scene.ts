@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   aiUsageSchema,
+  futureCharacterResolutionSchema,
   locationSchema,
   locationStatusSchema,
   locationUpdateSchema,
@@ -19,6 +20,7 @@ import {
   sceneStringArraySchema,
   visualStyleSettingsSchema,
   type AiUsage,
+  type FutureCharacterResolution,
   type GenerationMetadata,
   type Id,
   type Location,
@@ -41,6 +43,15 @@ import type { DatabaseHandle } from './db.js';
 const now = (): string => new Date().toISOString();
 const json = (value: unknown): string => JSON.stringify(value);
 const parseJson = (value: string): unknown => JSON.parse(value);
+const parseIdentityResolution = (value: string | null): FutureCharacterResolution | null => {
+  if (!value) return null;
+  try {
+    const parsed = futureCharacterResolutionSchema.safeParse(parseJson(value));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+};
 const parseStringArray = (value: string): string[] => {
   const parsed = parseJson(value);
   return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed : [];
@@ -83,6 +94,7 @@ export type SceneCharacterPersistence = {
   visualState: SceneCharacterVisualStateInput;
   resolutionStatus: 'RESOLVED' | 'UNRESOLVED';
   dependencyFingerprint: string | null;
+  identityResolution?: FutureCharacterResolution | null;
 };
 
 export type ScenePersistenceInput = Omit<ScenePlanItem, 'characters'> & {
@@ -220,6 +232,7 @@ type SceneCharacterRow = {
   resolutionStatus: string;
   roleInScene: string;
   visualState: string;
+  identityResolution: string | null;
 };
 
 type SceneInsertInput = {
@@ -684,7 +697,7 @@ export class SceneRepository {
     const characterRows = this.database.sqlite
       .prepare(
         `SELECT character_id as characterId,display_name as displayName,resolution_status as resolutionStatus,
-          role_in_scene as roleInScene,visual_state as visualState
+          role_in_scene as roleInScene,visual_state as visualState,identity_resolution as identityResolution
          FROM scene_characters WHERE scene_revision_id=? ORDER BY id`,
       )
       .all(sceneId) as SceneCharacterRow[];
@@ -696,6 +709,7 @@ export class SceneRepository {
     }));
     const characters: SceneCharacterDto[] = characterRows.map((character, index) => ({
       ...characterValues[index]!,
+      identityResolution: parseIdentityResolution(character.identityResolution),
       resolutionStatus: sceneCharacterResolutionStatusSchema.parse(character.resolutionStatus),
     }));
     const item = scenePlanItemSchema.parse({
@@ -1327,8 +1341,8 @@ export class SceneRepository {
         .prepare(
           `INSERT INTO scene_characters(
             id,scene_revision_id,character_id,display_name,resolution_status,role_in_scene,visual_state,
-            dependency_fingerprint,created_at
-          ) VALUES(?,?,?,?,?,?,?,?,?)`,
+            dependency_fingerprint,identity_resolution,created_at
+          ) VALUES(?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           randomUUID(),
@@ -1339,6 +1353,7 @@ export class SceneRepository {
           character.roleInScene,
           json(character.visualState),
           character.dependencyFingerprint,
+          character.identityResolution ? json(character.identityResolution) : null,
           stamp,
         );
     }
@@ -1456,6 +1471,7 @@ export class SceneRepository {
         visualState: character.visualState,
         resolutionStatus: character.resolutionStatus,
         dependencyFingerprint: null,
+        identityResolution: character.identityResolution,
       })),
     };
   }

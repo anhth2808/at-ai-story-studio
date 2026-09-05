@@ -294,6 +294,71 @@ describe('scene image persistence', () => {
     expect(() => repository.setCurrent(projectId, sceneStableId, second.id, 2)).toThrow(/changed/);
     database.sqlite.close();
   });
+  it('commits a manual Shot image with exact package lineage', () => {
+    const database = setup();
+    const shotPlanId = randomUUID();
+    const shotId = 'shot-1';
+    database.sqlite
+      .prepare(
+        `INSERT INTO shot_plans(
+          id,stable_id,project_id,chapter_id,scene_stable_id,scene_revision_id,revision,status,
+          template_version,schema_version,input_fingerprint,review_status,is_current,row_version,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        shotPlanId,
+        randomUUID(),
+        projectId,
+        chapterId,
+        sceneStableId,
+        sceneRevisionId,
+        1,
+        'CURRENT',
+        'shot-v1',
+        'shot-v1',
+        'shot-plan-fingerprint',
+        'APPROVED',
+        1,
+        1,
+        '2026-01-01',
+        '2026-01-01',
+      );
+    database.sqlite
+      .prepare('UPDATE visual_prompt_packages SET shot_plan_id=?,shot_stable_id=? WHERE id=?')
+      .run(shotPlanId, shotId, packageId);
+    const settings = new ImageGenerationSettingsRepository(database).getOrCreate(projectId);
+    const repository = new SceneImageGenerationRepository(database);
+    const image = repository.commitManual({
+      projectId,
+      sceneStableId,
+      sceneRevisionId,
+      shotPlanId,
+      shotStableId: shotId,
+      visualPromptPackageId: packageId,
+      packageFingerprint: 'package-fingerprint',
+      settingsFingerprint: settings.inputFingerprint,
+      assetPath: `projects/${projectId}/images/shots/${shotId}/manual.png`,
+      mediaType: 'image/png',
+      bytes: 10,
+      sha256: 'c'.repeat(64),
+      width: 1024,
+      height: 576,
+    });
+    expect(image).toMatchObject({
+      source: 'MANUAL',
+      shotPlanId,
+      shotId,
+      reviewStatus: 'ACCEPTED',
+      automaticQualityStatus: 'DEGRADED_ACCEPTED',
+      isCurrent: true,
+      freshness: 'CURRENT',
+    });
+    expect(repository.getCurrent(projectId, sceneStableId, shotId)?.id).toBe(image.id);
+    expect(
+      new AssetRepository(database).currentRenderableShotImage(projectId, sceneStableId, shotId),
+    ).toMatchObject({ sha256: 'c'.repeat(64) });
+    database.sqlite.close();
+  });
   it('groups candidate sets, enforces unique indexes, and persists reviews after reopen', () => {
     const database = setup(join(tmpdir(), `candidates-${randomUUID()}.db`));
     const repository = new SceneImageGenerationRepository(database);

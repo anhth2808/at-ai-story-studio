@@ -4,6 +4,7 @@ import { rmSync } from 'node:fs';
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import {
+  AppearanceStageRepository,
   AssetRepository,
   ChapterRepository,
   ProjectRepository,
@@ -11,12 +12,16 @@ import {
   StoryRepository,
   SceneRepository,
   SceneObjectResolutionRepository,
-  VisualProfileRepository,
+  SceneVideoGenerationRepository,
   ShotPlanRepository,
+  VisualProfileRepository,
   VisualPromptPackageRepository,
+  VisualReferenceGenerationRepository,
   WorkflowRepository,
+  sceneVideoRole,
   type ClaimedStep,
   type ChapterStatusFilter,
+  type CurrentAsset,
   type DatabaseHandle,
   type ProductionRunRecord,
 } from '@studio/database';
@@ -61,6 +66,8 @@ import {
   type ChapterDto,
   type ChapterInput,
   type Id,
+  type Shot,
+  type VideoBackend,
   type JobDto,
   type ProjectDto,
   type ProjectInput,
@@ -95,7 +102,7 @@ import { renderShotPlanningPrompt } from './shot-prompts.js';
 import { VisualConsistencyService, createVisualConsistencyService } from './visual-service.js';
 import { ImageGenerationService, createImageGenerationService } from './image-service.js';
 import { SceneVideoService, createSceneVideoService } from './video-service.js';
-import { imageCandidateCount } from './quality-policy.js';
+import { imageCandidateCount, imageConditioningModeForShot } from './quality-policy.js';
 import { ShotDirector } from './shot-director.js';
 import { ttsQualityIssues } from './tts-quality.js';
 import { VisualReferenceService } from './visual-reference-service.js';
@@ -135,6 +142,7 @@ import {
   type ProductionScheduledWork,
   type ProductionStageInspection,
 } from './production-orchestrator.js';
+import { ProductionPreflightService } from './production-planning.js';
 import { PublicationPackageService } from './publication-package.js';
 export {
   imageGenerationFingerprint,
@@ -204,13 +212,42 @@ export class StudioService {
       this.sceneObjectResolutions,
       this.visualPackages,
       this.assets,
+      new ShotPlanRepository(context.database),
+      new AppearanceStageRepository(context.database),
+      new VisualReferenceGenerationRepository(context.database),
     );
     this.images = createImageGenerationService(context, undefined, agent);
     this.videos = createSceneVideoService(context, undefined, agent);
     this.visualReferences = new VisualReferenceService(context);
     this.timeline = new TimelineWorkflowService(context);
     this.publication = new PublicationPackageService(context);
-    this.production = new ProductionOrchestrator(context, this.productionAdapters(), undefined, {
+    const preflight = new ProductionPreflightService(context, {
+      image: async (projectId) => {
+        const readiness = await this.images.readiness(projectId);
+        return {
+          ready: readiness.status === 'READY',
+          message: readiness.message,
+          status: readiness.status,
+        };
+      },
+      aiVideo: async (projectId) => {
+        const readiness = await this.videos.readiness(projectId);
+        return {
+          ready: readiness.status === 'READY',
+          message: readiness.message,
+          status: readiness.status,
+        };
+      },
+      aiVideoBackend: async (projectId, backend) => {
+        const readiness = await this.videos.readinessForBackend(projectId, backend);
+        return {
+          ready: readiness.status === 'READY',
+          message: readiness.message,
+          status: readiness.status,
+        };
+      },
+    });
+    this.production = new ProductionOrchestrator(context, this.productionAdapters(), preflight, {
       timeline: this.timeline,
     });
   }
@@ -257,6 +294,45 @@ export class StudioService {
       stableId: string;
     }>;
   }
+  private productionShotRows(
+    run: ProductionRunRecord,
+    limit = 500,
+  ): Array<{
+    sceneId: Id;
+    sceneStableId: string;
+    shotPlanId: Id;
+    shotPlanRevision: number;
+    shotId: string;
+    ordinal: number;
+    shot: Shot;
+  }> {
+    const rows: Array<{
+      sceneId: Id;
+      sceneStableId: string;
+      shotPlanId: Id;
+      shotPlanRevision: number;
+      shotId: string;
+      ordinal: number;
+      shot: Shot;
+    }> = [];
+    for (const scene of this.productionSceneRows(run)) {
+      const plan = this.shotPlans.getCurrent(run.projectId, scene.id);
+      if (!plan || plan.reviewStatus !== 'APPROVED') continue;
+      for (const shot of plan.candidate.shots) {
+        rows.push({
+          sceneId: scene.id,
+          sceneStableId: scene.stableId,
+          shotPlanId: plan.id,
+          shotPlanRevision: plan.revision,
+          shotId: shot.id,
+          ordinal: shot.ordinal,
+          shot,
+        });
+        if (rows.length >= limit) return rows;
+      }
+    }
+    return rows;
+  }
 
   private productionActiveSteps(
     entityId: Id,
@@ -276,6 +352,59 @@ export class StudioService {
          AND status IN ('PENDING','RUNNING') ORDER BY created_at LIMIT 100`,
       )
       .all(entityId, ...types) as Array<{
+      stepId: Id;
+      entityId: Id;
+      type: string;
+      inputFingerprint: string;
+    }>;
+  }
+  private productionActiveShotSteps(
+    entityId: Id,
+    type: 'BUILD_VISUAL_PROMPT' | 'GENERATE_SHOT_IMAGE' | 'GENERATE_AI_SHOT_VIDEO',
+  ): Array<{
+    stepId: Id;
+    entityId: Id;
+    type: string;
+    inputFingerprint: string;
+    shotId: string;
+  }> {
+    return this.context.database.sqlite
+      .prepare(
+        `SELECT ws.id as stepId,ws.entity_id as entityId,ws.type,
+          ws.input_fingerprint as inputFingerprint,
+          json_extract(ws.payload,'$.shotId') as shotId
+         FROM workflow_steps ws
+         WHERE ws.entity_id=? AND ws.type=? AND ws.status IN ('PENDING','RUNNING')
+           AND json_extract(ws.payload,'$.shotId') IS NOT NULL
+         ORDER BY ws.created_at LIMIT 100`,
+      )
+      .all(entityId, type) as Array<{
+      stepId: Id;
+      entityId: Id;
+      type: string;
+      inputFingerprint: string;
+      shotId: string;
+    }>;
+  }
+  private productionActiveSceneSteps(
+    entityId: Id,
+    type: 'BUILD_VISUAL_PROMPT' | 'GENERATE_SCENE_IMAGE' | 'GENERATE_AI_SCENE_VIDEO',
+  ): Array<{
+    stepId: Id;
+    entityId: Id;
+    type: string;
+    inputFingerprint: string;
+  }> {
+    return this.context.database.sqlite
+      .prepare(
+        `SELECT ws.id as stepId,ws.entity_id as entityId,ws.type,
+          ws.input_fingerprint as inputFingerprint
+         FROM workflow_steps ws
+         WHERE ws.entity_id=? AND ws.type=? AND ws.status IN ('PENDING','RUNNING')
+           AND json_extract(ws.payload,'$.shotId') IS NULL
+         ORDER BY ws.created_at LIMIT 100`,
+      )
+      .all(entityId, type) as Array<{
       stepId: Id;
       entityId: Id;
       type: string;
@@ -339,6 +468,26 @@ export class StudioService {
     if (!step) throw new AppError('NOT_FOUND', 'Scheduled workflow step not found', 500);
     return this.productionWork(step, unitKey, classification);
   }
+  private async productionVideoBackend(
+    run: ProductionRunRecord,
+  ): Promise<{ backend: VideoBackend | undefined; fallbackUsed: boolean }> {
+    const settings = this.production.profiles.get(run.profileId)?.settings;
+    if (!settings) return { backend: undefined, fallbackUsed: false };
+    const preferred = settings.videoBackendPreference;
+    const preferredReadiness = await this.videos.readinessForBackend(run.projectId, preferred);
+    if (preferredReadiness.status === 'READY') return { backend: preferred, fallbackUsed: false };
+    const fallback = settings.allowedVideoFallback;
+    if (fallback !== 'NONE' && fallback !== preferred) {
+      const fallbackReadiness = await this.videos.readinessForBackend(run.projectId, fallback);
+      if (fallbackReadiness.status === 'READY') return { backend: fallback, fallbackUsed: true };
+    }
+    throw new AppError(
+      'PROVIDER_UNAVAILABLE',
+      `No allowed video backend is ready for this production run (${preferredReadiness.status})`,
+      503,
+      true,
+    );
+  }
 
   private productionScopeRequest(run: ProductionRunRecord): RenderRequest {
     const profile = this.production.profiles.get(run.profileId);
@@ -365,6 +514,8 @@ export class StudioService {
     const { aiMotionPolicy, aiPriorityThreshold, maxAiVideoScenes } = settings;
     const rank: Record<string, number> = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3 };
     const scenes = this.productionSceneRows(run).filter((scene) => {
+      const shotPlan = this.shotPlans.getCurrent(run.projectId, scene.id);
+      if (shotPlan?.reviewStatus === 'APPROVED') return true;
       const source = this.videos.getMotionSource(run.projectId, scene.id);
       if (source === 'KEN_BURNS') return false;
       if (aiMotionPolicy === 'SELECTED_ONLY' || aiMotionPolicy === 'ALL_ELIGIBLE') return true;
@@ -628,116 +779,324 @@ export class StudioService {
       VISUAL_PROMPTS: {
         inspect: (run): ProductionStageInspection => {
           const scenes = this.productionSceneRows(run);
-          const missing = scenes.filter((scene) => {
-            const row = this.context.database.sqlite
-              .prepare(
-                'SELECT status FROM visual_prompt_packages WHERE scene_revision_id=? AND is_current=1 LIMIT 1',
-              )
-              .get(scene.id) as { status: string } | undefined;
-            return row?.status !== 'CURRENT';
+          const shots = this.productionShotRows(run);
+          const missingScenes = scenes.filter((scene) => {
+            const packageDto = this.visualPackages.getCurrent(run.projectId, scene.id);
+            return (
+              !packageDto || packageDto.status !== 'CURRENT' || packageDto.payload.shotId !== null
+            );
           });
+          const missingShots = shots.filter((shot) => {
+            const packageDto = this.visualPackages.getCurrent(
+              run.projectId,
+              shot.sceneId,
+              shot.shotId,
+            );
+            return (
+              !packageDto ||
+              packageDto.status !== 'CURRENT' ||
+              packageDto.payload.shotId !== shot.shotId ||
+              packageDto.payload.shotPlanId !== shot.shotPlanId
+            );
+          });
+          const missing = missingScenes.length + missingShots.length;
+          const total = scenes.length + shots.length;
           return {
-            decision: missing.length ? 'BUILD' : 'REUSE',
-            current: missing.length === 0,
-            message: missing.length
-              ? `${missing.length} Visual Prompt Packages require work`
+            decision: missing ? 'BUILD' : 'REUSE',
+            current: missing === 0,
+            message: missing
+              ? `${missing} Visual Prompt Packages require work`
               : 'Current Visual Prompt Packages are reusable',
-            progress: { current: scenes.length - missing.length, total: scenes.length },
+            progress: { current: total - missing, total },
           };
         },
         schedule: (run, _stage, limit) => {
-          const scenes = this.productionSceneRows(run)
+          const scenes = this.productionSceneRows(run);
+          const shots = this.productionShotRows(run);
+          const sceneWork = scenes
             .filter((scene) => {
-              const row = this.context.database.sqlite
-                .prepare(
-                  'SELECT status FROM visual_prompt_packages WHERE scene_revision_id=? AND is_current=1 LIMIT 1',
-                )
-                .get(scene.id) as { status: string } | undefined;
-              return row?.status !== 'CURRENT';
+              const packageDto = this.visualPackages.getCurrent(run.projectId, scene.id);
+              return (
+                !packageDto || packageDto.status !== 'CURRENT' || packageDto.payload.shotId !== null
+              );
             })
-            .slice(0, limit);
-          if (!scenes.length) return [];
-          const active = scenes.flatMap((scene) =>
-            this.productionActiveSteps(scene.id, ['BUILD_VISUAL_PROMPT']),
+            .map((scene) => ({ kind: 'SCENE' as const, scene }));
+          const shotWork = shots
+            .filter((shot) => {
+              const packageDto = this.visualPackages.getCurrent(
+                run.projectId,
+                shot.sceneId,
+                shot.shotId,
+              );
+              return (
+                !packageDto ||
+                packageDto.status !== 'CURRENT' ||
+                packageDto.payload.shotId !== shot.shotId ||
+                packageDto.payload.shotPlanId !== shot.shotPlanId
+              );
+            })
+            .map((shot) => ({ kind: 'SHOT' as const, shot }));
+          const work = [...sceneWork, ...shotWork].slice(0, limit);
+          if (!work.length) return [];
+          const active = work.flatMap((item) =>
+            item.kind === 'SCENE'
+              ? this.productionActiveSceneSteps(item.scene.id, 'BUILD_VISUAL_PROMPT').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `prompt:${item.scene.stableId}`,
+                  }),
+                )
+              : this.productionActiveShotSteps(item.shot.sceneId, 'BUILD_VISUAL_PROMPT').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `prompt:${item.shot.sceneStableId}:shot:${step.shotId}`,
+                  }),
+                ),
           );
           if (active.length)
-            return active
-              .slice(0, limit)
-              .map((step) => this.productionWork(step, `prompt:${step.stepId}`));
-          return scenes.map((scene) => {
-            const result = this.scheduleVisualPromptBuild(run.projectId, scene.id);
-            return this.productionJobWork(result.jobId, `prompt:${scene.stableId}`);
+            return active.slice(0, limit).map((step) => this.productionWork(step, step.unitKey));
+          return work.map((item) => {
+            if (item.kind === 'SCENE') {
+              const result = this.scheduleVisualPromptBuild(run.projectId, item.scene.id);
+              return this.productionJobWork(result.jobId, `prompt:${item.scene.stableId}`);
+            }
+            const result = this.scheduleShotVisualPromptBuild(
+              run.projectId,
+              item.shot.sceneId,
+              item.shot.shotId,
+            );
+            return this.productionJobWork(
+              result.jobId,
+              `prompt:${item.shot.sceneStableId}:shot:${item.shot.shotId}`,
+            );
           });
         },
       },
       SCENE_IMAGES: {
         inspect: (run): ProductionStageInspection => {
-          const scenes = this.productionSceneRows(run);
           const settings = this.production.profiles.get(run.profileId)?.settings;
-          const missing = scenes.filter(
-            (scene) => !this.assets.currentRenderableSceneImage(run.projectId, scene.stableId),
+          const requireImageApproval = settings ? Boolean(settings.requireImageApproval) : true;
+          const qualityFallback = settings?.qualityFallback ?? 'MANUAL_REVIEW';
+          const reviewDecision = qualityFallback === 'BLOCK' ? 'BLOCKED' : 'REVIEW';
+          const latestImage = (sceneId: Id, sceneStableId: string, shotId: string | null) =>
+            this.images.getCurrentGeneration(run.projectId, sceneId, shotId) ??
+            this.images.listGenerations(run.projectId, sceneId, 1, 0, shotId)[0] ??
+            null;
+          const imageNeedsReview = (
+            generation: ReturnType<ImageGenerationService['getCurrentGeneration']>,
+          ): boolean => {
+            if (
+              !generation ||
+              generation.status !== 'COMPLETED' ||
+              generation.freshness !== 'CURRENT'
+            )
+              return false;
+            const retryCount =
+              typeof generation.metadata.retryCount === 'number' &&
+              Number.isInteger(generation.metadata.retryCount)
+                ? generation.metadata.retryCount
+                : 0;
+            return (
+              (requireImageApproval && generation.reviewStatus === 'UNREVIEWED') ||
+              generation.automaticQualityStatus === 'UNAVAILABLE' ||
+              generation.automaticQualityStatus === 'MANUAL_REVIEW_REQUIRED' ||
+              (generation.automaticQualityStatus === 'REJECTED' &&
+                retryCount >= (settings?.imageRegenerationLimit ?? 2))
+            );
+          };
+          const scenes = this.productionSceneRows(run);
+          const shots = this.productionShotRows(run);
+          const shotSceneIds = new Set(shots.map((shot) => shot.sceneId));
+          const sceneTargets = scenes.filter((scene) => !shotSceneIds.has(scene.id));
+          const missingScenes = sceneTargets.filter(
+            (scene) =>
+              !this.assets.currentRenderableSceneImage(run.projectId, scene.stableId, {
+                requireApproval: requireImageApproval,
+              }),
           );
-          const review = settings?.requireImageApproval
-            ? scenes.filter((scene) => {
-                if (this.assets.currentRenderableSceneImage(run.projectId, scene.stableId))
-                  return false;
-                const generation = this.images.getCurrentGeneration(run.projectId, scene.id);
-                return (
-                  generation?.status === 'COMPLETED' &&
-                  generation.freshness === 'CURRENT' &&
-                  generation.reviewStatus !== 'ACCEPTED' &&
-                  generation.reviewStatus !== 'REJECTED'
-                );
-              })
-            : [];
+          const missingShots = shots.filter(
+            (shot) =>
+              !this.assets.currentRenderableShotImage(
+                run.projectId,
+                shot.sceneStableId,
+                shot.shotId,
+                { requireApproval: requireImageApproval },
+              ),
+          );
+          const reviewScenes = sceneTargets.filter((scene) =>
+            imageNeedsReview(latestImage(scene.id, scene.stableId, null)),
+          );
+          const reviewShots = shots.filter((shot) =>
+            imageNeedsReview(latestImage(shot.sceneId, shot.sceneStableId, shot.shotId)),
+          );
+          const missing = missingScenes.length + missingShots.length;
+          const review = reviewScenes.length + reviewShots.length;
+          const total = sceneTargets.length + shots.length;
           return {
-            decision: review.length ? 'REVIEW' : missing.length ? 'BUILD' : 'REUSE',
-            current: missing.length === 0,
-            message: review.length
-              ? `${review.length} Scene images require review`
-              : missing.length
-                ? `${missing.length} Scene images require generation or upload`
-                : 'Current Scene images are reusable',
-            progress: { current: scenes.length - missing.length, total: scenes.length },
+            decision: review ? reviewDecision : missing ? 'BUILD' : 'REUSE',
+            current: missing === 0 && review === 0,
+            message: review
+              ? `${review} image outputs require review or intervention`
+              : missing
+                ? `${missing} Scene or Shot images require generation or upload`
+                : 'Current Scene and Shot images are reusable',
+            blockers: review
+              ? [
+                  ...reviewScenes.map((scene) => `Scene ${scene.stableId}`),
+                  ...reviewShots.map((shot) => `Shot ${shot.shotId}`),
+                ].slice(0, 100)
+              : undefined,
+            progress: { current: total - missing, total },
           };
         },
         schedule: (run, _stage, limit) => {
           const settings = this.production.profiles.get(run.profileId)?.settings;
-          const scenes = this.productionSceneRows(run)
+          const requireImageApproval = settings ? Boolean(settings.requireImageApproval) : true;
+          const scenes = this.productionSceneRows(run);
+          const shots = this.productionShotRows(run);
+          const shotSceneIds = new Set(shots.map((shot) => shot.sceneId));
+          const sceneWork = scenes
             .filter(
-              (scene) => !this.assets.currentRenderableSceneImage(run.projectId, scene.stableId),
+              (scene) =>
+                !shotSceneIds.has(scene.id) &&
+                !this.assets.currentRenderableSceneImage(run.projectId, scene.stableId, {
+                  requireApproval: requireImageApproval,
+                }),
             )
-            .slice(0, limit);
-          if (!scenes.length) return [];
-          const active = scenes.flatMap((scene) =>
-            this.productionActiveSteps(scene.id, ['GENERATE_SCENE_IMAGE']),
+            .map((scene) => ({ kind: 'SCENE' as const, scene }));
+          const shotWork = shots
+            .filter(
+              (shot) =>
+                !this.assets.currentRenderableShotImage(
+                  run.projectId,
+                  shot.sceneStableId,
+                  shot.shotId,
+                  { requireApproval: requireImageApproval },
+                ),
+            )
+            .map((shot) => ({ kind: 'SHOT' as const, shot }));
+          const work = [...sceneWork, ...shotWork].slice(0, limit);
+          if (!work.length) return [];
+          const active = work.flatMap((item) =>
+            item.kind === 'SCENE'
+              ? this.productionActiveSceneSteps(item.scene.id, 'GENERATE_SCENE_IMAGE').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `image:${item.scene.stableId}`,
+                  }),
+                )
+              : this.productionActiveShotSteps(item.shot.sceneId, 'GENERATE_SHOT_IMAGE').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `image:${item.shot.sceneStableId}:shot:${step.shotId}`,
+                  }),
+                ),
           );
           if (active.length)
-            return active
-              .slice(0, limit)
-              .map((step) => this.productionWork(step, `image:${step.stepId}`));
-          const result = this.images.scheduleBatch(run.projectId, {
-            sceneIds: scenes.map((scene) => scene.id),
-            candidateCount: settings ? imageCandidateCount(settings) : 1,
-            includeStale: false,
-          });
-          return result.jobs.slice(0, limit).map((job) =>
-            this.productionWork(
+            return active.slice(0, limit).map((step) => this.productionWork(step, step.unitKey));
+          return work.map((item) => {
+            if (item.kind === 'SCENE') {
+              const result = this.images.scheduleBatch(run.projectId, {
+                sceneIds: [item.scene.id],
+                candidateCount: settings ? imageCandidateCount(settings) : 1,
+                includeStale: false,
+                qualityThreshold: settings?.imageAutoAcceptThreshold,
+                qualityRetryLimit: settings?.imageRegenerationLimit,
+              });
+              const job = result.jobs[0];
+              if (!job?.stepId)
+                throw new AppError('WORKFLOW_ERROR', 'Scene image scheduling produced no job', 500);
+              return this.productionWork(
+                {
+                  stepId: job.stepId,
+                  entityId: job.generation.id,
+                  type: 'GENERATE_SCENE_IMAGE',
+                  inputFingerprint: job.generation.inputFingerprint ?? job.generation.id,
+                },
+                `image:${item.scene.stableId}`,
+              );
+            }
+            const result = this.images.scheduleShot(
+              run.projectId,
+              item.shot.sceneId,
+              item.shot.shotId,
               {
-                stepId: job.stepId,
-                entityId: job.generation.id,
-                type: 'GENERATE_SCENE_IMAGE',
-                inputFingerprint: job.generation.inputFingerprint ?? job.generation.id,
+                candidateCount: settings ? imageCandidateCount(settings, item.shot.shot) : 1,
+                conditioningMode: settings
+                  ? imageConditioningModeForShot(settings, item.shot.shot)
+                  : undefined,
+                qualityThreshold: settings?.imageAutoAcceptThreshold,
+                qualityRetryLimit: settings?.imageRegenerationLimit,
               },
-              `image:${job.generation.sceneId}`,
-            ),
-          );
+            );
+            if (!result.stepId)
+              throw new AppError('WORKFLOW_ERROR', 'Shot image scheduling produced no step', 500);
+            return this.productionWork(
+              {
+                stepId: result.stepId,
+                entityId: result.generation.id,
+                type: 'GENERATE_SHOT_IMAGE',
+                inputFingerprint: result.generation.inputFingerprint ?? result.generation.id,
+              },
+              `image:${item.shot.sceneStableId}:shot:${item.shot.shotId}`,
+            );
+          });
         },
       },
       AI_MOTION: {
         inspect: (run): ProductionStageInspection => {
           const settings = this.production.profiles.get(run.profileId)?.settings;
+          const requireMotionApproval = settings ? Boolean(settings.requireQualityReview) : true;
+          const matchesConfiguredBackend = (
+            generation: { backend?: VideoBackend } | null | undefined,
+          ): boolean =>
+            !settings ||
+            (generation !== null &&
+              generation !== undefined &&
+              generation.backend === settings.videoBackendPreference);
           const scenes = this.productionAiScenes(run);
+          const shotRows = this.productionShotRows(run).filter((shot) =>
+            scenes.some((scene) => scene.id === shot.sceneId),
+          );
+          const temporalRetryLimit = settings?.temporalRetryLimit ?? 2;
+          const reviewDecision = settings?.qualityFallback === 'BLOCK' ? 'BLOCKED' : 'REVIEW';
+          const latestSceneVideo = (sceneId: Id) =>
+            this.videos.getCurrentGeneration(run.projectId, sceneId) ??
+            this.videos.listGenerations(run.projectId, sceneId, 1, 0)[0] ??
+            null;
+          const latestShotVideo = (shot: (typeof shotRows)[number]) =>
+            this.videos.getCurrentShotGeneration(run.projectId, shot.sceneId, shot.shotId) ??
+            this.videos.listShotGenerations(run.projectId, shot.sceneId, shot.shotId, 1, 0)[0] ??
+            null;
+          const temporalNeedsReview = (
+            generation: ReturnType<SceneVideoService['getCurrentGeneration']>,
+          ): boolean => {
+            if (
+              !generation ||
+              generation.status !== 'COMPLETED' ||
+              generation.freshness !== 'CURRENT' ||
+              generation.reviewStatus === 'ACCEPTED'
+            )
+              return false;
+            const retryCount =
+              typeof generation.metadata.retryCount === 'number' &&
+              Number.isInteger(generation.metadata.retryCount)
+                ? generation.metadata.retryCount
+                : 0;
+            return (
+              (requireMotionApproval && generation.reviewStatus === 'UNREVIEWED') ||
+              generation.automaticQualityStatus === 'UNAVAILABLE' ||
+              generation.automaticQualityStatus === 'MANUAL_REVIEW_REQUIRED' ||
+              generation.automaticQualityStatus === 'NOT_RUN' ||
+              (generation.automaticQualityStatus === 'REJECTED' && retryCount >= temporalRetryLimit)
+            );
+          };
+          const shotNeedsReview = (shot: (typeof shotRows)[number]): boolean => {
+            const generation = latestShotVideo(shot);
+            return matchesConfiguredBackend(generation) && temporalNeedsReview(generation);
+          };
+          const shotSceneIds = new Set(shotRows.map((shot) => shot.sceneId));
+          const sceneRows = scenes.filter((scene) => !shotSceneIds.has(scene.id));
           const allScenes = this.productionSceneRows(run);
           const selected = new Set(scenes.map((scene) => scene.id));
           const fallbacks = settings?.allowKenBurnsFallback
@@ -745,22 +1104,11 @@ export class StudioService {
                 .filter((scene) => !selected.has(scene.id))
                 .map((scene) => `motion:${scene.stableId}:KEN_BURNS:policy`)
             : [];
-          if (!scenes.length)
-            return {
-              decision: 'REUSE',
-              current: true,
-              message: 'AI motion policy selects Ken Burns or no eligible Scene',
-              fallbacks: fallbacks.slice(0, 100),
-            };
-          const review = scenes.filter((scene) => {
-            const generation = this.videos.getCurrentGeneration(run.projectId, scene.id);
-            return (
-              generation?.status === 'COMPLETED' &&
-              generation.freshness === 'CURRENT' &&
-              generation.reviewStatus === 'UNREVIEWED'
-            );
+          const sceneReview = sceneRows.filter((scene) => {
+            const generation = latestSceneVideo(scene.id);
+            return matchesConfiguredBackend(generation) && temporalNeedsReview(generation);
           });
-          const rejectedOrFailed = scenes.filter((scene) => {
+          const sceneRejectedOrFailed = sceneRows.filter((scene) => {
             const generation = this.videos.getCurrentGeneration(run.projectId, scene.id);
             return (
               generation &&
@@ -771,11 +1119,11 @@ export class StudioService {
           });
           if (settings?.allowKenBurnsFallback)
             fallbacks.push(
-              ...rejectedOrFailed.map(
+              ...sceneRejectedOrFailed.map(
                 (scene) => `motion:${scene.stableId}:KEN_BURNS:provider_or_review_failure`,
               ),
             );
-          const missing = scenes.filter((scene) => {
+          const missingScene = sceneRows.filter((scene) => {
             const generation = this.videos.getCurrentGeneration(run.projectId, scene.id);
             const fallback =
               settings?.allowKenBurnsFallback &&
@@ -783,59 +1131,192 @@ export class StudioService {
               (generation.reviewStatus === 'REJECTED' ||
                 generation.status === 'FAILED' ||
                 generation.status === 'CANCELLED');
-            return (
-              !fallback &&
-              (!generation ||
-                generation.status !== 'COMPLETED' ||
-                generation.freshness !== 'CURRENT' ||
-                generation.reviewStatus !== 'ACCEPTED')
+            const accepted = Boolean(
+              matchesConfiguredBackend(generation) &&
+              this.videos.getCurrentRenderableGeneration(run.projectId, scene.id, {
+                requireApproval: requireMotionApproval,
+                requireQualityPass: settings?.videoQualityGate !== 'DISABLED',
+              }),
             );
+            return !accepted && !fallback;
           });
-          if (review.length)
+          const missingShots = shotRows.filter((shot) => {
+            const renderable = this.videos.getCurrentRenderableShotVideo(
+              run.projectId,
+              shot.sceneId,
+              shot.shotId,
+              {
+                requireApproval: requireMotionApproval,
+                requireQualityPass: settings?.videoQualityGate !== 'DISABLED',
+              },
+            );
+            return !renderable || !matchesConfiguredBackend(renderable.generation);
+          });
+          const missingImages = shotRows.filter(
+            (shot) =>
+              !this.assets.currentRenderableShotImage(
+                run.projectId,
+                shot.sceneStableId,
+                shot.shotId,
+                { requireApproval: settings ? Boolean(settings.requireImageApproval) : true },
+              ),
+          );
+          if (missingImages.length)
             return {
-              decision: 'REVIEW',
-              message: `${review.length} Scene motion clips require review`,
+              decision: 'BLOCKED',
+              message: 'Shot motion is blocked by missing quality-approved keyframes',
+              blockers: missingImages
+                .slice(0, 100)
+                .map((shot) => `Shot ${shot.shotId} requires a current accepted image`),
+              fallbacks: fallbacks.slice(0, 100),
+            };
+          if (sceneReview.length)
+            return {
+              decision: reviewDecision,
+              message: `${sceneReview.length} Scene motion clips require review`,
               blockers: ['Accept the current AI motion clip before rendering'],
               fallbacks: fallbacks.slice(0, 100),
             };
-          if (!missing.length)
+          const shotReview = shotRows.filter(shotNeedsReview);
+          if (shotReview.length)
+            return {
+              decision: reviewDecision,
+              message: `${shotReview.length} Shot motion clips require review`,
+              blockers: ['Accept the current AI Shot motion clips before rendering'],
+              fallbacks: fallbacks.slice(0, 100),
+            };
+          const missing = missingScene.length + missingShots.length;
+          if (missing === 0)
             return {
               decision: 'REUSE',
               current: true,
-              message: 'Accepted AI motion is reusable',
+              message: 'Accepted Scene and Shot motion is reusable',
               fallbacks: fallbacks.slice(0, 100),
             };
           return {
             decision: 'BUILD',
-            message: `${missing.length} eligible Scene motion clips require generation`,
+            message: `${missing} Scene or Shot motion clips require generation`,
             fallbacks: fallbacks.slice(0, 100),
+            progress: {
+              current: sceneRows.length + shotRows.length - missing,
+              total: sceneRows.length + shotRows.length,
+            },
           };
         },
-        schedule: (run, _stage, limit) => {
-          const scenes = this.productionAiScenes(run).slice(0, limit);
-          if (!scenes.length) return [];
-          const active = scenes.flatMap((scene) =>
-            this.productionActiveSteps(scene.id, ['GENERATE_AI_SCENE_VIDEO']),
+        schedule: async (run, _stage, limit) => {
+          const settings = this.production.profiles.get(run.profileId)?.settings;
+          const requireImageApproval = settings ? Boolean(settings.requireImageApproval) : true;
+          const requireHumanApproval = settings ? Boolean(settings.requireQualityReview) : true;
+          const qualityPolicy = {
+            requireImageApproval,
+            requireHumanApproval,
+            qualityFallback: settings?.qualityFallback,
+            temporalRetryLimit: settings?.temporalRetryLimit,
+          };
+          const selection = await this.productionVideoBackend(run);
+          const backend = selection.backend;
+          const fallbackUsed = selection.fallbackUsed;
+          const scenes = this.productionAiScenes(run);
+          const shotRows = this.productionShotRows(run).filter((shot) =>
+            scenes.some((scene) => scene.id === shot.sceneId),
+          );
+          const shotSceneIds = new Set(shotRows.map((shot) => shot.sceneId));
+          const sceneWork = scenes
+            .filter((scene) => {
+              if (shotSceneIds.has(scene.id)) return false;
+              const renderable = this.videos.getCurrentRenderableGeneration(
+                run.projectId,
+                scene.id,
+                {
+                  requireApproval: requireHumanApproval,
+                  requireQualityPass: settings?.videoQualityGate !== 'DISABLED',
+                },
+              );
+              return (
+                !renderable || (backend !== undefined && renderable.generation.backend !== backend)
+              );
+            })
+            .map((scene) => ({ kind: 'SCENE' as const, scene }));
+          const shotWork = shotRows
+            .filter((shot) => {
+              const renderable = this.videos.getCurrentRenderableShotVideo(
+                run.projectId,
+                shot.sceneId,
+                shot.shotId,
+                {
+                  requireApproval: requireHumanApproval,
+                  requireQualityPass: settings?.videoQualityGate !== 'DISABLED',
+                },
+              );
+              return (
+                !renderable || (backend !== undefined && renderable.generation.backend !== backend)
+              );
+            })
+            .map((shot) => ({ kind: 'SHOT' as const, shot }));
+          const work = [...sceneWork, ...shotWork].slice(0, limit);
+          if (!work.length) return [];
+          const active = work.flatMap((item) =>
+            item.kind === 'SCENE'
+              ? this.productionActiveSceneSteps(item.scene.id, 'GENERATE_AI_SCENE_VIDEO').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `motion:${item.scene.stableId}`,
+                  }),
+                )
+              : this.productionActiveShotSteps(item.shot.sceneId, 'GENERATE_AI_SHOT_VIDEO').map(
+                  (step) => ({
+                    ...step,
+                    unitKey: `motion:${item.shot.sceneStableId}:shot:${step.shotId}`,
+                  }),
+                ),
           );
           if (active.length)
-            return active
-              .slice(0, limit)
-              .map((step) => this.productionWork(step, `motion:${step.stepId}`));
-          const result = this.videos.scheduleBatch(run.projectId, {
-            sceneIds: scenes.map((scene) => scene.id),
-            onlyMissing: true,
-          });
-          return result.jobs.slice(0, limit).flatMap((job) => {
-            if (!job.stepId) return [];
+            return active.slice(0, limit).map((step) => this.productionWork(step, step.unitKey));
+          return work.flatMap((item) => {
+            if (item.kind === 'SCENE') {
+              const result = this.videos.scheduleBatch(
+                run.projectId,
+                {
+                  sceneIds: [item.scene.id],
+                  onlyMissing: true,
+                },
+                backend,
+                fallbackUsed,
+                qualityPolicy,
+              );
+              const job = result.jobs[0];
+              if (!job?.stepId || !job.jobId) return [];
+              return [
+                this.productionWork(
+                  {
+                    stepId: job.stepId,
+                    entityId: job.generation.id,
+                    type: 'GENERATE_AI_SCENE_VIDEO',
+                    inputFingerprint: job.generation.inputFingerprint ?? job.generation.id,
+                  },
+                  `motion:${item.scene.stableId}`,
+                ),
+              ];
+            }
+            const result = this.videos.scheduleShot(
+              run.projectId,
+              item.shot.sceneId,
+              item.shot.shotId,
+              {},
+              backend,
+              fallbackUsed,
+              qualityPolicy,
+            );
+            if (!result.stepId || !result.jobId) return [];
             return [
               this.productionWork(
                 {
-                  stepId: job.stepId,
-                  entityId: job.generation.id,
-                  type: 'GENERATE_AI_SCENE_VIDEO',
-                  inputFingerprint: job.generation.inputFingerprint ?? job.generation.id,
+                  stepId: result.stepId,
+                  entityId: result.generation.id,
+                  type: 'GENERATE_AI_SHOT_VIDEO',
+                  inputFingerprint: result.generation.inputFingerprint ?? result.generation.id,
                 },
-                `motion:${job.generation.sceneId}`,
+                `motion:${item.shot.sceneStableId}:shot:${item.shot.shotId}`,
               ),
             ];
           });
@@ -1601,6 +2082,47 @@ export class StudioService {
     }
     return { executionId, jobIds, stepIds };
   }
+  scheduleShotVisualPromptBuild(
+    projectId: Id,
+    sceneId: Id,
+    shotId: string,
+  ): { executionId: Id; jobId: Id; stepId: Id } {
+    const scene = this.getScene(projectId, sceneId);
+    const plan = this.shotPlans.getCurrent(projectId, scene.id);
+    const shot = plan?.candidate.shots.find((candidate) => candidate.id === shotId);
+    if (!plan || !shot) throw new AppError('NOT_FOUND', 'Shot not found in current Shot plan', 404);
+    const executionId = this.workflow.createExecution(projectId, 'VISUAL_CONSISTENCY');
+    const inputFingerprint = fingerprint({
+      operation: 'BUILD_VISUAL_PROMPT',
+      projectId,
+      sceneId: scene.id,
+      sceneRevision: scene.revision,
+      shotPlanId: plan.id,
+      shotPlanRevision: plan.revision,
+      shotId: shot.id,
+    });
+    const stepId = this.workflow.createStep(
+      executionId,
+      `visual-prompt:${scene.id}:${scene.revision}:shot:${shot.id}`,
+      'BUILD_VISUAL_PROMPT',
+      scene.id,
+      inputFingerprint,
+      3,
+      {
+        projectId,
+        sceneId: scene.id,
+        sceneRevision: scene.revision,
+        shotPlanId: plan.id,
+        shotPlanRevision: plan.revision,
+        shotId: shot.id,
+      },
+    );
+    return {
+      executionId,
+      jobId: this.workflow.createJob('BUILD_VISUAL_PROMPT', scene.id, stepId),
+      stepId,
+    };
+  }
 
   scheduleVisualPromptRefinement(
     projectId: Id,
@@ -2360,6 +2882,7 @@ export class EdgeTtsProvider implements TtsProvider {
 export class WorkerExecutor {
   private readonly workflow: WorkflowRepository;
   private readonly timeline: TimelineWorkflowService;
+  private readonly sceneVideos: SceneVideoGenerationRepository;
   constructor(
     private readonly context: StudioContext,
     private readonly workerId: string,
@@ -2376,6 +2899,7 @@ export class WorkerExecutor {
   ) {
     this.workflow = new WorkflowRepository(context.database);
     this.timeline = new TimelineWorkflowService(context);
+    this.sceneVideos = new SceneVideoGenerationRepository(context.database);
   }
   async execute(step: ClaimedStep, signal?: AbortSignal): Promise<void> {
     if (step.type === 'ADVANCE_PRODUCTION_RUN') {
@@ -2398,7 +2922,7 @@ export class WorkerExecutor {
       else await this.publication.executeExport(step, signal);
       return;
     }
-    if (step.type === 'GENERATE_SCENE_IMAGE') {
+    if (step.type === 'GENERATE_SCENE_IMAGE' || step.type === 'GENERATE_SHOT_IMAGE') {
       if (!this.imageService)
         throw new AppError('CONFIGURATION_ERROR', 'Image generation worker is not configured', 500);
       await this.imageService.executeStep(step, this.workerId, signal, (progress, message) => {
@@ -2406,10 +2930,18 @@ export class WorkerExecutor {
       });
       return;
     }
-    if (step.type === 'GENERATE_AI_SCENE_VIDEO') {
+    if (step.type === 'GENERATE_AI_SCENE_VIDEO' || step.type === 'GENERATE_AI_SHOT_VIDEO') {
       if (!this.videoService)
         throw new AppError('CONFIGURATION_ERROR', 'Video generation worker is not configured', 500);
       await this.videoService.executeStep(step, this.workerId, signal, (progress, message) => {
+        this.workflow.progress(step, progress, message);
+      });
+      return;
+    }
+    if (step.type === 'EXTRACT_SHOT_CONTINUATION_FRAME') {
+      if (!this.videoService)
+        throw new AppError('CONFIGURATION_ERROR', 'Video generation worker is not configured', 500);
+      await this.videoService.executeContinuationStep(step, signal, (progress, message) => {
         this.workflow.progress(step, progress, message);
       });
       return;
@@ -2474,12 +3006,26 @@ export class WorkerExecutor {
       const sceneId = this.stepString(payload, 'sceneId');
       const expectedSceneRevision =
         payload.sceneRevision === undefined ? undefined : this.stepNumber(payload, 'sceneRevision');
-      this.visualService.buildPromptPackage({
-        projectId,
-        sceneId,
-        expectedSceneRevision,
-        generationId: step.id,
-      });
+      if (typeof payload.shotId === 'string') {
+        this.visualService.buildShotPromptPackage({
+          projectId,
+          sceneId,
+          shotId: this.stepString(payload, 'shotId'),
+          expectedSceneRevision,
+          expectedShotPlanRevision:
+            payload.shotPlanRevision === undefined
+              ? undefined
+              : this.stepNumber(payload, 'shotPlanRevision'),
+          generationId: step.id,
+        });
+      } else {
+        this.visualService.buildPromptPackage({
+          projectId,
+          sceneId,
+          expectedSceneRevision,
+          generationId: step.id,
+        });
+      }
       this.workflow.progress(step, 1, 'Visual prompt package is current');
       return;
     }
@@ -3013,18 +3559,80 @@ export class WorkerExecutor {
     const stagingPath = safeWorkspacePath(this.context.workspace.root, stagingRelativePath);
     await mkdir(dirname(stagingPath), { recursive: true });
     const job = this.renderJob(step);
-    const isAiClip = payload.clipSource !== 'KEN_BURNS' && payload.rawClipPath;
-    if (isAiClip && (!payload.imagePath || !payload.imageWidth || !payload.imageHeight))
+    let rawClipPath = payload.rawClipPath
+      ? safeWorkspacePath(this.context.workspace.root, payload.rawClipPath)
+      : null;
+    let rawClipDurationMs = payload.rawClipDurationMs ?? 0;
+    const shotAssets: Array<{ asset: CurrentAsset; durationMs: number }> = [];
+    if (payload.shotClips.length > 0) {
+      for (const clip of payload.shotClips) {
+        const generation = this.sceneVideos.getCurrent(
+          payload.projectId,
+          payload.sceneStableId,
+          clip.shotId,
+        );
+        const asset = assets.current(
+          payload.projectId,
+          sceneVideoRole(payload.sceneStableId, clip.shotId),
+        );
+        if (
+          !generation ||
+          generation.status !== 'COMPLETED' ||
+          generation.freshness !== 'CURRENT' ||
+          generation.assetId !== asset?.id ||
+          (generation.automaticQualityStatus !== 'PASSED' &&
+            generation.reviewStatus !== 'ACCEPTED') ||
+          !asset ||
+          asset.path !== clip.path ||
+          asset.sha256 !== clip.sha256 ||
+          asset.inputFingerprint !== clip.fingerprint
+        )
+          throw new AppError('STALE_INPUT', `Shot ${clip.shotId} is no longer current`, 409);
+        shotAssets.push({ asset, durationMs: clip.durationMs });
+      }
+      const concatListPath = join(dirname(stagingPath), 'shot-clips.txt');
+      await writeFile(
+        concatListPath,
+        shotAssets
+          .map(
+            ({ asset }) =>
+              `file '${safeWorkspacePath(this.context.workspace.root, asset.path).replaceAll('\\', '/')}'`,
+          )
+          .join('\n'),
+        'utf8',
+      );
+      const concatPath = join(dirname(stagingPath), 'shot-clips.mp4');
+      await this.context.media.run(buildConcatArguments(concatListPath, concatPath), {
+        cwd: this.context.workspace.root,
+        signal,
+      });
+      const concatProbe = await this.context.media.probe(concatPath);
+      rawClipDurationMs = Math.round(
+        Number((concatProbe['format'] as { duration?: string })?.duration ?? 0) * 1000,
+      );
+      if (!rawClipDurationMs)
+        throw new AppError('RENDER_INPUT_INVALID', 'Shot videos produced no duration', 409);
+      rawClipPath = concatPath;
+    }
+    const isAiClip = payload.clipSource !== 'KEN_BURNS' && Boolean(rawClipPath);
+    if (payload.clipSource !== 'KEN_BURNS' && !isAiClip)
       throw new AppError(
         'RENDER_INPUT_INVALID',
-        'AI scene clips require the accepted scene image',
+        'AI scene clip has no accepted motion source',
+        409,
+      );
+    const needsSourceImage = isAiClip && rawClipDurationMs < payload.timing.durationMs;
+    if (needsSourceImage && (!sourcePath || !payload.imageWidth || !payload.imageHeight))
+      throw new AppError(
+        'RENDER_INPUT_INVALID',
+        'AI scene clip needs an accepted image to cover its remaining duration',
         400,
       );
     const clipArguments = isAiClip
       ? buildAiSceneClipArguments({
-          rawClipPath: safeWorkspacePath(this.context.workspace.root, payload.rawClipPath!),
-          rawClipDurationMs: payload.rawClipDurationMs ?? 0,
-          sourceImagePath: safeWorkspacePath(this.context.workspace.root, payload.imagePath!),
+          rawClipPath: rawClipPath!,
+          rawClipDurationMs,
+          sourceImagePath: sourcePath ?? '',
           sourceWidth: payload.imageWidth ?? 0,
           sourceHeight: payload.imageHeight ?? 0,
           outputPath: stagingPath,
@@ -3104,6 +3712,7 @@ export class WorkerExecutor {
           timingRevision: payload.timingRevision,
           motionPlanId: payload.motionPlan.id,
           fallbackPolicy: payload.fallbackPolicy,
+          shotClips: payload.shotClips,
           probe,
         },
       },
@@ -3126,6 +3735,13 @@ export class WorkerExecutor {
         sourceHash: sourceAsset.sha256,
       });
     }
+    for (const { asset } of shotAssets)
+      assets.addDependency({
+        assetId: outputAssetId,
+        dependsOnAssetId: asset.id,
+        role: 'SHOT_VIDEO',
+        sourceHash: asset.sha256,
+      });
     this.timeline.renderJobs.linkAssets(job.id, null, outputAssetId);
     this.timeline.renderJobs.updateProgress(
       job.id,

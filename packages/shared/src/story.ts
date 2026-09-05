@@ -94,6 +94,8 @@ export const storyCharacterSchema = z
   .object({
     id: storyStableIdSchema,
     name: z.string().trim().min(1).max(200),
+    aliases: boundedStringArray(20, 200).default([]),
+    voiceId: z.string().trim().min(1).max(120).nullable().default(null),
     role: boundedString(500),
     ageRange: boundedString(120),
     appearance: boundedString(2_000),
@@ -107,7 +109,41 @@ export const storyCharacterSchema = z
     arc: boundedString(2_000),
   })
   .strict();
-export type StoryCharacter = z.infer<typeof storyCharacterSchema>;
+type StoryCharacterSchemaOutput = z.infer<typeof storyCharacterSchema>;
+export type StoryCharacter = Omit<StoryCharacterSchemaOutput, 'aliases' | 'voiceId'> & {
+  aliases?: string[];
+  voiceId?: string | null;
+};
+
+export const futureCharacterEvidenceSourceSchema = z.enum([
+  'BLUEPRINT_ALIAS',
+  'PLAN_WINDOW',
+  'CHAPTER_SUMMARY',
+  'FUTURE_CHAPTER',
+]);
+export type FutureCharacterEvidenceSource = z.infer<typeof futureCharacterEvidenceSourceSchema>;
+
+export const futureCharacterEvidenceSchema = z
+  .object({
+    source: futureCharacterEvidenceSourceSchema,
+    reference: z.string().trim().min(1).max(160),
+    excerpt: z.string().trim().min(1).max(1_000),
+  })
+  .strict();
+export type FutureCharacterEvidence = z.infer<typeof futureCharacterEvidenceSchema>;
+
+export const futureCharacterResolutionSchema = z
+  .object({
+    alias: z.string().trim().min(1).max(200),
+    characterId: storyStableIdSchema.nullable(),
+    voiceId: z.string().trim().min(1).max(120).nullable(),
+    referenceAssetIds: z.array(z.string().trim().min(1).max(120)).max(12),
+    evidence: z.array(futureCharacterEvidenceSchema).max(12),
+    confidence: z.number().min(0).max(1),
+    status: z.enum(['RESOLVED', 'AMBIGUOUS', 'UNRESOLVED']),
+  })
+  .strict();
+export type FutureCharacterResolution = z.infer<typeof futureCharacterResolutionSchema>;
 
 export const storyBlueprintSchema = z
   .object({
@@ -119,7 +155,10 @@ export const storyBlueprintSchema = z
     characters: z.array(storyCharacterSchema).min(1).max(100),
   })
   .strict();
-export type StoryBlueprint = z.infer<typeof storyBlueprintSchema>;
+type StoryBlueprintSchemaOutput = z.infer<typeof storyBlueprintSchema>;
+export type StoryBlueprint = Omit<StoryBlueprintSchemaOutput, 'characters'> & {
+  characters: StoryCharacter[];
+};
 
 export const chapterPlanItemSchema = z
   .object({
@@ -728,7 +767,7 @@ export type StoryPlanDto = {
   projectId: string;
   revision: number;
   blueprintRevision: number;
-  plan: ChapterPlan;
+  plan: { items: ChapterPlanItem[] };
   metadata: GenerationMetadata | null;
   createdAt: string;
 };
@@ -763,6 +802,7 @@ export type LocationDto = Location & {
 };
 export type SceneCharacterDto = SceneCharacter & {
   resolutionStatus: SceneCharacterResolutionStatus;
+  identityResolution?: FutureCharacterResolution | null;
 };
 export type SceneDto = Omit<ScenePlanItem, 'characters'> & {
   id: string;

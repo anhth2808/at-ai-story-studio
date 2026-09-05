@@ -512,3 +512,91 @@ export class TimelineRepository {
     return rows.map(({ segmentIndex, ...row }) => ({ ...row, index: segmentIndex }));
   }
 }
+export type ShotTimingAllocation = {
+  id: Id;
+  projectId: Id;
+  sceneTimingRevisionId: Id;
+  shotPlanId: Id;
+  shotId: string;
+  ordinal: number;
+  targetDurationMs: number;
+  actualDurationMs: number;
+  frameCount: number;
+  fps: number;
+  residualMs: number;
+  backend: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SaveShotTimingAllocationInput = Omit<
+  ShotTimingAllocation,
+  'id' | 'createdAt' | 'updatedAt'
+> & {
+  id?: Id;
+};
+
+export class ShotTimingAllocationRepository {
+  constructor(private readonly database: DatabaseHandle) {}
+
+  saveMany(inputs: SaveShotTimingAllocationInput[]): ShotTimingAllocation[] {
+    if (!inputs.length) return [];
+    const stamp = now();
+    const save = this.database.sqlite.prepare(
+      `INSERT INTO shot_timing_allocations(
+         id,project_id,scene_timing_revision_id,shot_plan_id,shot_id,ordinal,target_duration_ms,
+         actual_duration_ms,frame_count,fps,residual_ms,backend,created_at,updated_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(scene_timing_revision_id,shot_id) DO UPDATE SET
+         shot_plan_id=excluded.shot_plan_id,ordinal=excluded.ordinal,target_duration_ms=excluded.target_duration_ms,
+         actual_duration_ms=excluded.actual_duration_ms,frame_count=excluded.frame_count,fps=excluded.fps,
+         residual_ms=excluded.residual_ms,backend=excluded.backend,updated_at=excluded.updated_at`,
+    );
+    this.database.sqlite.transaction(() => {
+      for (const input of inputs) {
+        const shot = this.database.sqlite
+          .prepare(
+            `SELECT s.id FROM shots s
+             JOIN shot_plans sp ON sp.id=s.shot_plan_id
+             WHERE sp.project_id=? AND s.shot_plan_id=? AND (s.stable_id=? OR s.id=?)`,
+          )
+          .get(input.projectId, input.shotPlanId, input.shotId, input.shotId) as
+          { id: Id } | undefined;
+        if (!shot)
+          throw new AppError('NOT_FOUND', `Shot ${input.shotId} is not in the current plan`, 404);
+        save.run(
+          input.id ?? randomUUID(),
+          input.projectId,
+          input.sceneTimingRevisionId,
+          input.shotPlanId,
+          shot.id,
+          input.ordinal,
+          input.targetDurationMs,
+          input.actualDurationMs,
+          input.frameCount,
+          input.fps,
+          input.residualMs,
+          input.backend,
+          stamp,
+          stamp,
+        );
+      }
+    })();
+    return this.list(inputs[0]!.projectId, inputs[0]!.sceneTimingRevisionId);
+  }
+
+  list(projectId: Id, sceneTimingRevisionId: Id): ShotTimingAllocation[] {
+    return this.database.sqlite
+      .prepare(
+        `SELECT a.id,a.project_id as projectId,a.scene_timing_revision_id as sceneTimingRevisionId,
+          a.shot_plan_id as shotPlanId,s.stable_id as shotId,a.ordinal,
+          a.target_duration_ms as targetDurationMs,a.actual_duration_ms as actualDurationMs,
+          a.frame_count as frameCount,a.fps,a.residual_ms as residualMs,a.backend,
+          a.created_at as createdAt,a.updated_at as updatedAt
+         FROM shot_timing_allocations a
+         JOIN shots s ON s.id=a.shot_id
+         WHERE a.project_id=? AND a.scene_timing_revision_id=? ORDER BY a.ordinal`,
+      )
+      .all(projectId, sceneTimingRevisionId) as ShotTimingAllocation[];
+  }
+}
