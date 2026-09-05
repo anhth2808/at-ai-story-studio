@@ -593,6 +593,7 @@ export class SceneVideoService {
       sceneRevisionId: scene.id,
       aiMotionPlanRevisionId: plan.id,
       provider: settings.provider,
+      backend: settings.backend,
       requestedSeed: seed,
       requestedWidth: request.width,
       requestedHeight: request.height,

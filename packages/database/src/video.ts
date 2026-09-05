@@ -11,6 +11,7 @@ import {
   type MotionSource,
   type SceneVideoGenerationDto,
   type SceneVideoReviewUpdate,
+  type VideoBackend,
   type VideoGenerationSettings,
   type VideoGenerationSettingsDto,
   type VideoGenerationSettingsUpdate,
@@ -454,6 +455,7 @@ export type CreateSceneVideoGenerationInput = {
   sceneRevisionId: Id;
   aiMotionPlanRevisionId: Id | null;
   provider: string | null;
+  backend: VideoBackend;
   status?: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
   requestedSeed: number | null;
   requestedWidth: number | null;
@@ -498,7 +500,7 @@ const generationSelect = `SELECT g.id,g.project_id as projectId,g.chapter_id as 
   g.actual_seed as actualSeed,g.requested_width as requestedWidth,g.requested_height as requestedHeight,
   g.actual_width as actualWidth,g.actual_height as actualHeight,g.frame_count as frameCount,
   g.fps,g.provider_job_id as providerJobId,g.workflow_template as workflowTemplate,
-  g.input_fingerprint as inputFingerprint,g.source_image_asset_id as sourceImageAssetId,
+  g.backend as backend,g.input_fingerprint as inputFingerprint,g.source_image_asset_id as sourceImageAssetId,
   g.source_image_sha256 as sourceImageSha256,g.attempt,g.asset_id as assetId,
   g.clip_duration_ms as clipDurationMs,g.generation_duration_ms as generationDurationMs,
   g.error_code as errorCode,g.error,g.generation_instructions as generationInstructions,
@@ -528,6 +530,7 @@ type GenerationRow = {
   fps: number | null;
   providerJobId: string | null;
   workflowTemplate: string | null;
+  backend: VideoBackend;
   inputFingerprint: string;
   sourceImageAssetId: Id | null;
   sourceImageSha256: string | null;
@@ -668,11 +671,11 @@ export class SceneVideoGenerationRepository {
       .prepare(
         `INSERT INTO scene_video_generations(
           id,project_id,chapter_id,scene_stable_id,scene_revision_id,ai_motion_plan_revision_id,revision,
-          provider,status,review_status,is_current,requested_seed,requested_width,requested_height,
+          provider,backend,status,review_status,is_current,requested_seed,requested_width,requested_height,
           frame_count,fps,provider_job_id,workflow_template,model_settings,request_snapshot,
           motion_plan_fingerprint,settings_fingerprint,input_fingerprint,source_image_asset_id,
           source_image_sha256,attempt,generation_instructions,metadata,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -683,6 +686,7 @@ export class SceneVideoGenerationRepository {
         input.aiMotionPlanRevisionId,
         this.nextRevision(input.projectId, input.sceneStableId),
         input.provider,
+        input.backend,
         input.status ?? 'PENDING',
         'UNREVIEWED',
         0,

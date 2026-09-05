@@ -46,6 +46,11 @@ export function renderShotPlanningPrompt(context: ShotDirectorContext): StoryPro
     systemPrompt: [
       'You are a bounded cinematic Shot director.',
       'Return one JSON object only with exact top-level keys beats and shots.',
+      'Do not use legacy keys summary or shotIds.',
+      'Each beat must have exactly: id, ordinal, sourceRange, kind, meaning, importance, turningPoint, timingGroupKey.',
+      'Each beat sourceRange must have exactly startOffset and endOffset.',
+      'Each shot must have exactly: id, beatId, ordinal, sourceRange, primaryBeat, eventKinds, eventCount, importance, hero, identitySensitive, dialogueMode, dialogueText, speakerCharacterId, visualCarrier, offscreenRationale, visibleCharacterIds, offscreenCharacterIds, staticIntent, dynamicIntent, initialState, finalState, continuation, plannedDurationMs, variationIntent.',
+      'Each shot sourceRange must have exactly startOffset and endOffset.',
       'Use the Shot plan schema. One Shot has one sequential primary event.',
       'Isolate meaningful turning points. Do not create atmospheric filler or split neutral micro-actions.',
       'Every dialogue Shot needs a visible carrier. Off-screen speech needs a rationale.',
