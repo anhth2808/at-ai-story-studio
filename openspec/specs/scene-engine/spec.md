@@ -224,21 +224,45 @@ The Scene/timeline API SHALL return chapter-scoped or paginated current Scene ti
 #### Scenario: Browse a large chapter
 - **WHEN** a user opens a Chapter with many Scenes
 - **THEN** the API SHALL return bounded timeline metadata and asset URLs rather than the full project media payload or historical binary data
+
 ### Requirement: Motion and timing do not rewrite narrative Scenes
 Automatic MotionPlan generation, timing rebuild, manual timing edits, and transition edits SHALL not change Scene title, summary, source range, purpose, camera/composition narrative fields, chapter text, StoryState, TTS, or subtitle content. They SHALL create or update only their own revisioned timeline records and downstream render dependencies.
 
 #### Scenario: Change motion only
 - **WHEN** a user changes Scene 37's MotionPlan
 - **THEN** the Scene narrative revision and accepted image SHALL remain unchanged, while Scene Clip 37 and video descendants become stale
+
 ### Requirement: Accepted image linkage is explicit
 Scene timeline reads and render requests SHALL use the accepted/current Scene image selection from the image-generation layer. The Scene Engine SHALL not auto-select a rejected candidate, call an image provider, or mutate image review/current state while building timing or motion.
 
 #### Scenario: Image changes after timing
 - **WHEN** a user accepts a different image for an unchanged Scene
 - **THEN** SceneTiming and MotionPlan SHALL remain reusable while the dependent Scene Clip becomes stale through its image fingerprint
+
 ### Requirement: Scene source traceability feeds timing
 The exact UTF-16 source range already persisted for a current Scene SHALL be usable with the matching chapter revision's persisted TTS source mappings to build deterministic SceneTiming. A timing build SHALL reject stale or out-of-bounds Scene source data and SHALL preserve the original Scene range when timing is manually adjusted.
 
 #### Scenario: Build timing from Scene ranges
 - **WHEN** current Scene source ranges and current chapter narration mappings match
 - **THEN** the timing result SHALL map every Scene to an ordered narration interval without changing Scene boundaries or chapter content
+
+### Requirement: Scene plans own bounded Shot-plan descendants
+A current Scene revision SHALL be the parent input for one current revisioned Shot plan containing ordered Narrative Beats and Shots. Scene planning MAY schedule Shot planning as a separate durable operation, but Scene records SHALL remain the canonical narrative boundary and SHALL NOT embed generated image/video Assets. Scene detail reads SHALL expose bounded Shot-plan status and counts rather than every full Shot prompt by default.
+
+#### Scenario: Inspect Scene Shot status
+- **WHEN** a current Scene has a 12-Shot plan
+- **THEN** the normal Scene detail SHALL expose current plan revision, freshness, issue counts, and bounded summaries while a selective Shot endpoint returns individual Shot details
+
+### Requirement: Hard and soft environment inputs remain separate
+Scene planning SHALL resolve a canonical hard Location identity separately from Scene-time weather, lighting, atmosphere, temporary objects, and temporary damage. Scene edits to soft state SHALL stale dependent Shot prompts and media but SHALL NOT create or mutate canonical Location geometry implicitly.
+
+#### Scenario: Change weather only
+- **WHEN** a Scene's weather changes at an unchanged Location
+- **THEN** the Scene's Shot descendants SHALL become stale while the Location profile and canonical reference remain current
+
+### Requirement: Shot planning uses bounded source and continuity context
+Shot planning SHALL use the exact current Scene source range, bounded chapter context, relevant Character and Location identities, and neighboring Shot or Scene continuity summaries. It SHALL NOT load the complete novel or mutate StoryState. Structured output SHALL be strictly runtime-validated before any plan becomes current.
+
+#### Scenario: Plan a late chapter Scene
+- **WHEN** a Scene in chapter 100 is planned into Shots
+- **THEN** the request SHALL use bounded relevant context and persist provenance without serializing all prior chapter prose

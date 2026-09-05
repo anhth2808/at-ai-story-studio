@@ -19,7 +19,7 @@ For each current Shot, the system SHALL build and persist a Visual Prompt Packag
 - **WHEN** a Scene or Shot references a Character, Location, or object with no usable canonical profile
 - **THEN** the package SHALL retain a visible warning or safe missing status and SHALL not fabricate canonical appearance
 
-### Requirement: Predictable visual-only prompt assembly
+### Requirement: Predictable prompt and negative-prompt assembly
 Image prompt assembly SHALL use this stable priority: visible subject/action; exact visible Character identity/stage placeholders; visible pose/expression/position; important objects; Location/background placeholder; natural cinematic framing/angle/composition language; lighting/time/weather; style/look; quality constraints; negative constraints. It SHALL exclude raw serialized objects and nonvisual semantic facts such as goals, knowledge, abstract roles, and secrets unless converted into source-grounded visible consequences. Video prompts SHALL contain temporal changes and stability constraints without unnecessary static-world repetition.
 
 #### Scenario: Exclude semantic Story state
@@ -30,12 +30,13 @@ Image prompt assembly SHALL use this stable priority: visible subject/action; ex
 - **WHEN** a Shot has structured medium framing, eye-level angle, locked camera, and screen positions
 - **THEN** the image prompt SHALL contain concise natural cinematic sentences and SHALL NOT contain serialized JSON
 
-### Requirement: Structured continuity affects prompt output
-A Shot package SHALL consume the prior dependent Shot's persisted final physical state when applicable and SHALL compile relevant screen side, facing, pose, held-object, and environment relation into the current initial prompt. Continuity data SHALL participate in the package fingerprint.
+#### Scenario: Preserve scene action
+- **WHEN** a Scene contains a meaningful action and a detailed canonical profile
+- **THEN** the full prompt SHALL include the action before identity/style support text so the action remains visible
 
-#### Scenario: Prior holder persists
-- **WHEN** the previous Shot ends with a Character holding an identified prop and the narrative does not release it
-- **THEN** the next package SHALL preserve that holder relationship in structured state and visible prompt text
+#### Scenario: Avoid duplicate negatives
+- **WHEN** the same negative trait appears in style and profile inputs
+- **THEN** the resolved negative prompt SHALL contain it at most once while preserving distinct constraints
 
 ## ADDED Requirements
 
@@ -52,3 +53,11 @@ A prompt-safety rewrite SHALL preserve Shot purpose, visible subjects, compositi
 #### Scenario: Reject binding-changing rewrite
 - **WHEN** a safety rewrite changes `person in image 2` to `person in image 1`
 - **THEN** validation SHALL reject the rewrite and preserve the original binding metadata
+
+### Requirement: Structured continuity affects prompt output
+A Shot package SHALL consume the prior dependent Shot's persisted final physical state when applicable and SHALL compile relevant screen side, facing, pose, held-object, and environment relation into the current initial prompt. Continuity data SHALL participate in the package fingerprint.
+
+#### Scenario: Prior holder persists
+- **WHEN** the previous Shot ends with a Character holding an identified prop and the narrative does not release it
+- **THEN** the next package SHALL preserve that holder relationship in structured state and visible prompt text
+

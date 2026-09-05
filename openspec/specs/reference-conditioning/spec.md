@@ -42,14 +42,22 @@ The system SHALL let a user promote an existing generated or manual Scene image 
 - **THEN** a new `APPROVED` `CHARACTER_REFERENCE_IMAGE` Asset SHALL reference copied bytes of that revision, the source generation SHALL remain unchanged and current if it was current, and the profile reference list SHALL gain the new asset through a normal profile revision
 
 ### Requirement: Explicit conditioning mapping
-Conditioned generation SHALL carry an explicit per-character mapping (`characterId` -> reference asset id, hash, and workspace-relative path plus the profile revision) derived only from the Scene's current Visual Prompt Package and approved profile references. The mapping SHALL be persisted with the generation, and prompt name order SHALL NOT be the only identity binding. This milestone SHALL condition at most four characters per generation, consistent with the selected model's tested reference limit, and SHALL record a bounded warning when a Scene character with an approved reference is excluded.
+Conditioned generation SHALL carry an ordered `ReferenceBinding` set derived only from the current Shot Visual Prompt Package and approved current Assets. Every binding SHALL persist ordinal, role, Asset ID, entity ID, optional appearance-stage ID, content hash, profile/reference revision, and fingerprint. Provider image N SHALL map to persisted ordinal N; implicit transient list order SHALL NOT be the only identity binding. Bounded quality production MAY condition Characters, Location, and approved supported object references up to the approved workflow limit.
+
+#### Scenario: Bind Character and Location
+- **WHEN** a medium Shot uses two visible Character stages and one canonical Location reference
+- **THEN** the persisted request SHALL identify exactly which Asset is image 1, image 2, and image 3 and each prompt placeholder SHALL match that order
 
 #### Scenario: Two characters are conditioned
 - **WHEN** a Scene's package resolves `li-wei` and `mei`, both with approved primary references
 - **THEN** the persisted generation metadata SHALL contain both explicit mappings and each provider reference input SHALL be traceable to exactly one character id
 
 ### Requirement: Generation mode is explicit and defaults to text-only
-Project image settings SHALL expose a conditioning mode `TEXT_ONLY` (default) or `REFERENCE_CONDITIONED`, and Scene-level scheduling SHALL accept an explicit per-request mode override. Existing scheduling behavior SHALL NOT change unless the user selects `REFERENCE_CONDITIONED`. Requesting conditioned generation for a Scene whose package provides no eligible approved reference SHALL fail with an actionable prerequisite error rather than silently falling back.
+Project image settings SHALL retain `TEXT_ONLY` and `REFERENCE_CONDITIONED`, and Scene/Shot scheduling SHALL accept an explicit allowed override. Existing low-cost/manual text-only behavior SHALL remain available. In production QUALITY mode, important visible Characters SHALL require approved exact Character or appearance-stage references, and a canonical Location reference SHALL be used when available. Missing required references SHALL fail with an actionable prerequisite error unless the selected profile explicitly permits an audited text-only fallback; fallback SHALL never be presented as conditioned generation.
+
+#### Scenario: Quality Shot lacks primary reference
+- **WHEN** a QUALITY Shot contains an important visible Character without the exact required approved reference
+- **THEN** scheduling SHALL block with the missing entity/stage identity unless an explicit audited fallback policy allows text-only generation
 
 #### Scenario: Default behavior is unchanged
 - **WHEN** a project has never enabled `REFERENCE_CONDITIONED`
@@ -120,3 +128,17 @@ This capability SHALL NOT be considered complete until, against a real configure
 #### Scenario: Identity regresses during composition mitigation
 - **WHEN** a candidate or feedback technique improves composition or pose but materially lowers recurring-character identity against the reference-conditioned baseline
 - **THEN** the technique SHALL NOT become a default and the benchmark SHALL document the regression
+
+### Requirement: Shot-size-aware reference priority
+A production Shot with a canonical Location SHALL retain Location conditioning at every Shot size. CLOSE_UP and EXTREME_CLOSE_UP SHALL prioritize Character identity while describing the Location as a local cropped slice; MEDIUM SHALL include Character and Location references; WIDE and EXTREME_WIDE SHALL prioritize Location while including exact Character references as required. The policy SHALL be deterministic and fingerprinted.
+
+#### Scenario: Condition a close-up
+- **WHEN** a close-up has an exact Character-stage reference and canonical Location reference
+- **THEN** both bindings SHALL remain present, Character identity SHALL receive higher prompt priority, and background text SHALL describe a limited local slice rather than dropping Location continuity
+
+### Requirement: Exact references never fuzzy-fallback
+Reference resolution SHALL match stable entity and stage identifiers, not fuzzy names or nearest variants. A requested appearance stage SHALL never silently fall back to a prototype, another stage, another Character, or another Asset. A stale, rejected, unapproved, cross-project, or hash-mismatched Asset SHALL be ineligible.
+
+#### Scenario: Similar stage name exists
+- **WHEN** a Shot requests stage `winter-coat` and only `winter-coat-damaged` exists
+- **THEN** resolution SHALL report `winter-coat` missing and SHALL not bind the similar stage

@@ -263,30 +263,35 @@ Hierarchical media rendering SHALL reuse the existing single database-backed que
 #### Scenario: Render without AI providers
 - **WHEN** Story, Scene, or image providers are idle or unavailable
 - **THEN** persisted render steps SHALL still execute from already accepted media inputs without creating provider jobs
+
 ### Requirement: Safe render errors
 Render failures SHALL persist a stable error code/message and bounded diagnostics naming the scope, missing dependency, FFmpeg/ffprobe failure, cancellation, stale input, or output validation problem. Raw shell commands, credentials, and full source prose SHALL not be exposed in routine status responses.
 
 #### Scenario: FFmpeg failure
 - **WHEN** FFmpeg exits unsuccessfully for a Scene Clip
 - **THEN** the Scene job SHALL be failed with bounded diagnostics, the Chapter SHALL wait or fail on that dependency, and no partial Asset SHALL become current
+
 ### Requirement: Scoped render invalidation
 The workflow invalidator SHALL support direct dependency invalidation from Scene image/MotionPlan/Timing to Scene Clip, Chapter Video, and Project Video, and from Chapter audio/subtitle to Chapter Video and Project Video. It SHALL not invalidate unrelated Scene or Chapter render steps.
 
 #### Scenario: Change one Chapter
 - **WHEN** Chapter 47's narration or subtitle changes
 - **THEN** only Chapter 47's timing/Chapter Video descendants and Project assemblies containing Chapter 47 SHALL become stale; Chapters 1-46 SHALL not be reset
+
 ### Requirement: Render progress and cancellation
 Hierarchical render jobs SHALL persist stage-specific progress, current render time when available, expected duration, attempts, safe stderr/diagnostic context, and cancellation state. Cancellation SHALL propagate through the existing `AbortSignal` and process runner, and partial outputs SHALL not satisfy dependent steps.
 
 #### Scenario: Cancel a running render
 - **WHEN** a running FFmpeg step is cancelled
 - **THEN** the process SHALL terminate through the safe runner, the partial file SHALL remain unpublished, and dependent work SHALL remain non-complete
+
 ### Requirement: Retry at smallest render unit
 A failed Scene Clip SHALL be explicitly retryable without rerunning successful sibling Scene Clips. A failed Chapter Video SHALL be retryable from valid Scene Clips. A Project assembly retry SHALL reuse valid current Chapter Videos. Technical retries SHALL retain unchanged direct-input fingerprints and shall not create duplicate matching work.
 
 #### Scenario: Retry one failed Scene
 - **WHEN** Scene Clip 127 fails
 - **THEN** retry SHALL target only Scene Clip 127, leave valid Scene Clips 1-126 and later siblings reusable, and unblock dependent Chapter work after success
+
 ### Requirement: Persist hierarchical render work
 The workflow SHALL materialize independently identifiable steps/jobs for building Scene timing, generating default MotionPlans, rendering Scene Clips, rendering Chapter Videos, and assembling Project Videos. Each step SHALL retain its scope, input fingerprint, render settings, progress, expected duration where known, and output linkage through existing durable records or an equivalent persisted projection. One render request SHALL not require one unbounded FFmpeg job for the full Story.
 
@@ -304,3 +309,24 @@ The system SHALL add `GENERATE_AI_SCENE_VIDEO` and `NORMALIZE_AI_SCENE_CLIP` ste
 #### Scenario: Worker restart mid-generation
 - **WHEN** the worker dies while a generation step is RUNNING
 - **THEN** lease recovery SHALL return the step to PENDING and the next attempt SHALL reconcile the persisted provider job id through ComfyUI history/queue instead of duplicate-submitting
+
+### Requirement: Quality workflow units use the existing durable queue
+Shot planning, reference generation, image critique, temporal critique, continuation-frame extraction, and backend video generation SHALL use the existing SQLite-backed workflow executions and steps with persisted status, fingerprints, leases, attempts, bounded technical retries, cancellation, restart recovery, and safe errors. No second queue or in-memory quality loop SHALL be introduced.
+
+#### Scenario: Worker restarts during temporal critique
+- **WHEN** a temporal critic step loses its worker lease
+- **THEN** normal recovery SHALL reconcile committed evaluation evidence or retry the same step without accepting the clip or duplicating generation
+
+### Requirement: Semantic and technical retries remain distinct
+Technical retries SHALL preserve the same request fingerprint, seed, references, and intended output. Semantic quality rejection SHALL create a new bounded generation attempt with persisted guidance and lineage. Configuration, missing-model, stale-input, and required-reference failures SHALL not enter creative regeneration loops.
+
+#### Scenario: Missing LTX checkpoint
+- **WHEN** LTX readiness reports its configured checkpoint missing
+- **THEN** the video step SHALL fail or block as a configuration prerequisite and SHALL not consume a semantic retry
+
+### Requirement: New quality errors remain typed and safe
+Workflow results SHALL use stable bounded error codes for invalid Shot plans, required or stale references, binding mismatch, image/temporal QC rejection or unavailability, backend unavailability, invalid LTX workflow/model/frame geometry, and missing continuation source where existing codes are not equivalent. Persisted and API-visible errors SHALL omit secrets, absolute paths, raw graphs, and internal stack traces.
+
+#### Scenario: Reference binding changes in flight
+- **WHEN** a bound reference hash changes before an image result commits
+- **THEN** the step SHALL record a stale or binding error, retain historical output if valid, and SHALL not promote it current

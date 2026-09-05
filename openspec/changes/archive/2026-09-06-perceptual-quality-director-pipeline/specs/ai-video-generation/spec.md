@@ -11,26 +11,46 @@ The system SHALL expose a video generation boundary whose request carries projec
 - **WHEN** a Scene or Shot AI video generation is scheduled
 - **THEN** the persisted request SHALL contain no ComfyUI node IDs or raw workflow JSON and SHALL be replayable against any conforming backend implementation
 
-### Requirement: Approved ComfyUI backend workflows
+### Requirement: One approved native ComfyUI image-to-video workflow
 The system SHALL retain the approved native Wan 2.2 TI2V-5B workflow and SHALL add one versioned application-approved LTX-2 local workflow descriptor adapted from the inspected known-good topology. Each adapter SHALL validate required node classes, fixed links, model identities, and mapped inputs before submission. Arbitrary client-supplied workflow JSON SHALL remain rejected. Missing custom nodes required by the selected LTX workflow SHALL be reported honestly and SHALL not affect Wan readiness.
 
 #### Scenario: Wan remains ready without LTX nodes
 - **WHEN** native Wan requirements are present but LTX-specific nodes are absent
 - **THEN** Wan readiness SHALL remain independently READY while LTX readiness reports its missing dependencies
 
-### Requirement: AiMotionPlan derives from accepted static state
+#### Scenario: Validate before expensive submission
+- **WHEN** a generation is submitted
+- **THEN** the compiled graph SHALL be validated against the expected node ids, class types, inputs, and links before the request reaches ComfyUI, and an invalid graph SHALL fail without queueing
+
+#### Scenario: No custom nodes required
+- **WHEN** readiness probes the ComfyUI server
+- **THEN** the workflow SHALL require only native core nodes, and any missing required node SHALL be reported as a named readiness blocker
+
+### Requirement: AiMotionPlan separate from image prompts
 The system SHALL persist motion intent separately from the static Shot prompt. The compiled motion prompt SHALL assume the accepted keyframe establishes identity, clothing, initial pose, composition, Location, and object placement and SHALL emphasize changes, speed, camera movement, subtle environment motion, emotional timing, speaking behavior, and stability of face, body proportions, clothing, important objects, and background structure. Production defaults SHALL prefer STATIC, slow PUSH_IN, and justified subtle PULL_OUT; pan, orbit, and handheld SHALL require explicit Shot intent and supported bounded strength.
 
 #### Scenario: Compile conservative motion
 - **WHEN** no narrative motion is required
 - **THEN** the production motion plan SHALL default to STATIC or subtle subject/environment motion rather than adding camera movement for novelty
 
-### Requirement: Raw AI Motion Asset lifecycle includes quality state
+#### Scenario: Motion prompt differs from image prompt
+- **WHEN** a Scene has an accepted image generated from a detailed visual prompt
+- **THEN** the AI video request motion prompt SHALL describe motion (subject action, environment motion, camera) and SHALL NOT duplicate the full image prompt text
+
+### Requirement: Raw AI Motion Asset lifecycle
 Each generated raw Shot clip SHALL remain immutable and persist exact source keyframe and continuation lineage, backend/workflow/model/settings metadata, seed, generation attempt, technical status, review status, automatic temporal QC state, critic evaluation identity, and current/freshness state. A raw clip SHALL become accepted/current only when required automatic and human gates pass. Historical rejected or stale clips SHALL remain queryable.
 
 #### Scenario: Critic unavailable after generation
 - **WHEN** a raw clip validates technically but its required temporal critic is unavailable
 - **THEN** generation status MAY remain completed, quality status SHALL be unavailable, and the clip SHALL not be reported accepted unless explicit degraded policy permits and records it
+
+#### Scenario: Corrupt output never publishes
+- **WHEN** the provider returns a file that fails ffprobe validation
+- **THEN** no raw Asset SHALL be published as current, the failure SHALL be recorded, and retry SHALL remain available
+
+#### Scenario: Regenerate keeps history
+- **WHEN** a user regenerates motion for a Scene that already has an accepted raw clip
+- **THEN** a new revision with a new seed SHALL be created and the prior revision SHALL remain available and reviewable
 
 ## ADDED Requirements
 

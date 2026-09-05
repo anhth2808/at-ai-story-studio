@@ -150,9 +150,9 @@
 - [x] 12.2 Run the retained real Wan smoke after backend abstraction with an accepted keyframe and conservative motion; record backend/workflow/model/resolution/frames/FPS/duration/seed/codec/container/hash/generation time/QC verdict.
 - [x] 12.3 Run a real LTX-2 19B distilled image-to-video smoke against the existing local ComfyUI without downloads or global changes; record the same reproducibility and temporal-QC evidence or exact BLOCKED reason.
 - [x] 12.4 Run the controlled comparison Shot through accepted Character+Location references, candidate selection, Wan, LTX, and temporal QC; record observed output and state explicitly whether human perceptual comparison was executed.
-- [ ] 12.5 Run the real combined three-Chapter API/worker/SQLite/filesystem production through Shot plans, references, quality gates, timeline, render, PublicationPackage, manifest, export, and playable MP4 probe.
-- [ ] 12.6 During the real run, restart the worker, resolve a review wait, retry one failed smallest unit, and verify completion without losing accepted media or duplicating expensive work.
-- [ ] 12.7 Start a second equivalent production run and verify canonical Shot plans, references, critic results, accepted media, renders, and package inputs are reused with zero duplicate expensive submissions.
+- [x] 12.5 Run the real combined three-Chapter API/worker/SQLite/filesystem production through Shot plans, references, quality gates, timeline, render, PublicationPackage, manifest, export, and playable MP4 probe.
+- [x] 12.6 During the real run, restart the worker, resolve a review wait, retry one failed smallest unit, and verify completion without losing accepted media or duplicating expensive work.
+- [x] 12.7 Start a second equivalent production run and verify canonical Shot plans, references, critic results, accepted media, renders, and package inputs are reused with zero duplicate expensive submissions.
 - [x] 12.8 Run focused Vitest files, then `pnpm test`, `pnpm typecheck`, `pnpm build`, `pnpm lint`, `pnpm format:check`, and strict OpenSpec validation; record exact commands, counts, and failures.
 - [x] 12.9 Run `/ponytail-review` before commit, delete unnecessary abstractions/files/dependencies, and rerun checks affected by any cleanup.
 - [x] 12.10 Produce the required final PASS/FAIL/NOT_RUN/BLOCKED evidence matrix and set `PROMPT_15_HARDENED`, `READY_FOR_QUALITY_E2E`, and `READY_FOR_YOUTUBE_PUBLISH` only from observed gates; `READY_FOR_YOUTUBE_PUBLISH` remains NO.

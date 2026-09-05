@@ -1,25 +1,30 @@
 ## MODIFIED Requirements
 
-### Requirement: Explicit deterministic conditioning mapping
+### Requirement: Explicit conditioning mapping
 Conditioned generation SHALL carry an ordered `ReferenceBinding` set derived only from the current Shot Visual Prompt Package and approved current Assets. Every binding SHALL persist ordinal, role, Asset ID, entity ID, optional appearance-stage ID, content hash, profile/reference revision, and fingerprint. Provider image N SHALL map to persisted ordinal N; implicit transient list order SHALL NOT be the only identity binding. Bounded quality production MAY condition Characters, Location, and approved supported object references up to the approved workflow limit.
 
 #### Scenario: Bind Character and Location
 - **WHEN** a medium Shot uses two visible Character stages and one canonical Location reference
 - **THEN** the persisted request SHALL identify exactly which Asset is image 1, image 2, and image 3 and each prompt placeholder SHALL match that order
 
-### Requirement: Generation mode is explicit and profile-aware
+
+#### Scenario: Two characters are conditioned
+- **WHEN** a Scene's package resolves `li-wei` and `mei`, both with approved primary references
+- **THEN** the persisted generation metadata SHALL contain both explicit mappings and each provider reference input SHALL be traceable to exactly one character id
+### Requirement: Generation mode is explicit and defaults to text-only
 Project image settings SHALL retain `TEXT_ONLY` and `REFERENCE_CONDITIONED`, and Scene/Shot scheduling SHALL accept an explicit allowed override. Existing low-cost/manual text-only behavior SHALL remain available. In production QUALITY mode, important visible Characters SHALL require approved exact Character or appearance-stage references, and a canonical Location reference SHALL be used when available. Missing required references SHALL fail with an actionable prerequisite error unless the selected profile explicitly permits an audited text-only fallback; fallback SHALL never be presented as conditioned generation.
 
 #### Scenario: Quality Shot lacks primary reference
 - **WHEN** a QUALITY Shot contains an important visible Character without the exact required approved reference
 - **THEN** scheduling SHALL block with the missing entity/stage identity unless an explicit audited fallback policy allows text-only generation
 
-### Requirement: Exact references never fuzzy-fallback
-Reference resolution SHALL match stable entity and stage identifiers, not fuzzy names or nearest variants. A requested appearance stage SHALL never silently fall back to a prototype, another stage, another Character, or another Asset. A stale, rejected, unapproved, cross-project, or hash-mismatched Asset SHALL be ineligible.
+#### Scenario: Default behavior is unchanged
+- **WHEN** a project has never enabled `REFERENCE_CONDITIONED`
+- **THEN** Scene image generation SHALL behave exactly as the text-only workflow including its provenance warning for unused reference identifiers
 
-#### Scenario: Similar stage name exists
-- **WHEN** a Shot requests stage `winter-coat` and only `winter-coat-damaged` exists
-- **THEN** resolution SHALL report `winter-coat` missing and SHALL not bind the similar stage
+#### Scenario: Conditioned request without references fails explicitly
+- **WHEN** a user requests `REFERENCE_CONDITIONED` generation for a Scene with no eligible approved character reference
+- **THEN** scheduling SHALL fail with a bounded prerequisite error naming the missing prerequisite and no job SHALL be created
 
 ## ADDED Requirements
 
@@ -29,3 +34,11 @@ A production Shot with a canonical Location SHALL retain Location conditioning a
 #### Scenario: Condition a close-up
 - **WHEN** a close-up has an exact Character-stage reference and canonical Location reference
 - **THEN** both bindings SHALL remain present, Character identity SHALL receive higher prompt priority, and background text SHALL describe a limited local slice rather than dropping Location continuity
+
+### Requirement: Exact references never fuzzy-fallback
+Reference resolution SHALL match stable entity and stage identifiers, not fuzzy names or nearest variants. A requested appearance stage SHALL never silently fall back to a prototype, another stage, another Character, or another Asset. A stale, rejected, unapproved, cross-project, or hash-mismatched Asset SHALL be ineligible.
+
+#### Scenario: Similar stage name exists
+- **WHEN** a Shot requests stage `winter-coat` and only `winter-coat-damaged` exists
+- **THEN** resolution SHALL report `winter-coat` missing and SHALL not bind the similar stage
+

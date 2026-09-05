@@ -34,16 +34,36 @@ Completing a candidate set SHALL not replace an already accepted current image. 
 - **WHEN** one candidate completes for a Scene without a Shot plan or current image and both human approval and required automatic quality gating are disabled
 - **THEN** that candidate MAY become current without changing its `UNREVIEWED` manual review status
 
-### Requirement: Feedback regeneration is deterministic and bounded
+### Requirement: Feedback regeneration is deterministic and Scene-scoped
 The system SHALL build bounded regeneration guidance deterministically from critic/manual issues, notes, original Shot package, structured camera/composition/action/Location/object intent, and unchanged exact reference bindings. Automatic regeneration MAY occur only within the ProductionProfile image regeneration limit and resource caps. Technical retry SHALL preserve the same intended candidate. Exhausted semantic failures SHALL become manual-review-required or blocked rather than loop or pass silently.
 
 #### Scenario: Automatic regeneration exhausts
 - **WHEN** all candidates fail and the configured regeneration limit is reached
 - **THEN** no further candidate job SHALL be created and downstream video SHALL remain blocked pending policy resolution
 
-### Requirement: Image approval policy is independent from automatic QC
+#### Scenario: Reinforce composition and missing object
+- **WHEN** a rejected candidate has `WRONG_COMPOSITION` and `MISSING_OBJECT`
+- **THEN** regeneration guidance SHALL reinforce the persisted Scene composition and important-object intent in a deterministic order without calling an LLM
+
+#### Scenario: Regenerate reference pose bleed
+- **WHEN** a reference-conditioned candidate has `REFERENCE_POSE_BLEED`
+- **THEN** feedback SHALL reinforce Scene framing, composition, pose, and action while retaining the exact explicit character-to-reference mapping from the new current package
+
+#### Scenario: No automatic regeneration loop
+- **WHEN** a feedback-regenerated candidate completes with a warning or failing review
+- **THEN** the system SHALL wait for another explicit user action and SHALL NOT score or regenerate it automatically
+
+### Requirement: Image approval policy is optional and non-generative
 Project and ProductionProfile settings SHALL distinguish required automatic image quality gates from required human image approval. MANUAL_REVIEW SHALL run critics and pause for human approval. BALANCED SHALL auto-accept a clear passing result and escalate uncertainty or exhaustion. AUTO SHALL run critics, ranking, retries, and auto-acceptance and SHALL escalate only exhausted retries, hard prerequisites, required-provider unavailability, or configured uncertainty. Changing human approval alone SHALL not change generation fingerprints.
 
 #### Scenario: AUTO still runs critics
 - **WHEN** an AUTO production Shot image completes
 - **THEN** automatic image evaluation SHALL run before the image can become an eligible video keyframe
+
+#### Scenario: Approval gate is enabled
+- **WHEN** `requireImageApproval` is enabled and the Scene's current image is unreviewed
+- **THEN** downstream image readiness SHALL report approval missing even though the image generation completed
+
+#### Scenario: Approval policy changes
+- **WHEN** a user toggles only `requireImageApproval`
+- **THEN** existing image freshness and fingerprints SHALL remain unchanged and no generation job SHALL be invalidated or scheduled
